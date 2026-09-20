@@ -32,11 +32,12 @@ func parseRequires(data []byte) []string {
 			continue
 		}
 
-		switch {
-		case trimmed == "require (":
-			inBlock = true
-		case strings.HasPrefix(trimmed, "require "):
-			rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "require"))
+		if rest, ok := cutKeyword(trimmed, "require"); ok {
+			rest = strings.TrimSpace(rest)
+			if rest == "(" {
+				inBlock = true
+				continue
+			}
 			if m := firstField(rest); m != "" {
 				modules = append(modules, m)
 			}
@@ -62,6 +63,28 @@ func firstField(s string) string {
 		return ""
 	}
 	return fields[0]
+}
+
+// cutKeyword strips a go.mod block keyword (e.g. "require", "replace") from
+// the start of s and returns what follows, unparsed. It requires the
+// keyword be followed by whitespace or "(" so it doesn't match a module
+// path that happens to start with the same letters. go.mod's own lexer
+// (golang.org/x/mod/modfile) treats "require(", "require\t(", and
+// "require  (" identically to the gofmt-canonical "require (" — there's no
+// space requirement — so callers must not rely on an exact-string match
+// against "require (".
+func cutKeyword(s, kw string) (rest string, ok bool) {
+	if !strings.HasPrefix(s, kw) {
+		return "", false
+	}
+	rest = s[len(kw):]
+	if rest == "" {
+		return "", false
+	}
+	if c := rest[0]; c != ' ' && c != '\t' && c != '(' {
+		return "", false
+	}
+	return rest, true
 }
 
 // replaceTarget is the right-hand side of a go.mod replace directive.
@@ -97,11 +120,13 @@ func parseReplaces(data []byte) map[string]replaceTarget {
 			continue
 		}
 
-		switch {
-		case trimmed == "replace (":
-			inBlock = true
-		case strings.HasPrefix(trimmed, "replace "):
-			addReplace(out, strings.TrimSpace(strings.TrimPrefix(trimmed, "replace")))
+		if rest, ok := cutKeyword(trimmed, "replace"); ok {
+			rest = strings.TrimSpace(rest)
+			if rest == "(" {
+				inBlock = true
+				continue
+			}
+			addReplace(out, rest)
 		}
 	}
 	return out

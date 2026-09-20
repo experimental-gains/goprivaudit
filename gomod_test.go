@@ -47,6 +47,26 @@ func TestParseRequiresSingleLineOnly(t *testing.T) {
 	}
 }
 
+func TestParseRequiresBlockNoSpaceBeforeParen(t *testing.T) {
+	// go.mod's real lexer (golang.org/x/mod/modfile) doesn't require a
+	// space between the "require" keyword and "(" — gofmt just always
+	// produces one. Confirmed against `go mod edit -json` on a hand-
+	// written go.mod using "require(".
+	got := parseRequires([]byte("module example.com/foo\n\nrequire(\n\tgithub.com/pkg/errors v0.9.1\n)\n"))
+	want := []string{"github.com/pkg/errors"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseRequiresBlockTabBeforeParen(t *testing.T) {
+	got := parseRequires([]byte("module example.com/foo\n\nrequire\t(\n\tgithub.com/pkg/errors v0.9.1\n)\n"))
+	want := []string{"github.com/pkg/errors"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestParseReplacesLocalAndModuleSingleLine(t *testing.T) {
 	src := `module example.com/foo
 
@@ -78,6 +98,17 @@ replace (
 	want := map[string]replaceTarget{
 		"example.com/bar": {path: "./local/bar", isLocal: true},
 		"example.com/baz": {path: "example.com/myorg/baz", isLocal: false},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseReplacesBlockNoSpaceBeforeParen(t *testing.T) {
+	src := "module example.com/foo\n\nreplace(\n\texample.com/bar => ./local/bar\n)\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: "./local/bar", isLocal: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)

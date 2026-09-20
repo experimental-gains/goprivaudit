@@ -52,7 +52,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.5
+- uses: experimental-gains/goprivaudit@v0.1.6
 ```
 
 Flags, mainly for testing/CI overrides:
