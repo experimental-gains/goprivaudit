@@ -15,12 +15,16 @@ runs:
   steps:
     - name: Install goprivaudit
       shell: bash
+      env:
+        GOPRIVAUDIT_VERSION: ${{ inputs.version }}
       run: |
-        go install "github.com/experimental-gains/goprivaudit@${{ inputs.version }}"
+        go install "github.com/experimental-gains/goprivaudit@${GOPRIVAUDIT_VERSION}"
         echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
     - name: Run goprivaudit
       shell: bash
-      run: goprivaudit ${{ inputs.args }}
+      env:
+        GOPRIVAUDIT_ARGS: ${{ inputs.args }}
+      run: goprivaudit ${GOPRIVAUDIT_ARGS}
 branding:
   icon: 'lock'
   color: 'blue'
