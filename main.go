@@ -45,7 +45,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		fmt.Fprintf(stderr, "goprivaudit: %v\n", err)
 		return 2
 	}
-	modules := parseRequires(data)
+	modules := resolveEffectiveModules(parseRequires(data), parseReplaces(data))
 
 	privateSet, nosumdbSet := false, false
 	fs.Visit(func(f *flag.Flag) {

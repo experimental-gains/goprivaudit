@@ -95,6 +95,58 @@ func TestRunMissingGoMod(t *testing.T) {
 	}
 }
 
+func TestRunLocallyReplacedModuleNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-lib v0.0.0-20230101000000-abcdef123456
+
+replace github.com/myorg/internal-lib => ../internal-lib
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: a locally-replaced module is never fetched over the network, so it can't leak to sumdb regardless of GOPRIVATE; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("expected no leak for a locally-replaced module, got: %s", stdout)
+	}
+}
+
+func TestRunForkReplaceChecksReplacementPath(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/upstream/lib v1.0.0
+
+replace github.com/upstream/lib => github.com/myorg/lib-fork v1.0.0-patched
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: the replacement fork is the path actually fetched and is privately hosted; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/lib-fork") {
+		t.Errorf("stdout missing expected leak on the replacement path, not the original: %s", stdout)
+	}
+}
+
 func TestRunPrivateOverrideCoversLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app

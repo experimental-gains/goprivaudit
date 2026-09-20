@@ -63,3 +63,81 @@ func firstField(s string) string {
 	}
 	return fields[0]
 }
+
+// replaceTarget is the right-hand side of a go.mod replace directive.
+type replaceTarget struct {
+	path    string
+	isLocal bool // true if the replacement is a filesystem path, not a module
+}
+
+// parseReplaces extracts replace directives, keyed by the original module
+// path being replaced. A go.mod replace can point at either another module
+// (network-fetched, same as any other require) or a local filesystem path
+// (per the go.mod spec, any target beginning with "./", "../", or "/" —
+// never network-fetched at all, since the go tool reads it straight off
+// disk). Both change what, if anything, should actually be checked against
+// GOPRIVATE/GONOSUMDB in place of the original required path.
+func parseReplaces(data []byte) map[string]replaceTarget {
+	out := map[string]replaceTarget{}
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			addReplace(out, trimmed)
+			continue
+		}
+
+		switch {
+		case trimmed == "replace (":
+			inBlock = true
+		case strings.HasPrefix(trimmed, "replace "):
+			addReplace(out, strings.TrimSpace(strings.TrimPrefix(trimmed, "replace")))
+		}
+	}
+	return out
+}
+
+func addReplace(out map[string]replaceTarget, entry string) {
+	lhs, rhs, ok := strings.Cut(entry, "=>")
+	if !ok {
+		return
+	}
+	oldPath := firstField(strings.TrimSpace(lhs))
+	newPath := firstField(strings.TrimSpace(rhs))
+	if oldPath == "" || newPath == "" {
+		return
+	}
+	local := strings.HasPrefix(newPath, "./") || strings.HasPrefix(newPath, "../") || strings.HasPrefix(newPath, "/")
+	out[oldPath] = replaceTarget{path: newPath, isLocal: local}
+}
+
+// resolveEffectiveModules applies replace directives to a list of required
+// module paths, producing the paths actually fetched over the network: a
+// locally-replaced module is dropped entirely (go reads it off disk, so it
+// can never leak to sum.golang.org regardless of GOPRIVATE), and a
+// module-replaced one is swapped for its replacement's path (that's the
+// path go actually queries the proxy/sumdb for).
+func resolveEffectiveModules(modules []string, replaces map[string]replaceTarget) []string {
+	var out []string
+	for _, m := range modules {
+		if r, ok := replaces[m]; ok {
+			if r.isLocal {
+				continue
+			}
+			out = append(out, r.path)
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
