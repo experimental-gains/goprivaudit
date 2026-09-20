@@ -25,6 +25,12 @@ It makes no network calls. Everything it checks — `go.mod`, git config,
 go install github.com/experimental-gains/goprivaudit@latest
 ```
 
+Or via Homebrew:
+
+```sh
+brew install experimental-gains/tap/goprivaudit
+```
+
 ## Usage
 
 ```sh
