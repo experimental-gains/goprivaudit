@@ -40,7 +40,7 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 			continue
 		}
 		if key == "insteadof" || key == "pushinsteadof" {
-			if p := normalizeToModulePrefix(value); p != "" {
+			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
 				prefixes = append(prefixes, p)
 			}
 		}
@@ -90,4 +90,29 @@ func finishPrefix(s string) string {
 		return ""
 	}
 	return s
+}
+
+// knownPublicGitHosts are multi-tenant code hosts where a bare-host
+// insteadOf rewrite (no org/path segment) is Go's own documented pattern
+// for blanket SSH auth convenience, not a signal that the whole host is
+// private. See the go.dev FAQ ("Why does 'go get' use HTTPS..."), whose
+// exact recommended snippet is `[url "ssh://git@github.com/"] insteadOf =
+// https://github.com/` — rewriting *all* of github.com, not a private
+// org. Treating that as "this module has a private-auth signal" makes
+// every public dependency on the host look like a sumdb leak. A bare-host
+// rewrite for anything not in this list (e.g. a private GitHub
+// Enterprise instance) still counts as private, since there's no public
+// multi-tenant use of that host to confuse it with.
+var knownPublicGitHosts = map[string]bool{
+	"github.com":    true,
+	"gitlab.com":    true,
+	"bitbucket.org": true,
+	"sr.ht":         true,
+	"git.sr.ht":     true,
+	"gitee.com":     true,
+	"codeberg.org":  true,
+}
+
+func isKnownPublicHost(prefix string) bool {
+	return !strings.Contains(prefix, "/") && knownPublicGitHosts[prefix]
 }
