@@ -69,11 +69,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		gonosumdb = goprivate // GOPRIVATE is the fallback default for GONOSUMDB
 	}
 
+	moduleDir := filepath.Dir(*gomodPath)
+	visited := map[string]bool{}
 	var prefixes []string
-	for _, p := range gitConfigCandidates(filepath.Dir(*gomodPath)) {
-		if cfg, err := os.ReadFile(p); err == nil {
-			prefixes = append(prefixes, privatePrefixesFromGitConfig(cfg)...)
-		}
+	for _, p := range gitConfigCandidates(moduleDir) {
+		prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
 	}
 
 	r := audit(modules, prefixes, splitPatterns(gonosumdb))

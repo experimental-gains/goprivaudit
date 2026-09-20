@@ -1,7 +1,9 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -97,5 +99,81 @@ func TestNormalizeToModulePrefix(t *testing.T) {
 		if got := normalizeToModulePrefix(in); got != want {
 			t.Errorf("normalizeToModulePrefix(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestParseIncludes(t *testing.T) {
+	src := `[user]
+	name = someone
+
+[include]
+	path = ~/.gitconfig-private
+
+[includeIf "gitdir:~/work/"]
+	path = ~/.gitconfig-work
+
+[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`
+	got := parseIncludes([]byte(src))
+	want := []includeDirective{
+		{cond: "", path: "~/.gitconfig-private"},
+		{cond: "gitdir:~/work/", path: "~/.gitconfig-work"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestIncludeIfMatchesGitdir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	cases := []struct {
+		cond   string
+		dir    string
+		want   bool
+		reason string
+	}{
+		{"gitdir:" + home + "/work/", home + "/work/app", true, "exact prefix"},
+		{"gitdir:" + home + "/work/", home + "/personal/app", false, "outside prefix"},
+		{"gitdir:~/work/", home + "/work/app", true, "tilde expansion"},
+		{"gitdir:" + home + "/work/", home + "/workshop/app", false, "sibling dir sharing a string prefix must not match ('work' vs 'workshop')"},
+		{"gitdir/i:" + strings.ToUpper(home) + "/WORK/", home + "/work/app", true, "case-insensitive variant"},
+		{"onbranch:main", home + "/work/app", false, "unsupported condition kind never matches"},
+	}
+	for _, c := range cases {
+		if got := includeIfMatches(c.cond, c.dir); got != c.want {
+			t.Errorf("includeIfMatches(%q, %q) = %v, want %v (%s)", c.cond, c.dir, got, c.want, c.reason)
+		}
+	}
+}
+
+func TestPrivatePrefixesFromConfigFileFollowsInclude(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "included.gitconfig", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "config", `[include]
+	path = ./included.gitconfig
+`)
+	got := privatePrefixesFromConfigFile(filepath.Join(dir, "config"), dir, map[string]bool{})
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestPrivatePrefixesFromConfigFileIncludeCycleTerminates(t *testing.T) {
+	dir := t.TempDir()
+	a := writeFile(t, dir, "a.gitconfig", `[include]
+	path = ./b.gitconfig
+`)
+	writeFile(t, dir, "b.gitconfig", `[include]
+	path = ./a.gitconfig
+`)
+	// Must return (not hang) even though a includes b includes a.
+	got := privatePrefixesFromConfigFile(a, dir, map[string]bool{})
+	if got != nil {
+		t.Errorf("got %v, want nil", got)
 	}
 }

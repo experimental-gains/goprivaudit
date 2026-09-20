@@ -2,11 +2,16 @@ package main
 
 import (
 	"bufio"
+	"os"
+	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
 
 var urlSectionRe = regexp.MustCompile(`^\[url\s+"([^"]*)"\]$`)
+var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
+var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 
 // privatePrefixesFromGitConfig scans a gitconfig file's contents for
 //
@@ -52,6 +57,192 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
 				prefixes = append(prefixes, p)
 			}
+		}
+	}
+	return prefixes
+}
+
+// includeDirective is a raw [include]/[includeIf "..."] path entry found
+// while scanning a git config file. cond is empty for an unconditional
+// [include]; for [includeIf "kind:pattern"] it holds the "kind:pattern"
+// text verbatim.
+type includeDirective struct {
+	cond string
+	path string
+}
+
+// parseIncludes scans a gitconfig file's contents for [include] and
+// [includeIf "..."] sections and returns their "path" values, in the order
+// git itself applies them (top to bottom, interleaved with any [url]
+// sections — see privatePrefixesFromConfigFile).
+func parseIncludes(data []byte) []includeDirective {
+	var out []includeDirective
+	section := "" // "" | "include" | "includeif"
+	cond := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			switch {
+			case includeSectionRe.MatchString(line):
+				section, cond = "include", ""
+			case includeIfSectionRe.MatchString(line):
+				m := includeIfSectionRe.FindStringSubmatch(line)
+				section, cond = "includeif", m[1]
+			default:
+				section = ""
+			}
+			continue
+		}
+		if section == "" {
+			continue
+		}
+		key, value, ok := splitKV(line)
+		if !ok || key != "path" {
+			continue
+		}
+		out = append(out, includeDirective{cond: cond, path: value})
+	}
+	return out
+}
+
+// resolveIncludePath turns an [include]/[includeIf] "path" value into an
+// absolute filesystem path, per git-config(1)'s rules: a leading "~/" is
+// the user's home directory, an already-absolute path is used as-is, and
+// anything else is relative to the directory containing the config file
+// that referenced it.
+func resolveIncludePath(value, configFileDir string) string {
+	value = strings.Trim(value, `"`)
+	if value == "" {
+		return ""
+	}
+	if strings.HasPrefix(value, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(home, value[2:])
+	}
+	if filepath.IsAbs(value) {
+		return value
+	}
+	return filepath.Join(configFileDir, value)
+}
+
+// includeIfMatches reports whether an [includeIf "cond"] condition applies
+// when git is run inside moduleDir. Only the "gitdir:"/"gitdir/i:" forms are
+// supported (by far the most common use of includeIf — scoping a different
+// identity/rewrite to everything under a directory tree, e.g. a work vs.
+// personal SSH setup); "onbranch:"/"hasconfig:" and other forms are treated
+// as non-matching rather than guessed at.
+func includeIfMatches(cond, moduleDir string) bool {
+	kind, pattern, ok := strings.Cut(cond, ":")
+	if !ok {
+		return false
+	}
+	caseInsensitive := kind == "gitdir/i"
+	if kind != "gitdir" && !caseInsensitive {
+		return false
+	}
+
+	target, err := filepath.Abs(moduleDir)
+	if err != nil {
+		return false
+	}
+	target = filepath.ToSlash(target) + "/"
+	pattern = expandGitdirPattern(pattern)
+	if caseInsensitive {
+		pattern = strings.ToLower(pattern)
+		target = strings.ToLower(target)
+	}
+	return matchGitdirGlob(pattern, target)
+}
+
+// expandGitdirPattern applies git's documented normalization for gitdir
+// patterns (see git-config(1), "Conditional includes"): "~/" becomes the
+// home directory, a pattern with no leading "~/", "/", or "./" is treated
+// as matching anywhere in the tree (prefixed with "**/"), and a
+// trailing "/" gets an implicit "**" so a bare directory prefix still
+// matches everything under it.
+func expandGitdirPattern(p string) string {
+	switch {
+	case strings.HasPrefix(p, "~/"):
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.ToSlash(home) + "/" + p[2:]
+		}
+	case !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "./"):
+		p = "**/" + p
+	}
+	if strings.HasSuffix(p, "/") {
+		p += "**"
+	}
+	return p
+}
+
+// matchGitdirGlob matches a "/"-separated pattern (which may contain "**"
+// segments matching zero or more path segments, the same as git's gitdir
+// glob) against a "/"-separated target path.
+func matchGitdirGlob(pattern, target string) bool {
+	return globMatchSegs(strings.Split(pattern, "/"), strings.Split(target, "/"))
+}
+
+func globMatchSegs(pSegs, tSegs []string) bool {
+	for len(pSegs) > 0 {
+		if pSegs[0] == "**" {
+			if len(pSegs) == 1 {
+				return true
+			}
+			for i := 0; i <= len(tSegs); i++ {
+				if globMatchSegs(pSegs[1:], tSegs[i:]) {
+					return true
+				}
+			}
+			return false
+		}
+		if len(tSegs) == 0 {
+			return false
+		}
+		if ok, err := path.Match(pSegs[0], tSegs[0]); err != nil || !ok {
+			return false
+		}
+		pSegs, tSegs = pSegs[1:], tSegs[1:]
+	}
+	return len(tSegs) == 0
+}
+
+// privatePrefixesFromConfigFile reads the git config file at path and
+// returns its insteadOf-derived private prefixes, following any
+// [include]/[includeIf "gitdir:..."] directives it contains the way git
+// itself would when run inside moduleDir. visited guards against include
+// cycles and is shared across the whole call tree (including across the
+// separate ~/.gitconfig and <module>/.git/config roots) so a file is only
+// ever read once.
+func privatePrefixesFromConfigFile(configPath, moduleDir string, visited map[string]bool) []string {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil
+	}
+	if visited[abs] {
+		return nil
+	}
+	visited[abs] = true
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+
+	prefixes := privatePrefixesFromGitConfig(data)
+	dir := filepath.Dir(configPath)
+	for _, inc := range parseIncludes(data) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+			continue
+		}
+		if p := resolveIncludePath(inc.path, dir); p != "" {
+			prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
 		}
 	}
 	return prefixes

@@ -52,7 +52,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.4
+- uses: experimental-gains/goprivaudit@v0.1.5
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -79,6 +79,13 @@ Any `go.mod` dependency whose path falls under a rewritten prefix is
 treated as having a private-auth signal, then checked against
 `GOPRIVATE`/`GONOSUMDB` using the same glob-per-path-segment, prefix-match
 semantics the `go` command itself uses (see `go help goproxy`).
+
+`[include]` and `[includeIf "gitdir:..."]`/`"gitdir/i:..."` directives
+(git-config(1)'s "Includes" — the standard way to scope a different
+identity or rewrite to everything under one directory tree, e.g. a work
+vs. personal setup) are followed the way git itself resolves them, so a
+rewrite living in an included file is still caught. Other `includeIf`
+condition kinds (`onbranch:`, `hasconfig:`, ...) aren't evaluated.
 
 ## What it does not do
 

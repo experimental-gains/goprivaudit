@@ -68,6 +68,79 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunFindsLeakViaGitConfigInclude covers a real, common git config
+// pattern this tool previously missed entirely: an insteadOf rewrite
+// living in a file pulled in via [include] rather than written directly
+// in ~/.gitconfig or the repo's .git/config. Verified against real git
+// (`git config --get-urlmatch`) that git resolves the rewrite from the
+// included file exactly as if it were inline — the pre-fix code only
+// ever scanned the two files it already knew about verbatim, so this
+// config silently produced "no issues found" for a module that really
+// was leaking to sumdb.
+func TestRunFindsLeakViaGitConfigInclude(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".gitconfig-private", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, home, ".gitconfig", `[user]
+	name = someone
+[include]
+	path = ~/.gitconfig-private
+`)
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaGitConfigIncludeIf covers the other common form:
+// [includeIf "gitdir:..."], used to scope a different rewrite (e.g. a
+// work identity) to everything under one directory tree. The condition
+// must actually gate the include — a module outside the matching tree
+// must stay clean, or the tool would just be treating every includeIf as
+// unconditional.
+func TestRunFindsLeakViaGitConfigIncludeIf(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".gitconfig-work", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, home, ".gitconfig", `[includeIf "gitdir:~/work/"]
+	path = ~/.gitconfig-work
+`)
+	t.Setenv("HOME", home)
+
+	gomodBody := `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`
+	workGomod := writeFile(t, home, "work/app/go.mod", gomodBody)
+	personalGomod := writeFile(t, home, "personal/app/go.mod", gomodBody)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", workGomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("under matching gitdir: exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("under matching gitdir: stdout missing expected leak finding: %s", stdout)
+	}
+
+	stdout, _, code = captureRun(t, []string{"-gomod", personalGomod, "-private", "", "-nosumdb", ""})
+	if code != 0 {
+		t.Errorf("outside matching gitdir: exit code = %d, want 0 (condition shouldn't apply); stdout=%s", code, stdout)
+	}
+}
+
 func TestRunClean(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
