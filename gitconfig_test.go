@@ -20,9 +20,29 @@ func TestPrivatePrefixesFromGitConfig(t *testing.T) {
 	editor = vim
 `
 	got := privatePrefixesFromGitConfig([]byte(src))
-	want := []string{"github.com/myorg", "example.com"}
+	want := []string{"github.com/myorg"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigIgnoresPushInsteadOf covers a common
+// personal/CI git config pattern: fetch anonymously over public HTTPS,
+// but push over authenticated SSH, scoped to a specific org (not just a
+// bare host, so the run #53 known-public-host exclusion alone wouldn't
+// catch this). Verified against real git behavior (`git ls-remote`/`git
+// fetch` with only pushInsteadOf configured still hit the original public
+// HTTPS URL) that pushInsteadOf never affects the fetch path `go get`
+// uses, so it can't create a sumdb leak and shouldn't be treated as a
+// private-auth signal at all — found by testing against a real module
+// (github.com/kubernetes/client-go) with this exact org-scoped
+// pushInsteadOf-only config, which the pre-fix code flagged as a leak.
+func TestPrivatePrefixesFromGitConfigIgnoresPushInsteadOf(t *testing.T) {
+	src := `[url "git@github.com:kubernetes/"]
+	pushInsteadOf = https://github.com/kubernetes/
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (pushInsteadOf-only doesn't affect fetch), got %v", got)
 	}
 }
 

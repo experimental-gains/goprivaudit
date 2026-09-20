@@ -19,6 +19,15 @@ var urlSectionRe = regexp.MustCompile(`^\[url\s+"([^"]*)"\]$`)
 // normalized into a module-path-style prefix (scheme and trailing .git/
 // stripped), since that's the form that module paths in go.mod are written
 // in and the form GOPRIVATE patterns need to cover.
+//
+// Only "insteadOf" counts as a signal here, not "pushInsteadOf": git only
+// rewrites fetch/clone URLs for the former (verified against real git
+// behavior — a pushInsteadOf-only config leaves `git ls-remote`/`git
+// fetch` hitting the original public HTTPS URL unchanged). `go get`'s
+// module fetches are a read path, so a pushInsteadOf-only rewrite (a
+// common pattern: anonymous HTTPS for reads, authenticated SSH only for
+// pushes) never makes the fetch private, and treating it as a sumdb-leak
+// signal would flag every ordinary public dependency under that prefix.
 func privatePrefixesFromGitConfig(data []byte) []string {
 	var prefixes []string
 	inURLSection := false
@@ -39,7 +48,7 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 		if !ok {
 			continue
 		}
-		if key == "insteadof" || key == "pushinsteadof" {
+		if key == "insteadof" {
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
 				prefixes = append(prefixes, p)
 			}
