@@ -55,14 +55,56 @@ func stripComment(line string) string {
 	return line
 }
 
-// firstField returns the first whitespace-separated token, which for a
-// require-block entry is the module path (the second token is the version).
+// firstField returns the first field of s: for a require-block entry this
+// is the module path (the second token is the version); for a replace
+// directive's right-hand side it's the replacement path. go.mod's real
+// lexer (golang.org/x/mod/modfile) allows any token to be written as a
+// double- or backtick-quoted Go string literal instead of a bare word —
+// `go mod edit` does this itself for a local replace path containing a
+// space (e.g. replace foo => "../my mod"), which `go build` accepts fine.
+// A naive whitespace split truncates that at the space and leaves a stray
+// quote character, so a quoted token is unquoted first.
 func firstField(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if s[0] == '"' || s[0] == '`' {
+		if tok, ok := leadingQuotedString(s); ok {
+			return tok
+		}
+	}
 	fields := strings.Fields(s)
 	if len(fields) == 0 {
 		return ""
 	}
 	return fields[0]
+}
+
+// leadingQuotedString parses a double- or backtick-quoted Go string literal
+// at the start of s and returns its unquoted value. Double-quoted strings
+// honor backslash escapes (e.g. \" \\); backtick-quoted raw strings don't.
+func leadingQuotedString(s string) (string, bool) {
+	if s[0] == '`' {
+		if i := strings.IndexByte(s[1:], '`'); i >= 0 {
+			return s[1 : i+1], true
+		}
+		return "", false
+	}
+	var b strings.Builder
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if c == '\\' && i+1 < len(s) {
+			b.WriteByte(s[i+1])
+			i++
+			continue
+		}
+		if c == '"' {
+			return b.String(), true
+		}
+		b.WriteByte(c)
+	}
+	return "", false
 }
 
 // cutKeyword strips a go.mod block keyword (e.g. "require", "replace") from

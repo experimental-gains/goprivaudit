@@ -115,6 +115,34 @@ func TestParseReplacesBlockNoSpaceBeforeParen(t *testing.T) {
 	}
 }
 
+func TestParseReplacesQuotedLocalPathWithSpace(t *testing.T) {
+	// `go mod edit` writes a local replace path this way when it contains
+	// a space, and `go build` accepts it — verified against the real go
+	// toolchain (module.CheckPath doesn't apply to filesystem replace
+	// targets). A naive whitespace split truncates at the space and
+	// leaves a stray leading quote, misclassifying the target as a
+	// module path instead of a local one.
+	src := "module example.com/foo\n\nreplace example.com/bar => \"../my mod\"\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: "../my mod", isLocal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseReplacesBacktickQuotedLocalPath(t *testing.T) {
+	src := "module example.com/foo\n\nreplace example.com/bar => `../my mod`\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: "../my mod", isLocal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestParseReplacesNone(t *testing.T) {
 	if got := parseReplaces([]byte("module example.com/foo\n")); len(got) != 0 {
 		t.Errorf("expected no replaces, got %v", got)
