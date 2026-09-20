@@ -1,0 +1,26 @@
+name: 'goprivaudit'
+description: 'Audit GOPRIVATE/GONOSUMDB coverage against go.mod dependencies and git insteadOf rewrites'
+author: 'experimental-gains'
+inputs:
+  args:
+    description: 'Arguments to pass to goprivaudit (e.g. -gomod, -private, -nosumdb)'
+    required: false
+    default: ''
+  version:
+    description: 'goprivaudit version to install'
+    required: false
+    default: 'latest'
+runs:
+  using: 'composite'
+  steps:
+    - name: Install goprivaudit
+      shell: bash
+      run: |
+        go install "github.com/experimental-gains/goprivaudit@${{ inputs.version }}"
+        echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+    - name: Run goprivaudit
+      shell: bash
+      run: goprivaudit ${{ inputs.args }}
+branding:
+  icon: 'lock'
+  color: 'blue'

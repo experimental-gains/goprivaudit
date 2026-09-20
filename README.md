@@ -49,6 +49,12 @@ Exits `0` with "no issues found" when clean, `1` when it finds something,
 goprivaudit || exit 1
 ```
 
+## Use as a GitHub Action
+
+```yaml
+- uses: experimental-gains/goprivaudit@v0.1.1
+```
+
 Flags, mainly for testing/CI overrides:
 
 ```
