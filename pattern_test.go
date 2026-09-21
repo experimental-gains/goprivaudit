@@ -59,13 +59,13 @@ func TestSplitPatterns(t *testing.T) {
 }
 
 func TestIsOverlyBroadPattern(t *testing.T) {
-	broad := []string{"*", "**", "*/"}
+	broad := []string{"*", "**", "*/", "*/*", "*/**", "**/**", "*/*/*"}
 	for _, p := range broad {
 		if !isOverlyBroadPattern(p) {
 			t.Errorf("expected %q to be flagged as overly broad", p)
 		}
 	}
-	notBroad := []string{"github.com/myorg/*", "*.corp.example.com", "github.com"}
+	notBroad := []string{"github.com/myorg/*", "*.corp.example.com", "github.com", "github.com/*"}
 	for _, p := range notBroad {
 		if isOverlyBroadPattern(p) {
 			t.Errorf("expected %q to NOT be flagged as overly broad", p)

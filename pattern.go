@@ -58,9 +58,22 @@ func splitPatterns(v string) []string {
 // isOverlyBroadPattern reports whether pattern matches essentially every
 // module path regardless of host/org, which silently disables sumdb
 // checksum verification for public dependencies too, not just the intended
-// private ones.
+// private ones. A pattern is broad if every one of its segments is a bare
+// wildcard ("*" or "**") — per matchesPrefixPattern's prefix semantics
+// (mirroring the real `go` command's golang.org/x/mod/module.
+// MatchPrefixPatterns, verified live), such a pattern imposes no actual
+// host/org constraint at all, just a minimum segment count, and almost
+// every real module path (github.com/org/repo, gopkg.in/pkg.vN, ...) has
+// at least 2-3 segments. Confirmed empirically: GONOSUMDB="*/*" matches
+// github.com/sirupsen/logrus, golang.org/x/mod, and gopkg.in/yaml.v2 alike
+// — just as broad as a bare "*" in practice, not the more-targeted pattern
+// its extra "/*" suggests to a human reading it.
 func isOverlyBroadPattern(pattern string) bool {
 	pattern = strings.TrimSuffix(pattern, "/")
-	segs := strings.Split(pattern, "/")
-	return len(segs) == 1 && (segs[0] == "*" || segs[0] == "**")
+	for _, s := range strings.Split(pattern, "/") {
+		if s != "*" && s != "**" {
+			return false
+		}
+	}
+	return true
 }
