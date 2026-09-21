@@ -79,7 +79,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.13
+- uses: experimental-gains/goprivaudit@v0.1.14
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -88,6 +88,7 @@ Flags, mainly for testing/CI overrides:
 -gomod string    path to the go.mod file to audit (default "go.mod")
 -private string  override GOPRIVATE instead of reading it from `go env`
 -nosumdb string  override GONOSUMDB instead of reading it from `go env`
+-gowork string   override the go.work path instead of reading GOWORK from `go env`
 ```
 
 ## Use with pre-commit
@@ -95,7 +96,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.13
+    rev: v0.1.14
     hooks:
       - id: goprivaudit
 ```
@@ -142,6 +143,14 @@ condition kinds (`onbranch:`, `hasconfig:`, ...) aren't evaluated.
 - Checks `require` entries and `tool` directives (Go 1.24+), including a
   `tool` line with no covering `require` — but doesn't walk the full
   transitive module graph (what those dependencies themselves require).
+
+If your module is part of a [Go workspace](https://go.dev/ref/mod#workspaces),
+the workspace's `go.work` can `replace` a dependency that your module's own
+`go.mod` never mentions replacing at all — and per `go help work`, a
+`go.work` replace overrides a conflicting `go.mod` replace, not the other
+way around. `goprivaudit` reads `go env GOWORK` (or `-gowork`) and applies
+those replaces on top of `go.mod`'s own before checking anything, so this
+is covered automatically; nothing extra to configure.
 
 ## License
 

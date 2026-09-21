@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -298,4 +299,54 @@ func resolveEffectiveModules(modules []string, replaces map[string]replaceTarget
 		out = append(out, m)
 	}
 	return out
+}
+
+// goWorkReplaces reads a go.work file's replace directives, using the same
+// grammar and parser as a go.mod's (go.work supports "go", "toolchain",
+// "use", and "replace" directives — the replace syntax is identical to
+// go.mod's). gowork is the path from `go env GOWORK` (or a test override):
+// empty when the module isn't part of a workspace, or "off" when workspace
+// mode is explicitly disabled (GOWORK=off) — both cases return nil. A
+// go.work that can't be read (e.g. a stale GOWORK pointing at a file that
+// no longer exists) is treated the same as "no workspace" rather than an
+// error, matching how a missing GOPRIVATE/GONOSUMDB is already tolerated.
+//
+// This exists because a workspace's go.work can replace a dependency that
+// a member module's own go.mod never mentions replacing at all — verified
+// live: `go list -m all` inside a workspace module resolves a require to
+// its go.work replacement target even though the module's go.mod shows
+// only the plain (unreplaced) require. Before this, goprivaudit only ever
+// read the single go.mod passed via -gomod, so a go.work replace that
+// points a public-looking require at a privately-rewritten host (or vice
+// versa) was invisible to it — the same class of silent miss the `tool`
+// directive gap was, but for a config surface outside go.mod entirely.
+func goWorkReplaces(gowork string) map[string]replaceTarget {
+	if gowork == "" || gowork == "off" {
+		return nil
+	}
+	data, err := os.ReadFile(gowork)
+	if err != nil {
+		return nil
+	}
+	return parseReplaces(data)
+}
+
+// mergeReplaces overlays a workspace's go.work replace directives on top of
+// a module's own go.mod replaces. Per `go help work`: "If a module is
+// replaced in both the workspace's go.work file and in the workspace
+// module's go.mod file, the replacement in the go.work file is used" — so
+// on a conflicting key, overlay wins; a go.work-only replace is simply
+// added.
+func mergeReplaces(base, overlay map[string]replaceTarget) map[string]replaceTarget {
+	if len(overlay) == 0 {
+		return base
+	}
+	merged := make(map[string]replaceTarget, len(base)+len(overlay))
+	for k, v := range base {
+		merged[k] = v
+	}
+	for k, v := range overlay {
+		merged[k] = v
+	}
+	return merged
 }

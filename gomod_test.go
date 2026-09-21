@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -179,6 +180,72 @@ func TestResolveEffectiveModulesNoReplace(t *testing.T) {
 	want := []string{"example.com/plain"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestGoWorkReplacesEmptyGowork(t *testing.T) {
+	if got := goWorkReplaces(""); got != nil {
+		t.Errorf("expected nil for empty gowork path, got %v", got)
+	}
+}
+
+func TestGoWorkReplacesOff(t *testing.T) {
+	if got := goWorkReplaces("off"); got != nil {
+		t.Errorf(`expected nil for gowork = "off", got %v`, got)
+	}
+}
+
+func TestGoWorkReplacesMissingFile(t *testing.T) {
+	if got := goWorkReplaces(filepath.Join(t.TempDir(), "no-such.work")); got != nil {
+		t.Errorf("expected nil for an unreadable go.work path, got %v", got)
+	}
+}
+
+func TestGoWorkReplacesParsesReplaceBlock(t *testing.T) {
+	dir := t.TempDir()
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+	./fork
+)
+
+replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
+`)
+	got := goWorkReplaces(gowork)
+	want := map[string]replaceTarget{
+		"github.com/foo/bar": {path: "git.internal.example.com/mirror/bar", isLocal: false},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestMergeReplacesOverlayWinsOnConflict(t *testing.T) {
+	base := map[string]replaceTarget{
+		"example.com/shared":     {path: "example.com/from-gomod", isLocal: false},
+		"example.com/gomod-only": {path: "../local", isLocal: true},
+	}
+	overlay := map[string]replaceTarget{
+		"example.com/shared":      {path: "example.com/from-gowork", isLocal: false},
+		"example.com/gowork-only": {path: "example.com/added-by-gowork", isLocal: false},
+	}
+	got := mergeReplaces(base, overlay)
+	want := map[string]replaceTarget{
+		"example.com/shared":      {path: "example.com/from-gowork", isLocal: false},
+		"example.com/gomod-only":  {path: "../local", isLocal: true},
+		"example.com/gowork-only": {path: "example.com/added-by-gowork", isLocal: false},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestMergeReplacesNilOverlayReturnsBaseUnchanged(t *testing.T) {
+	base := map[string]replaceTarget{"example.com/x": {path: "example.com/y", isLocal: false}}
+	got := mergeReplaces(base, nil)
+	if !reflect.DeepEqual(got, base) {
+		t.Errorf("got %v, want %v", got, base)
 	}
 }
 

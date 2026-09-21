@@ -38,6 +38,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	gomodPath := fs.String("gomod", "go.mod", "path to the go.mod file to audit")
 	privateOverride := fs.String("private", "", "override GOPRIVATE instead of reading it from `go env`")
 	nosumdbOverride := fs.String("nosumdb", "", "override GONOSUMDB instead of reading it from `go env`")
+	goworkOverride := fs.String("gowork", "", "override the go.work path instead of reading GOWORK from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -47,19 +48,28 @@ func run(args []string, stdout, stderr *os.File) int {
 		_, _ = fmt.Fprintf(stderr, "goprivaudit: %v\n", err)
 		return 2
 	}
-	requires := parseRequires(data)
-	modules := resolveEffectiveModules(requires, parseReplaces(data))
-	modules = append(modules, effectiveToolModules(parseTools(data), requires)...)
 
-	privateSet, nosumdbSet := false, false
+	privateSet, nosumdbSet, goworkSet := false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
 			privateSet = true
 		case "nosumdb":
 			nosumdbSet = true
+		case "gowork":
+			goworkSet = true
 		}
 	})
+
+	gowork := *goworkOverride
+	if !goworkSet {
+		gowork = goEnv("GOWORK")
+	}
+
+	requires := parseRequires(data)
+	replaces := mergeReplaces(parseReplaces(data), goWorkReplaces(gowork))
+	modules := resolveEffectiveModules(requires, replaces)
+	modules = append(modules, effectiveToolModules(parseTools(data), requires)...)
 
 	goprivate := *privateOverride
 	if !privateSet {

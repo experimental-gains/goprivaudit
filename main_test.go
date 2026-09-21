@@ -260,6 +260,122 @@ replace github.com/upstream/lib => github.com/myorg/lib-fork v1.0.0-patched
 	}
 }
 
+// TestRunFindsLeakViaGoWorkReplace is the direct regression test for the
+// gap this fixes: a go.work replace that overrides a go.mod require is
+// invisible if the tool only ever reads the single go.mod it was pointed
+// at. Verified live against the real toolchain (go list -m all inside a
+// workspace resolves the require to the go.work replacement target even
+// though the member module's own go.mod shows only the plain, unreplaced
+// require) before writing this — the pre-fix tool reported "no issues
+// found" for exactly this setup.
+func TestRunFindsLeakViaGoWorkReplace(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/foo/bar v1.2.3
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+
+replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@git.internal.example.com/"]
+	insteadOf = https://git.internal.example.com/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: the go.work replacement is the path actually fetched and is privately hosted; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.internal.example.com/mirror/bar") {
+		t.Errorf("stdout missing expected leak on the go.work replacement path: %s", stdout)
+	}
+}
+
+// TestRunGoWorkReplaceOverridesGoModReplace covers the documented
+// precedence rule (`go help work`): when both go.mod and go.work replace
+// the same module, the go.work replacement wins. Without this, a go.mod
+// replace pointing at a *safe* (covered or public, non-private) fork could
+// mask a go.work replace that actually sends the module to an uncovered
+// private host.
+func TestRunGoWorkReplaceOverridesGoModReplace(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/foo/bar v1.2.3
+
+replace github.com/foo/bar => github.com/safe-fork/bar v1.2.3
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+
+replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@git.internal.example.com/"]
+	insteadOf = https://git.internal.example.com/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: go.work's replace must take precedence over go.mod's; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "safe-fork") {
+		t.Errorf("stdout should not mention the shadowed go.mod replacement target: %s", stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.internal.example.com/mirror/bar") {
+		t.Errorf("stdout missing expected leak on the go.work replacement path: %s", stdout)
+	}
+}
+
+// TestRunGoWorkOffIgnored covers GOWORK=off (workspace mode explicitly
+// disabled) and an empty gowork (no workspace at all) both being treated
+// as "no go.work replaces to apply", not an error.
+func TestRunGoWorkOffIgnored(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", "off",
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: GOWORK=off must not suppress the plain go.mod leak; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak: %s", stdout)
+	}
+}
+
 func TestRunPrivateOverrideCoversLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
