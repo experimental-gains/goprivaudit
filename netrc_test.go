@@ -51,6 +51,23 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 			want: []string{"real.internal"},
 		},
 		{
+			// Regression test (mutation testing, run #125): a LIVED
+			// CONDITIONALS_NEGATION mutant on `line == ""` (the macro-exit
+			// check) went undetected by the single-body-line case above,
+			// because on the very first non-blank body line, both the
+			// correct code and the `!=` mutant hit the same `continue` —
+			// one via "still in macro, skip this line", the other via
+			// "macro just ended, skip this line too". The mutant only
+			// diverges on the *second* body line: it wrongly treats the
+			// macro as already closed and parses that line as real config.
+			// A two-line macro body is the minimum case that catches it.
+			name: "multi-line macdef body not scanned for machine tokens",
+			data: "macdef mymacro\nmachine fake1.internal login x password y\n" +
+				"machine fake2.internal login x password y\n\n" +
+				"machine real.internal\nlogin builder\npassword s3cr3t\n",
+			want: []string{"real.internal"},
+		},
+		{
 			name: "default token stops processing",
 			data: "machine before.internal\nlogin x\npassword y\n" +
 				"default\nlogin anon\npassword anon\n" +
