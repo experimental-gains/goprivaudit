@@ -54,6 +54,7 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	// Isolate from the real environment: HOME points at an empty temp dir
 	// with no ~/.gitconfig, so only the repo's .git/config is read.
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
 
 	stdout, _, code := captureRun(t, []string{
 		"-gomod", gomod,
@@ -88,6 +89,41 @@ func TestRunFindsLeakViaGitConfigInclude(t *testing.T) {
 	path = ~/.gitconfig-private
 `)
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaXDGGitConfig covers the git "global" config tier's
+// other file: $XDG_CONFIG_HOME/git/config (or ~/.config/git/config when
+// unset), which git reads in addition to ~/.gitconfig, not instead of it
+// (git-config(1), "Includes"/"FILES" — verified live: `git config
+// --get-regexp insteadof` with a rewrite placed only in this file, and no
+// ~/.gitconfig at all, still surfaces it). The pre-fix
+// gitConfigCandidates only ever listed ~/.gitconfig and the repo's
+// .git/config, so a rewrite kept in the XDG location — the default git
+// itself falls back to, and the location XDG-dotfiles-style setups tend
+// to use — silently produced "no issues found" for a module that really
+// was leaking to sumdb.
+func TestRunFindsLeakViaXDGGitConfig(t *testing.T) {
+	xdg := t.TempDir()
+	writeFile(t, xdg, "git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir()) // no ~/.gitconfig at all
+	t.Setenv("XDG_CONFIG_HOME", xdg)
 
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -119,6 +155,7 @@ func TestRunFindsLeakViaGitConfigIncludeIf(t *testing.T) {
 	path = ~/.gitconfig-work
 `)
 	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
 
 	gomodBody := `module example.com/app
 
@@ -148,6 +185,7 @@ func TestRunClean(t *testing.T) {
 require github.com/pkg/errors v0.9.1
 `)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
 
 	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
 	if code != 0 {
@@ -180,6 +218,7 @@ replace github.com/myorg/internal-lib => ../internal-lib
 	insteadOf = https://github.com/myorg/
 `)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
 
 	stdout, _, code := captureRun(t, []string{
 		"-gomod", gomod,
@@ -206,6 +245,7 @@ replace github.com/upstream/lib => github.com/myorg/lib-fork v1.0.0-patched
 	insteadOf = https://github.com/myorg/
 `)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
 
 	stdout, _, code := captureRun(t, []string{
 		"-gomod", gomod,
@@ -230,6 +270,7 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	insteadOf = https://github.com/myorg/
 `)
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "") // isolate from the real environment's XDG git config too
 
 	stdout, _, code := captureRun(t, []string{
 		"-gomod", gomod,

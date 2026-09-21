@@ -52,7 +52,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.9
+- uses: experimental-gains/goprivaudit@v0.1.10
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -65,8 +65,11 @@ Flags, mainly for testing/CI overrides:
 
 ## How it detects "this module should be private"
 
-It looks for git `insteadOf`/`pushInsteadOf` rewrites in `~/.gitconfig`
-and the module's `.git/config` — the standard way to point `go get` at an
+It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
+files the real `git config` global tier reads — `$XDG_CONFIG_HOME/git/config`
+(or `~/.config/git/config` when that's unset) and `~/.gitconfig`, both of
+which apply together, not one-or-the-other — plus the module's
+`.git/config`. This is the standard way to point `go get` at an
 authenticated SSH remote for a host you don't want to fetch anonymously,
 e.g.:
 
