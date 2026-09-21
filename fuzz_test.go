@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -102,6 +103,94 @@ func FuzzOverlyBroadPatternConsistency(f *testing.F) {
 		if starMatches && !patternMatches {
 			t.Fatalf("isOverlyBroadPattern(%q) = true, but it doesn't match %q even though a bare \"*\" does (oracle: x/mod MatchPrefixPatterns) — false claim of broadness",
 				pattern, target)
+		}
+	})
+}
+
+// stdlibNetrcLine and stdlibParseNetrc are a direct port of cmd/go/
+// internal/auth.parseNetrc (BSD-licensed, part of the Go toolchain
+// distributed at $GOROOT/src/cmd/go/internal/auth/netrc.go) — that
+// package is internal and can't be imported, so this fuzz target copies
+// its exact algorithm to use as a real oracle for
+// privatePrefixesFromNetrc, the same job golang.org/x/mod/module does for
+// the pattern-matching fuzz targets above where an importable oracle
+// existed. netrc.go's own doc comment already claimed field-for-field
+// parity with this algorithm; this is the first time that claim has
+// actually been checked against the real thing rather than by hand.
+type stdlibNetrcLine struct {
+	machine, login, password string
+}
+
+func stdlibParseNetrc(data string) []stdlibNetrcLine {
+	var nrc []stdlibNetrcLine
+	var l stdlibNetrcLine
+	inMacro := false
+	for _, line := range strings.Split(data, "\n") {
+		if inMacro {
+			if line == "" {
+				inMacro = false
+			}
+			continue
+		}
+		f := strings.Fields(line)
+		i := 0
+		for ; i < len(f)-1; i += 2 {
+			switch f[i] {
+			case "machine":
+				l = stdlibNetrcLine{machine: f[i+1]}
+			case "default":
+				// no-op, matching the real source's inert `break` here
+			case "login":
+				l.login = f[i+1]
+			case "password":
+				l.password = f[i+1]
+			case "macdef":
+				inMacro = true
+			}
+			if l.machine != "" && l.login != "" && l.password != "" {
+				nrc = append(nrc, l)
+				l = stdlibNetrcLine{}
+			}
+		}
+		if i < len(f) && f[i] == "default" {
+			break
+		}
+	}
+	return nrc
+}
+
+func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
+	seeds := []string{
+		"machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n",
+		"machine git.privatecorp.internal login builder password s3cr3t",
+		"machine github.com\nlogin x\npassword y\n",
+		"macdef mymacro\nmachine fake.internal login x password y\n\nmachine real.internal\nlogin builder\npassword s3cr3t\n",
+		"machine before.internal\nlogin x\npassword y\ndefault\nlogin anon\npassword anon\nmachine after.internal\nlogin x\npassword y\n",
+		"machine a.internal\nlogin x\npassword y\nmachine a.internal\nlogin x2\npassword y2\n",
+		"login x\nmachine a.internal\npassword y\n",
+		"machine\nlogin x\npassword y\n",
+		"macdef m\n",
+		"default\nmachine a.internal\nlogin x\npassword y\n",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, data string) {
+		got := privatePrefixesFromNetrc([]byte(data))
+
+		var want []string
+		seen := map[string]bool{}
+		for _, l := range stdlibParseNetrc(data) {
+			if !isKnownPublicHost(l.machine) && !seen[l.machine] {
+				seen[l.machine] = true
+				want = append(want, l.machine)
+			}
+		}
+		if len(got) == 0 && len(want) == 0 {
+			return
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("privatePrefixesFromNetrc(%q) = %v, want %v (oracle: cmd/go/internal/auth.parseNetrc)", data, got, want)
 		}
 	})
 }
