@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"path/filepath"
 	"strings"
 )
 
@@ -138,10 +139,13 @@ type replaceTarget struct {
 // parseReplaces extracts replace directives, keyed by the original module
 // path being replaced. A go.mod replace can point at either another module
 // (network-fetched, same as any other require) or a local filesystem path
-// (per the go.mod spec, any target beginning with "./", "../", or "/" —
-// never network-fetched at all, since the go tool reads it straight off
-// disk). Both change what, if anything, should actually be checked against
-// GOPRIVATE/GONOSUMDB in place of the original required path.
+// (per the go.mod spec: a target beginning with "./" or "../", or an
+// absolute path — matching golang.org/x/mod/modfile's own IsDirectoryPath,
+// which uses filepath.IsAbs rather than a bare "/" prefix so Windows
+// absolute paths like "C:\foo" are recognized too — never network-fetched
+// at all, since the go tool reads it straight off disk). Both change what,
+// if anything, should actually be checked against GOPRIVATE/GONOSUMDB in
+// place of the original required path.
 func parseReplaces(data []byte) map[string]replaceTarget {
 	out := map[string]replaceTarget{}
 	inBlock := false
@@ -184,7 +188,7 @@ func addReplace(out map[string]replaceTarget, entry string) {
 	if oldPath == "" || newPath == "" {
 		return
 	}
-	local := strings.HasPrefix(newPath, "./") || strings.HasPrefix(newPath, "../") || strings.HasPrefix(newPath, "/")
+	local := strings.HasPrefix(newPath, "./") || strings.HasPrefix(newPath, "../") || filepath.IsAbs(newPath)
 	out[oldPath] = replaceTarget{path: newPath, isLocal: local}
 }
 
