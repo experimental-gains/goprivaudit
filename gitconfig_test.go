@@ -94,10 +94,37 @@ func TestNormalizeToModulePrefix(t *testing.T) {
 		"git@github.com:myorg/repo.git": "github.com/myorg/repo",
 		"ssh://git@example.com/myorg":   "example.com/myorg",
 		"":                              "",
+		// Malformed but parseable: an "@" or ":" sitting at position 0 of
+		// the substring being searched — none of the cases above put the
+		// separator at the very start, only partway through.
+		"ssh://@example.com/myorg": "example.com/myorg",
+		"@github.com:myorg":        "github.com/myorg",
+		"git@:myorg":               "/myorg", // empty host before ":" - malformed input, passed through as-is
 	}
 	for in, want := range cases {
 		if got := normalizeToModulePrefix(in); got != want {
 			t.Errorf("normalizeToModulePrefix(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSplitKV(t *testing.T) {
+	cases := []struct {
+		line       string
+		key, value string
+		ok         bool
+	}{
+		{"insteadOf = https://github.com/", "insteadof", "https://github.com/", true},
+		{"  Key  =  value  ", "key", "value", true},
+		{"no equals sign here", "", "", false},
+		// "=" at index 0 - an empty key, still syntactically a valid split.
+		{"=value", "", "value", true},
+	}
+	for _, c := range cases {
+		key, value, ok := splitKV(c.line)
+		if key != c.key || value != c.value || ok != c.ok {
+			t.Errorf("splitKV(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				c.line, key, value, ok, c.key, c.value, c.ok)
 		}
 	}
 }
@@ -140,10 +167,44 @@ func TestIncludeIfMatchesGitdir(t *testing.T) {
 		{"gitdir:" + home + "/work/", home + "/workshop/app", false, "sibling dir sharing a string prefix must not match ('work' vs 'workshop')"},
 		{"gitdir/i:" + strings.ToUpper(home) + "/WORK/", home + "/work/app", true, "case-insensitive variant"},
 		{"onbranch:main", home + "/work/app", false, "unsupported condition kind never matches"},
+		// git's own docs recommend the leading "**/" form so the rule
+		// applies regardless of where the repo is checked out — none of
+		// the cases above exercise the "**" glob segment in
+		// globMatchSegs at all.
+		{"gitdir:**/work/**", home + "/work/app", true, "leading ** matches any prefix"},
+		{"gitdir:**/work/**", "/elsewhere/deep/work/sub/app", true, "leading ** matches from a different root entirely"},
+		{"gitdir:**/nomatch/**", home + "/work/app", false, "leading ** still requires the literal segment somewhere"},
+		{"gitdir:" + home + "/**/app/", home + "/a/b/app", true, "mid-pattern ** matches multiple segments"},
+		{"gitdir:" + home + "/**/app/", home + "/app", true, "mid-pattern ** matches zero segments"},
 	}
 	for _, c := range cases {
 		if got := includeIfMatches(c.cond, c.dir); got != c.want {
 			t.Errorf("includeIfMatches(%q, %q) = %v, want %v (%s)", c.cond, c.dir, got, c.want, c.reason)
+		}
+	}
+}
+
+// TestMatchGitdirGlob covers globMatchSegs directly, bypassing
+// expandGitdirPattern's automatic trailing "**"/leading "**/" insertion —
+// every case that goes through includeIfMatches ends up with a pattern
+// that resolves via the "**" branch's early returns, so the loop's own
+// natural bottom-of-loop exit (both pSegs and tSegs fully consumed, or
+// tSegs left over after pSegs is exhausted) never gets exercised any other
+// way.
+func TestMatchGitdirGlob(t *testing.T) {
+	cases := []struct {
+		pattern, target string
+		want            bool
+		reason          string
+	}{
+		{"a/b", "a/b", true, "exact literal match, pSegs and tSegs both exhaust together"},
+		{"a/b", "a/b/c", false, "target has a leftover segment after pattern exhausts"},
+		{"a/b", "a", false, "target exhausts before pattern does"},
+		{"a/**", "a/b/c", true, "trailing ** matches everything after the literal prefix"},
+	}
+	for _, c := range cases {
+		if got := matchGitdirGlob(c.pattern, c.target); got != c.want {
+			t.Errorf("matchGitdirGlob(%q, %q) = %v, want %v (%s)", c.pattern, c.target, got, c.want, c.reason)
 		}
 	}
 }

@@ -181,3 +181,60 @@ func TestResolveEffectiveModulesNoReplace(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+func TestStripComment(t *testing.T) {
+	cases := map[string]string{
+		"example.com/foo v1.0.0":             "example.com/foo v1.0.0",
+		"example.com/foo v1.0.0 // indirect": "example.com/foo v1.0.0 ",
+		// A line that's nothing but a comment (the "//" sits at index 0)
+		// isn't exercised by the case above, where "//" is always partway
+		// through the line.
+		"// standalone comment, no module": "",
+	}
+	for in, want := range cases {
+		if got := stripComment(in); got != want {
+			t.Errorf("stripComment(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestLeadingQuotedString covers `go mod edit`'s quoted-token syntax
+// directly — none of the higher-level require/replace parsing tests above
+// happen to use a path containing a backslash escape or an empty
+// backtick-quoted string, so the escape-handling branch inside the loop
+// (and the empty-backtick case) had no coverage at all.
+func TestLeadingQuotedString(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{`"../my mod"`, "../my mod", true},
+		{"`../my mod`", "../my mod", true},
+		{"``", "", true},
+		{`"esc\"aped"`, `esc"aped`, true},
+		{`"back\\slash"`, `back\slash`, true},
+		{`"unterminated`, "", false},
+		{`"trailing backslash\`, "", false},
+	}
+	for _, c := range cases {
+		got, ok := leadingQuotedString(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("leadingQuotedString(%q) = (%q, %v), want (%q, %v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
+
+func TestFirstField(t *testing.T) {
+	cases := map[string]string{
+		"example.com/foo v1.0.0":  "example.com/foo",
+		"  example.com/foo  ":     "example.com/foo",
+		"":                        "",
+		`"../my mod" // indirect`: "../my mod",
+	}
+	for in, want := range cases {
+		if got := firstField(in); got != want {
+			t.Errorf("firstField(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

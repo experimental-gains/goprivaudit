@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -283,5 +284,79 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	buf.WriteString(stdout)
 	if strings.Contains(buf.String(), "SUMDB LEAK") {
 		t.Errorf("expected no leak once covered, got: %s", stdout)
+	}
+}
+
+// TestGitConfigCandidates covers the full candidate list directly, both
+// with and without XDG_CONFIG_HOME set — the indirect XDG coverage above
+// only ever checks that a rewrite in the XDG file is *found*, not that the
+// candidate list itself is right, which is what actually distinguishes the
+// os.UserHomeDir() err == nil branch on the XDG path from a mutant that
+// skips it.
+func TestGitConfigCandidates(t *testing.T) {
+	home := t.TempDir()
+	moduleDir := filepath.Join(home, "app")
+
+	t.Run("XDG_CONFIG_HOME set", func(t *testing.T) {
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+		want := []string{
+			filepath.Join(home, "xdg", "git", "config"),
+			filepath.Join(home, ".gitconfig"),
+			filepath.Join(moduleDir, ".git", "config"),
+		}
+		if got := gitConfigCandidates(moduleDir); !stringsEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("XDG_CONFIG_HOME unset falls back under HOME", func(t *testing.T) {
+		t.Setenv("HOME", home)
+		t.Setenv("XDG_CONFIG_HOME", "")
+		want := []string{
+			filepath.Join(home, ".config", "git", "config"),
+			filepath.Join(home, ".gitconfig"),
+			filepath.Join(moduleDir, ".git", "config"),
+		}
+		if got := gitConfigCandidates(moduleDir); !stringsEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+}
+
+func stringsEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestGoEnvCommandNotFound covers goEnv's err != nil fallback: with no `go`
+// binary reachable on PATH, exec.Command must fail and goEnv must return ""
+// rather than panicking or propagating the error.
+func TestGoEnvCommandNotFound(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // empty dir, no `go` binary in it
+	if got := goEnv("GOPROXY"); got != "" {
+		t.Errorf("goEnv() with no go binary on PATH = %q, want empty", got)
+	}
+}
+
+// TestGoEnvSuccess covers goEnv's normal (err == nil) path against the real
+// `go` binary — without this, the only other goEnv test forces a failure,
+// and since a failed `go env` invocation also yields empty output, a test
+// that only ever sees empty results can't tell the success path apart from
+// the failure path.
+func TestGoEnvSuccess(t *testing.T) {
+	want, err := exec.Command("go", "env", "GOPROXY").Output()
+	if err != nil {
+		t.Skipf("no working `go` binary to compare against: %v", err)
+	}
+	if got := goEnv("GOPROXY"); got != strings.TrimSpace(string(want)) {
+		t.Errorf("goEnv(%q) = %q, want %q", "GOPROXY", got, strings.TrimSpace(string(want)))
 	}
 }
