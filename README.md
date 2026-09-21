@@ -63,6 +63,21 @@ Flags, mainly for testing/CI overrides:
 -nosumdb string  override GONOSUMDB instead of reading it from `go env`
 ```
 
+## Use with pre-commit
+
+```yaml
+repos:
+  - repo: https://github.com/experimental-gains/goprivaudit
+    rev: v0.1.10
+    hooks:
+      - id: goprivaudit
+```
+
+Runs on any commit that touches `go.mod`, auditing the current
+`GOPRIVATE`/`GONOSUMDB`/git config in the working tree (it makes no
+network calls). `pre-commit` builds the hook via `go install` the first
+time.
+
 ## How it detects "this module should be private"
 
 It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config

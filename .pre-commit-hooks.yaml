@@ -1,0 +1,7 @@
+- id: goprivaudit
+  name: goprivaudit (GOPRIVATE/sumdb leak check)
+  description: Audits GOPRIVATE/GONOSUMDB config against go.mod deps and git insteadOf rewrites for sumdb leaks.
+  entry: goprivaudit
+  language: golang
+  files: go\.mod$
+  pass_filenames: false
