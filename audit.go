@@ -6,9 +6,10 @@ import "sort"
 // GOPRIVATE-family configuration.
 type Report struct {
 	// SumdbLeaks are modules that have a private-auth signal (a git
-	// insteadOf rewrite pointing at their host/path) but aren't covered
-	// by GOPRIVATE or GONOSUMDB. Even though the source fetch itself is
-	// redirected to an authenticated URL, `go` still queries the public
+	// insteadOf rewrite pointing at their host/path, or a netrc machine
+	// entry for their host, when GOAUTH actually consults netrc) but
+	// aren't covered by GOPRIVATE or GONOSUMDB. Even though the source
+	// fetch itself is authenticated, `go` still queries the public
 	// checksum database (sum.golang.org) for these modules unless they're
 	// excluded, leaking the module's path and version to Google.
 	SumdbLeaks []string

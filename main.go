@@ -1,13 +1,15 @@
 // Command goprivaudit audits a Go module's GOPRIVATE/GONOSUMDB
-// configuration against its go.mod dependencies and git insteadOf
-// rewrites, catching two silent misconfigurations:
+// configuration against its go.mod dependencies, git insteadOf rewrites,
+// and netrc credentials, catching two silent misconfigurations:
 //
-//   - A dependency has a private-auth signal (a git insteadOf rewrite for
-//     its host/path, the standard way to authenticate `go get` to a
-//     private host over SSH) but isn't covered by GOPRIVATE/GONOSUMDB, so
+//   - A dependency has a private-auth signal — a git insteadOf rewrite for
+//     its host/path (the standard way to authenticate `go get` to a
+//     private host over SSH), or a netrc `machine` entry for its host
+//     (the default GOAUTH mechanism `go` uses for HTTPS module fetches,
+//     see `go help goauth`) — but isn't covered by GOPRIVATE/GONOSUMDB, so
 //     `go` still queries the public sum.golang.org checksum database for
 //     it — leaking the module's path and version even though the source
-//     fetch itself goes over a private, authenticated URL.
+//     fetch itself goes over a private, authenticated connection.
 //   - GOPRIVATE/GONOSUMDB contains an overly broad pattern (bare "*") that
 //     disables sumdb verification for every dependency, not just the
 //     intended private ones, quietly removing supply-chain protection for
@@ -16,7 +18,7 @@
 // It checks require entries and, on a go.mod with an uncovered `tool`
 // directive (Go 1.24+ — see `go help tool`), that tool's package path
 // too. It makes no network calls: everything it checks is the local
-// go.mod, git config, and `go env` output.
+// go.mod, git config, netrc file, and `go env` output.
 package main
 
 import (
@@ -39,6 +41,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	privateOverride := fs.String("private", "", "override GOPRIVATE instead of reading it from `go env`")
 	nosumdbOverride := fs.String("nosumdb", "", "override GONOSUMDB instead of reading it from `go env`")
 	goworkOverride := fs.String("gowork", "", "override the go.work path instead of reading GOWORK from `go env`")
+	goauthOverride := fs.String("goauth", "", "override GOAUTH instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -49,7 +52,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet := false, false, false
+	privateSet, nosumdbSet, goworkSet, goauthSet := false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -58,6 +61,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			nosumdbSet = true
 		case "gowork":
 			goworkSet = true
+		case "goauth":
+			goauthSet = true
 		}
 	})
 
@@ -88,6 +93,21 @@ func run(args []string, stdout, stderr *os.File) int {
 	var prefixes []string
 	for _, p := range gitConfigCandidates(moduleDir) {
 		prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
+	}
+
+	goauth := *goauthOverride
+	if !goauthSet {
+		goauth = goEnv("GOAUTH")
+	}
+	if goauth == "" {
+		goauth = "netrc" // `go help goauth`: default is netrc when GOAUTH is unset
+	}
+	if goauthUsesNetrc(goauth) {
+		if p := netrcPath(); p != "" {
+			if data, err := os.ReadFile(p); err == nil {
+				prefixes = append(prefixes, privatePrefixesFromNetrc(data)...)
+			}
+		}
 	}
 
 	r := audit(modules, prefixes, splitPatterns(gonosumdb))
@@ -137,7 +157,7 @@ func printReport(w *os.File, r Report) {
 		return
 	}
 	for _, m := range r.SumdbLeaks {
-		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth git rewrite but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
+		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth signal (git insteadOf rewrite or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
 	}
 	for _, p := range r.BroadPatterns {
 		_, _ = fmt.Fprintf(w, "BROAD PATTERN: GOPRIVATE/GONOSUMDB pattern %q matches every module, disabling sumdb verification for public dependencies too\n", p)

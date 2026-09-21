@@ -5,23 +5,23 @@
 [![Latest release](https://img.shields.io/github/v/tag/experimental-gains/goprivaudit)](https://github.com/experimental-gains/goprivaudit/releases)
 
 Audits a Go module's `GOPRIVATE`/`GONOSUMDB` configuration against its
-`go.mod` dependencies and git `insteadOf` rewrites, catching two silent
-misconfigurations around private Go modules:
+`go.mod` dependencies and its private-module auth setup — git `insteadOf`
+rewrites and netrc credentials — catching two silent misconfigurations
+around private Go modules:
 
-1. **Sumdb leaks.** If you've set up a git `insteadOf` rewrite to
-   authenticate `go get` to a private host over SSH (the standard way to
-   let the `go` tool fetch a private module), but forgot to add that
-   module's path to `GOPRIVATE`/`GONOSUMDB`, the `go` command still queries
-   the public checksum database (`sum.golang.org`) for it on every build.
-   The source fetch is private; the module's existence, path, and version
-   are not — they leak to Google's sumdb regardless.
+1. **Sumdb leaks.** If you've set up a git `insteadOf` rewrite (or netrc
+   credentials) to authenticate `go get` to a private host, but forgot to
+   add that module's path to `GOPRIVATE`/`GONOSUMDB`, the `go` command
+   still queries the public checksum database (`sum.golang.org`) for it
+   on every build. The source fetch is private; the module's existence,
+   path, and version are not — they leak to Google's sumdb regardless.
 2. **Overly broad patterns.** A bare `GOPRIVATE=*` (or `GONOSUMDB=*`)
    "fixes" the leak above but also disables checksum verification for
    every public dependency in the module, silently removing supply-chain
    protection you almost certainly still want.
 
 It makes no network calls. Everything it checks — `go.mod`, git config,
-`go env` output — is local.
+the netrc file, `go env` output — is local.
 
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
@@ -66,7 +66,7 @@ goprivaudit
 ```
 
 ```
-SUMDB LEAK: github.com/myorg/internal-tool has a private-auth git rewrite but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database
+SUMDB LEAK: github.com/myorg/internal-tool has a private-auth signal (git insteadOf rewrite or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database
 ```
 
 Exits `0` with "no issues found" when clean, `1` when it finds something,
@@ -79,7 +79,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.14
+- uses: experimental-gains/goprivaudit@v0.1.15
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -89,6 +89,7 @@ Flags, mainly for testing/CI overrides:
 -private string  override GOPRIVATE instead of reading it from `go env`
 -nosumdb string  override GONOSUMDB instead of reading it from `go env`
 -gowork string   override the go.work path instead of reading GOWORK from `go env`
+-goauth string   override GOAUTH instead of reading it from `go env`
 ```
 
 ## Use with pre-commit
@@ -96,7 +97,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.14
+    rev: v0.1.15
     hooks:
       - id: goprivaudit
 ```
@@ -108,7 +109,9 @@ time.
 
 ## How it detects "this module should be private"
 
-It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
+Two independent signals, either one is enough to flag a module.
+
+**Git config.** It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
 files the real `git config` global tier reads — `$XDG_CONFIG_HOME/git/config`
 (or `~/.config/git/config` when that's unset) and `~/.gitconfig`, both of
 which apply together, not one-or-the-other — plus the module's
@@ -132,6 +135,17 @@ identity or rewrite to everything under one directory tree, e.g. a work
 vs. personal setup) are followed the way git itself resolves them, so a
 rewrite living in an included file is still caught. Other `includeIf`
 condition kinds (`onbranch:`, `hasconfig:`, ...) aren't evaluated.
+
+**Netrc.** It also checks the netrc file (`$NETRC`, or `~/.netrc` — `~/_netrc` on
+Windows) for `machine` entries with a login and password, since netrc is
+`go`'s **default** `GOAUTH` mechanism (`go help goauth`) for authenticating
+HTTPS module fetches — no git config or SSH involved at all. This is easy
+to end up relying on by accident: many environments already have a
+`~/.netrc` for unrelated tools, and `go` starts consulting it for module
+fetches automatically, with nothing module-specific to opt into. A
+`machine` entry only counts if the effective `GOAUTH` value actually
+includes `netrc` (it does by default; `GOAUTH=off` or a fully custom
+command list turns this off, and `goprivaudit` follows suit).
 
 ## What it does not do
 
