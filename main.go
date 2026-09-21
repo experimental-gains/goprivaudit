@@ -42,7 +42,7 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	data, err := os.ReadFile(*gomodPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "goprivaudit: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "goprivaudit: %v\n", err)
 		return 2
 	}
 	modules := resolveEffectiveModules(parseRequires(data), parseReplaces(data))
@@ -119,13 +119,13 @@ func goEnv(name string) string {
 
 func printReport(w *os.File, r Report) {
 	if r.Clean() {
-		fmt.Fprintln(w, "goprivaudit: no issues found")
+		_, _ = fmt.Fprintln(w, "goprivaudit: no issues found")
 		return
 	}
 	for _, m := range r.SumdbLeaks {
-		fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth git rewrite but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
+		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth git rewrite but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
 	}
 	for _, p := range r.BroadPatterns {
-		fmt.Fprintf(w, "BROAD PATTERN: GOPRIVATE/GONOSUMDB pattern %q matches every module, disabling sumdb verification for public dependencies too\n", p)
+		_, _ = fmt.Fprintf(w, "BROAD PATTERN: GOPRIVATE/GONOSUMDB pattern %q matches every module, disabling sumdb verification for public dependencies too\n", p)
 	}
 }

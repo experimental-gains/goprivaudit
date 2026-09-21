@@ -22,8 +22,8 @@ func captureRun(t *testing.T, args []string) (stdout, stderr string, code int) {
 		t.Fatal(err)
 	}
 	code = run(args, outFile, errFile)
-	outFile.Close()
-	errFile.Close()
+	_ = outFile.Close()
+	_ = errFile.Close()
 	outBytes, _ := os.ReadFile(outFile.Name())
 	errBytes, _ := os.ReadFile(errFile.Name())
 	return string(outBytes), string(errBytes), code
