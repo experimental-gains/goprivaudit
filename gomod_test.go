@@ -181,3 +181,97 @@ func TestResolveEffectiveModulesNoReplace(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+func TestParseToolsSingleLine(t *testing.T) {
+	src := "module example.com/foo\n\ngo 1.24\n\ntool golang.org/x/tools/cmd/stringer\n"
+	got := parseTools([]byte(src))
+	want := []string{"golang.org/x/tools/cmd/stringer"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseToolsBlock(t *testing.T) {
+	src := `module example.com/foo
+
+go 1.24
+
+tool (
+	golang.org/x/tools/cmd/stringer
+	example.com/myorg/private/cmd/thing
+)
+`
+	got := parseTools([]byte(src))
+	want := []string{"golang.org/x/tools/cmd/stringer", "example.com/myorg/private/cmd/thing"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseToolsEmpty(t *testing.T) {
+	if got := parseTools([]byte("module example.com/foo\n\ngo 1.24\n")); got != nil {
+		t.Errorf("expected nil for a go.mod with no tool directives, got %v", got)
+	}
+}
+
+func TestParseToolsQuotedPath(t *testing.T) {
+	src := "module example.com/foo\n\ngo 1.24\n\ntool \"some path with spaces\"\n"
+	got := parseTools([]byte(src))
+	want := []string{"some path with spaces"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveToolModulesUncoveredIncluded(t *testing.T) {
+	got := effectiveToolModules([]string{"example.com/myorg/private/cmd/thing"}, nil)
+	want := []string{"example.com/myorg/private/cmd/thing"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveToolModulesCoveredByExactRequireExcluded(t *testing.T) {
+	got := effectiveToolModules(
+		[]string{"example.com/myorg/private"},
+		[]string{"example.com/myorg/private"},
+	)
+	if got != nil {
+		t.Errorf("expected a tool path exactly matching a require entry to be excluded, got %v", got)
+	}
+}
+
+func TestEffectiveToolModulesCoveredByParentRequireExcluded(t *testing.T) {
+	got := effectiveToolModules(
+		[]string{"example.com/myorg/private/cmd/thing"},
+		[]string{"example.com/myorg/private"},
+	)
+	if got != nil {
+		t.Errorf("expected a tool path under a required module's path to be excluded, got %v", got)
+	}
+}
+
+func TestEffectiveToolModulesSiblingPathNotFalselyCovered(t *testing.T) {
+	// "example.com/myorg/private2" must not be treated as covering
+	// "example.com/myorg/private" — a naive strings.HasPrefix(t, r) rather
+	// than strings.HasPrefix(t, r+"/") would falsely match here.
+	got := effectiveToolModules(
+		[]string{"example.com/myorg/private"},
+		[]string{"example.com/myorg/private2"},
+	)
+	want := []string{"example.com/myorg/private"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestEffectiveToolModulesDeduped(t *testing.T) {
+	got := effectiveToolModules(
+		[]string{"example.com/myorg/private/cmd/thing", "example.com/myorg/private/cmd/thing"},
+		nil,
+	)
+	want := []string{"example.com/myorg/private/cmd/thing"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

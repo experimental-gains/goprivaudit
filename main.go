@@ -13,8 +13,10 @@
 //     intended private ones, quietly removing supply-chain protection for
 //     public packages too.
 //
-// It makes no network calls: everything it checks is the local go.mod,
-// git config, and `go env` output.
+// It checks require entries and, on a go.mod with an uncovered `tool`
+// directive (Go 1.24+ — see `go help tool`), that tool's package path
+// too. It makes no network calls: everything it checks is the local
+// go.mod, git config, and `go env` output.
 package main
 
 import (
@@ -45,7 +47,9 @@ func run(args []string, stdout, stderr *os.File) int {
 		_, _ = fmt.Fprintf(stderr, "goprivaudit: %v\n", err)
 		return 2
 	}
-	modules := resolveEffectiveModules(parseRequires(data), parseReplaces(data))
+	requires := parseRequires(data)
+	modules := resolveEffectiveModules(requires, parseReplaces(data))
+	modules = append(modules, effectiveToolModules(parseTools(data), requires)...)
 
 	privateSet, nosumdbSet := false, false
 	fs.Visit(func(f *flag.Flag) {

@@ -79,7 +79,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.12
+- uses: experimental-gains/goprivaudit@v0.1.13
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -95,7 +95,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.12
+    rev: v0.1.13
     hooks:
       - id: goprivaudit
 ```
@@ -139,6 +139,9 @@ condition kinds (`onbranch:`, `hasconfig:`, ...) aren't evaluated.
 - Doesn't replace `govulncheck` or general dependency vulnerability
   scanning — this is specifically about the private-module
   configuration gap, not vulnerabilities in the dependencies themselves.
+- Checks `require` entries and `tool` directives (Go 1.24+), including a
+  `tool` line with no covering `require` — but doesn't walk the full
+  transitive module graph (what those dependencies themselves require).
 
 ## License
 

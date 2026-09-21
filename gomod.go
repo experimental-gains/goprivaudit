@@ -47,6 +47,93 @@ func parseRequires(data []byte) []string {
 	return modules
 }
 
+// parseTools extracts package import paths from `tool` directives in a
+// go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
+// names a *package* path, not necessarily a module path — e.g. `tool
+// golang.org/x/tools/cmd/stringer`, whose owning module is
+// `golang.org/x/tools` — and critically isn't guaranteed to be paired
+// with a `require` entry: `go get -tool` always adds one, but a
+// hand-written or AI-generated go.mod can have a `tool` line with no
+// covering `require` at all. Before this function existed, such a line
+// was invisible to parseRequires (it matches neither "require" nor
+// "replace" at top level), so a private-auth-but-uncovered-by-sumdb tool
+// dependency was silently missed entirely. See effectiveToolModules for
+// how an uncovered tool path is folded into the checked module list
+// without needing to resolve it down to its owning module first.
+func parseTools(data []byte) []string {
+	var tools []string
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if t := firstField(trimmed); t != "" {
+				tools = append(tools, t)
+			}
+			continue
+		}
+
+		if rest, ok := cutKeyword(trimmed, "tool"); ok {
+			rest = strings.TrimSpace(rest)
+			if rest == "(" {
+				inBlock = true
+				continue
+			}
+			if t := firstField(rest); t != "" {
+				tools = append(tools, t)
+			}
+		}
+	}
+	return tools
+}
+
+// effectiveToolModules returns the tool directive package paths not
+// already covered by a require entry (exact match, or the require path
+// as a parent package of the tool path), deduplicated. These are meant
+// to be appended directly to the module list audit() checks, without
+// first resolving each one down to its owning module the way a network-
+// capable tool would: matchesPrefixPattern (pattern.go) truncates its
+// target to the pattern's own segment count before matching, so a
+// pattern like "github.com/myorg/private" already matches a longer tool
+// package path like "github.com/myorg/private/cmd/foo" exactly as it
+// would match the bare module path — no module-boundary resolution (and
+// no network call to find one) is needed for correct GOPRIVATE/GONOSUMDB
+// matching, only for questions this tool doesn't ask (e.g. "does this
+// module exist"). A tool path covered by a require entry is skipped so
+// it isn't checked (and potentially reported) twice under two different
+// strings for the same underlying dependency.
+func effectiveToolModules(tools []string, requires []string) []string {
+	seen := make(map[string]bool, len(tools))
+	var out []string
+	for _, t := range tools {
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+
+		covered := false
+		for _, r := range requires {
+			if t == r || strings.HasPrefix(t, r+"/") {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // stripComment removes a trailing "// ..." line comment, e.g. the
 // "// indirect" annotation go mod tidy adds.
 func stripComment(line string) string {

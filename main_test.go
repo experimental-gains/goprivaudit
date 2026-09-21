@@ -285,3 +285,103 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 		t.Errorf("expected no leak once covered, got: %s", stdout)
 	}
 }
+
+// TestRunFindsLeakViaUncoveredToolDirective is the direct regression test
+// for the gap this fixes: a Go 1.24+ `tool` directive naming a package
+// under a privately-rewritten host, with no `require` entry covering it
+// at all (parseRequires alone would never see this dependency), must
+// still surface a SUMDB LEAK the same way an equivalent `require` entry
+// would.
+func TestRunFindsLeakViaUncoveredToolDirective(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+tool github.com/myorg/internal-tool/cmd/gen
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool/cmd/gen") {
+		t.Errorf("stdout missing expected leak finding for the uncovered tool path: %s", stdout)
+	}
+}
+
+// TestRunToolCoveredByRequireNotDoubleReported covers the common,
+// go-tooling-produced case: `go get -tool` always pairs a `tool` line
+// with a covering `require` entry for the same module, so the tool path
+// must not be independently re-checked (already covered via the normal
+// require scan) or produce a second, differently-worded SUMDB LEAK line
+// for what is really the same dependency.
+func TestRunToolCoveredByRequireNotDoubleReported(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+tool github.com/myorg/internal-tool/cmd/gen
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if got := strings.Count(stdout, "SUMDB LEAK"); got != 1 {
+		t.Errorf("expected exactly one SUMDB LEAK line for a tool path already covered by require, got %d: %s", got, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunToolDirectiveCleanWhenCovered mirrors TestRunClean but with a
+// tool directive present and correctly covered by GONOSUMDB, confirming
+// the new code path doesn't introduce a false positive on the clean case.
+func TestRunToolDirectiveCleanWhenCovered(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+tool github.com/myorg/internal-tool/cmd/gen
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-nosumdb", "github.com/myorg/*",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 once GONOSUMDB covers the tool's path; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("expected no leak once covered, got: %s", stdout)
+	}
+}
