@@ -94,6 +94,18 @@ func TestNormalizeToModulePrefix(t *testing.T) {
 		"git@github.com:myorg/repo.git": "github.com/myorg/repo",
 		"ssh://git@example.com/myorg":   "example.com/myorg",
 		"":                              "",
+		// Boundary cases for the "@"/":" index checks below: an empty
+		// username segment is not something any real git tool writes into
+		// a config (the documented go.dev FAQ snippet and `git@host:path`
+		// shorthand both always carry a real username), but a hand-edited
+		// config could still contain one. The function already handles all
+		// three correctly (strips the empty-user "@", or produces a
+		// prefix a real module path could never match for the empty-host
+		// case) — these pin that down with a regression test instead of
+		// leaving it unverified.
+		"https://@example.com/org": "example.com/org", // scheme case, "@" at index 0
+		"@example.com:org":         "example.com/org", // shorthand case, "@" at index 0
+		"git@:org":                 "/org",            // shorthand case, ":" at index 0 (empty host)
 	}
 	for in, want := range cases {
 		if got := normalizeToModulePrefix(in); got != want {
@@ -160,6 +172,22 @@ func TestPrivatePrefixesFromConfigFileFollowsInclude(t *testing.T) {
 	want := []string{"github.com/myorg"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestMatchGitdirGlobExactNoWildcard covers a pattern with no "**" segment
+// at all, fully consumed segment-by-segment down to zero — reachable in
+// practice via an includeIf gitdir pattern with no trailing "/" (per
+// git-config(1), a trailing "/" is what makes expandGitdirPattern append
+// "**"; without one, the pattern matches only that exact directory, no
+// recursion). globMatchSegs' loop must stop exactly when pSegs empties,
+// not attempt one more iteration and index pSegs[0] on an empty slice.
+func TestMatchGitdirGlobExactNoWildcard(t *testing.T) {
+	if !matchGitdirGlob("a/b", "a/b") {
+		t.Error("matchGitdirGlob(\"a/b\", \"a/b\") = false, want true (exact match)")
+	}
+	if matchGitdirGlob("a/b", "a/b/c") {
+		t.Error("matchGitdirGlob(\"a/b\", \"a/b/c\") = true, want false (pattern shorter than target, no wildcard)")
 	}
 }
 

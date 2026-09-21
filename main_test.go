@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -137,6 +138,58 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
 		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaDefaultXDGGitConfigPath covers the other half of
+// gitConfigCandidates' XDG branch: with XDG_CONFIG_HOME unset (the common
+// case — every other test in this file isolates it to "" specifically so
+// it doesn't leak this exact path from the real environment, but none of
+// them actually populate $HOME/.config/git/config to confirm the fallback
+// default is wired up), git itself still reads $HOME/.config/git/config.
+// A mutation-testing pass (gremlins, run #126) found this branch's own
+// condition had no test where the outcome differed from simply omitting
+// the branch, because no prior test ever put a real config file at this
+// path — this closes that gap with the same live-behavior assertion
+// TestRunFindsLeakViaXDGGitConfig already makes for the explicit-XDG case.
+func TestRunFindsLeakViaDefaultXDGGitConfigPath(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".config/git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", home) // no ~/.gitconfig, only the XDG-default file
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestGoEnvReturnsRealValue directly unit-tests goEnv's success path
+// against a `go env` var guaranteed non-empty on any machine that can run
+// `go` at all, rather than only exercising it indirectly through run()
+// tests where the box's real GOPRIVATE/GONOSUMDB happen to already be
+// empty — which made a mutation (run #126, gremlins) that made goEnv
+// return "" on *success* instead of on *failure* survive undetected: the
+// wrong-for-the-wrong-reason output was indistinguishable from correct
+// output in every existing test's environment.
+func TestGoEnvReturnsRealValue(t *testing.T) {
+	got := goEnv("GOOS")
+	if got == "" {
+		t.Fatal("goEnv(\"GOOS\") returned empty; want a real value")
+	}
+	if got != runtime.GOOS {
+		t.Errorf("goEnv(\"GOOS\") = %q, want %q", got, runtime.GOOS)
 	}
 }
 

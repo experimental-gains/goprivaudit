@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -180,5 +181,33 @@ require git.privatecorp.internal/team/widgets v1.2.3
 	}
 	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
 		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestNetrcPathIgnoresLegacyUnderscoreNetrcOnNonWindows directly unit-tests
+// netrcPath's GOOS branch: cmd/go/internal/auth.netrcPath prefers
+// $HOME/_netrc over $HOME/.netrc only on Windows. This box's GOOS is never
+// "windows", so the real, unmutated code should ignore an existing _netrc
+// file and resolve to .netrc regardless of what's on disk — but no test
+// created a _netrc file to actually verify that, so a mutation (run #126,
+// gremlins) flipping the GOOS comparison survived: without a _netrc file
+// present, both the correct and the inverted condition produce the same
+// $HOME/.netrc result, since the Stat check simply never finds anything.
+// This doesn't need cross-compiling or mocking GOOS — the assertion is
+// about the false side of the branch, which real Linux/macOS test runs
+// exercise directly.
+func TestNetrcPathIgnoresLegacyUnderscoreNetrcOnNonWindows(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("this test asserts non-Windows behavior specifically")
+	}
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "machine example.com\nlogin a\npassword b\n")
+	writeFile(t, home, "_netrc", "machine example.com\nlogin c\npassword d\n")
+	t.Setenv("HOME", home)
+	t.Setenv("NETRC", "")
+
+	want := home + "/.netrc"
+	if got := netrcPath(); got != want {
+		t.Errorf("netrcPath() = %q, want %q (should ignore _netrc on GOOS=%s)", got, want, runtime.GOOS)
 	}
 }

@@ -68,6 +68,52 @@ func TestParseRequiresBlockTabBeforeParen(t *testing.T) {
 	}
 }
 
+// TestParseRequiresCommentOnlyLineIgnored covers a require-block line that
+// is entirely a "//" comment (e.g. a temporarily commented-out dependency)
+// — stripComment must reduce it to "", not leave the "//" marker itself to
+// be picked up by firstField as if it were a module path. Deliberately no
+// leading whitespace before "//" (unlike gofmt's usual indentation): this
+// hand-rolled parser doesn't require gofmt'd input, and stripComment's
+// strings.Index(line, "//") boundary is only actually exercised at i==0
+// when "//" is the very first thing on the line.
+func TestParseRequiresCommentOnlyLineIgnored(t *testing.T) {
+	got := parseRequires([]byte("module example.com/foo\n\nrequire (\n// github.com/old/dep v1.0.0\n\tgithub.com/real/dep v1.2.3\n)\n"))
+	want := []string{"github.com/real/dep"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestLeadingQuotedStringEmptyBacktick covers a degenerate but valid
+// backtick-quoted empty string (two backticks in a row) -- the closing
+// backtick is the very next byte after the opening one.
+func TestLeadingQuotedStringEmptyBacktick(t *testing.T) {
+	got, ok := leadingQuotedString("``")
+	if !ok || got != "" {
+		t.Errorf("leadingQuotedString(\"``\") = %q, %v; want \"\", true", got, ok)
+	}
+}
+
+// TestLeadingQuotedStringUnterminatedDoubleQuote covers a double-quoted
+// string with no closing quote at all — must fail cleanly (ok=false), not
+// index past the end of the string.
+func TestLeadingQuotedStringUnterminatedDoubleQuote(t *testing.T) {
+	got, ok := leadingQuotedString(`"unterminated`)
+	if ok {
+		t.Errorf("leadingQuotedString(%q) = %q, true; want ok=false", `"unterminated`, got)
+	}
+}
+
+// TestLeadingQuotedStringTrailingBackslashUnterminated covers a
+// double-quoted string whose last byte is a lone, unescaped backslash (no
+// character left to escape) — must not index past the end of the string.
+func TestLeadingQuotedStringTrailingBackslashUnterminated(t *testing.T) {
+	got, ok := leadingQuotedString(`"abc\`)
+	if ok {
+		t.Errorf("leadingQuotedString(%q) = %q, true; want ok=false", `"abc\`, got)
+	}
+}
+
 func TestParseReplacesLocalAndModuleSingleLine(t *testing.T) {
 	src := `module example.com/foo
 
