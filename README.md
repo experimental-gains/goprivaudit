@@ -1,5 +1,9 @@
 # goprivaudit
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/experimental-gains/goprivaudit.svg)](https://pkg.go.dev/github.com/experimental-gains/goprivaudit)
+[![License: MIT](https://img.shields.io/github/license/experimental-gains/goprivaudit)](LICENSE)
+[![Latest release](https://img.shields.io/github/v/tag/experimental-gains/goprivaudit)](https://github.com/experimental-gains/goprivaudit/releases)
+
 Audits a Go module's `GOPRIVATE`/`GONOSUMDB` configuration against its
 `go.mod` dependencies and git `insteadOf` rewrites, catching two silent
 misconfigurations around private Go modules:
