@@ -6,29 +6,42 @@ import (
 )
 
 // matchesPrefixPattern reports whether modulePath is covered by pattern,
-// using the same glob-per-path-segment, prefix-match semantics that the go
-// command applies to GOPRIVATE/GONOPROXY/GONOSUMDB (see `go help
-// goproxy`): each comma-separated pattern is split on "/", each segment is
-// matched against the corresponding module path segment with path.Match,
-// and a pattern with fewer segments than the module path still matches (it
-// covers everything under that prefix).
+// mirroring golang.org/x/mod/module.MatchPrefixPatterns exactly (the same
+// algorithm the real `go` command applies to GOPRIVATE/GONOPROXY/
+// GONOSUMDB, see `go help goproxy`): count the path separators in pattern
+// to find how many leading segments of modulePath to keep as a prefix,
+// then run a single path.Match of pattern against that whole prefix — not
+// a per-segment path.Match, which silently breaks backslash-escaped
+// separators and bracket expressions containing "/" (both valid
+// path.Match glob syntax the real go command still honors correctly). A
+// fuzz pass diffing an earlier per-segment implementation against the
+// real x/mod oracle found exactly this divergence: matchesPrefixPattern
+// ("*\\/0", "0.0/0") returned false while go's own algorithm returns
+// true. Reimplemented locally rather than importing x/mod at runtime —
+// this tool audits supply-chain/dependency-configuration risk, so it
+// stays dependency-free by design; x/mod is only a test-only dependency
+// (see fuzz_test.go).
 func matchesPrefixPattern(pattern, modulePath string) bool {
 	pattern = strings.TrimSuffix(pattern, "/")
 	if pattern == "" {
 		return false
 	}
-	pSegs := strings.Split(pattern, "/")
-	mSegs := strings.Split(modulePath, "/")
-	if len(pSegs) > len(mSegs) {
-		return false
-	}
-	for i, p := range pSegs {
-		ok, err := path.Match(p, mSegs[i])
-		if err != nil || !ok {
-			return false
+	n := strings.Count(pattern, "/")
+	prefix := modulePath
+	for i := 0; i < len(modulePath); i++ {
+		if modulePath[i] == '/' {
+			if n == 0 {
+				prefix = modulePath[:i]
+				break
+			}
+			n--
 		}
 	}
-	return true
+	if n > 0 {
+		return false // modulePath has fewer segments than pattern requires
+	}
+	ok, err := path.Match(pattern, prefix)
+	return err == nil && ok
 }
 
 // matchesAnyPattern reports whether modulePath is covered by any pattern in

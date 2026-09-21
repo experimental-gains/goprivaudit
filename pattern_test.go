@@ -17,6 +17,14 @@ func TestMatchesPrefixPattern(t *testing.T) {
 		{"*.corp.example.com", "example.com/tools", false},
 		{"github.com/myorg/", "github.com/myorg/foo", true}, // trailing slash ignored
 		{"", "github.com/myorg/foo", false},
+		// A backslash-escaped "/" inside a pattern segment is valid
+		// path.Match glob syntax; the real go command's algorithm (which
+		// truncates modulePath by raw slash count in pattern, then runs
+		// one path.Match on the whole prefix) honors the escape. A prior
+		// per-segment implementation split on "/" before matching,
+		// silently breaking this. Found by a fuzz pass diffing against
+		// golang.org/x/mod/module.MatchPrefixPatterns (see fuzz_test.go).
+		{`*\/0`, "0.0/0", true},
 	}
 	for _, c := range cases {
 		got := matchesPrefixPattern(c.pattern, c.module)
