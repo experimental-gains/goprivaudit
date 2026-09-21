@@ -19,6 +19,29 @@ misconfigurations around private Go modules:
 It makes no network calls. Everything it checks — `go.mod`, git config,
 `go env` output — is local.
 
+## If you hit "could not read Username" or "terminal prompts disabled"
+
+That's the real `go get` error that sends most people looking for a
+`GOPRIVATE`/git `insteadOf` fix in the first place — the `go` tool tries
+the plain HTTPS path to a private module and there's no credential
+prompt available to satisfy it. Verified against a real private-looking
+module path with no auth configured:
+
+```
+go: github.com/experimental-gains-private-test/nonexistent-repo-for-repro@v0.1.0: invalid version: git ls-remote -q origin in /root/go/pkg/mod/cache/vcs/5c411848ac859bfd85ccfed9106f5f8e8633b853e482c574fe6c70398ee55132: exit status 128:
+	fatal: could not read Username for 'https://github.com': terminal prompts disabled
+Confirm the import path was entered correctly.
+If this is a private repository, see https://golang.org/doc/faq#git_https for additional information.
+```
+
+The usual fix is a git `insteadOf` rewrite to fetch over SSH instead —
+which is exactly the setup `goprivaudit` audits. Getting the fetch
+working is only half the job: once `insteadOf` is in place, `go` can
+read the source, but it still checks the module's path and version
+against the *public* checksum database unless `GOPRIVATE`/`GONOSUMDB`
+also covers that path. `goprivaudit` catches the case where someone
+fixes the fetch error above and stops there.
+
 ## Install
 
 ```sh
