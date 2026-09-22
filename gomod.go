@@ -7,13 +7,21 @@ import (
 	"strings"
 )
 
-// parseRequires extracts module paths from require directives in a go.mod
-// file's contents. It intentionally does not parse the full go.mod grammar
-// (no golang.org/x/mod dependency) — it only needs module paths, not
-// versions or other directives, and require blocks have a simple enough
-// shape that a line scanner is sufficient.
-func parseRequires(data []byte) []string {
-	var modules []string
+// requireEntry is one require directive: a module path and the version
+// go.mod pins it to. The version is needed to pick the right replace
+// directive when a go.mod has both a version-specific and a version-
+// agnostic replace for the same module — see selectReplace.
+type requireEntry struct {
+	path    string
+	version string
+}
+
+// parseRequires extracts module paths and versions from require directives
+// in a go.mod file's contents. It intentionally does not parse the full
+// go.mod grammar (no golang.org/x/mod dependency) — require blocks have a
+// simple enough shape that a line scanner is sufficient.
+func parseRequires(data []byte) []requireEntry {
+	var modules []requireEntry
 	inBlock := false
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	for sc.Scan() {
@@ -28,8 +36,8 @@ func parseRequires(data []byte) []string {
 				inBlock = false
 				continue
 			}
-			if m := firstField(trimmed); m != "" {
-				modules = append(modules, m)
+			if e, ok := parseRequireLine(trimmed); ok {
+				modules = append(modules, e)
 			}
 			continue
 		}
@@ -40,12 +48,31 @@ func parseRequires(data []byte) []string {
 				inBlock = true
 				continue
 			}
-			if m := firstField(rest); m != "" {
-				modules = append(modules, m)
+			if e, ok := parseRequireLine(rest); ok {
+				modules = append(modules, e)
 			}
 		}
 	}
 	return modules
+}
+
+// parseRequireLine parses a single require-block entry (or the inline form
+// of a single-line require directive): "<path> <version>", version taken
+// as the second whitespace-delimited field. Module paths never contain
+// spaces (module.CheckPath forbids it), so — unlike a replace target,
+// which can be an arbitrary local filesystem path — a require path never
+// needs quoting in a real go.mod, and a plain field split is enough to
+// separate it from its version.
+func parseRequireLine(s string) (requireEntry, bool) {
+	fields := strings.Fields(s)
+	if len(fields) == 0 {
+		return requireEntry{}, false
+	}
+	e := requireEntry{path: fields[0]}
+	if len(fields) > 1 {
+		e.version = fields[1]
+	}
+	return e, true
 }
 
 // parseTools extracts package import paths from `tool` directives in a
@@ -112,7 +139,7 @@ func parseTools(data []byte) []string {
 // module exist"). A tool path covered by a require entry is skipped so
 // it isn't checked (and potentially reported) twice under two different
 // strings for the same underlying dependency.
-func effectiveToolModules(tools []string, requires []string) []string {
+func effectiveToolModules(tools []string, requires []requireEntry) []string {
 	seen := make(map[string]bool, len(tools))
 	var out []string
 	for _, t := range tools {
@@ -123,7 +150,7 @@ func effectiveToolModules(tools []string, requires []string) []string {
 
 		covered := false
 		for _, r := range requires {
-			if t == r || strings.HasPrefix(t, r+"/") {
+			if t == r.path || strings.HasPrefix(t, r.path+"/") {
 				covered = true
 				break
 			}
@@ -253,18 +280,32 @@ type replaceTarget struct {
 	isLocal bool // true if the replacement is a filesystem path, not a module
 }
 
+// replaceEntry is one replace directive's right-hand side plus the version
+// it applies to on the left: oldVersion == "" means the directive has no
+// version on its old-path side, so per the go.mod spec it applies to
+// every required version of that module ("all versions"), not just one.
+// See selectReplace for how a required module's actual version picks
+// between two replaceEntry values for the same path.
+type replaceEntry struct {
+	oldVersion string
+	target     replaceTarget
+}
+
 // parseReplaces extracts replace directives, keyed by the original module
-// path being replaced. A go.mod replace can point at either another module
-// (network-fetched, same as any other require) or a local filesystem path
-// (per the go.mod spec: a target beginning with "./" or "../", or an
-// absolute path — matching golang.org/x/mod/modfile's own IsDirectoryPath,
-// which uses filepath.IsAbs rather than a bare "/" prefix so Windows
-// absolute paths like "C:\foo" are recognized too — never network-fetched
-// at all, since the go tool reads it straight off disk). Both change what,
-// if anything, should actually be checked against GOPRIVATE/GONOSUMDB in
-// place of the original required path.
-func parseReplaces(data []byte) map[string]replaceTarget {
-	out := map[string]replaceTarget{}
+// path being replaced (a path can have more than one replaceEntry: a
+// go.mod may legally carry both a version-specific and a version-agnostic
+// replace for the same module — see selectReplace). A go.mod replace can
+// point at either another module (network-fetched, same as any other
+// require) or a local filesystem path (per the go.mod spec: a target
+// beginning with "./" or "../", or an absolute path — matching
+// golang.org/x/mod/modfile's own IsDirectoryPath, which uses
+// filepath.IsAbs rather than a bare "/" prefix so Windows absolute paths
+// like "C:\foo" are recognized too — never network-fetched at all, since
+// the go tool reads it straight off disk). Both change what, if anything,
+// should actually be checked against GOPRIVATE/GONOSUMDB in place of the
+// original required path.
+func parseReplaces(data []byte) map[string][]replaceEntry {
+	out := map[string][]replaceEntry{}
 	inBlock := false
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	for sc.Scan() {
@@ -295,17 +336,37 @@ func parseReplaces(data []byte) map[string]replaceTarget {
 	return out
 }
 
-func addReplace(out map[string]replaceTarget, entry string) {
+func addReplace(out map[string][]replaceEntry, entry string) {
 	lhs, rhs, ok := strings.Cut(entry, "=>")
 	if !ok {
 		return
 	}
-	oldPath := firstField(strings.TrimSpace(lhs))
+	lhsFields := strings.Fields(strings.TrimSpace(lhs))
+	if len(lhsFields) == 0 {
+		return
+	}
+	oldPath := lhsFields[0]
+	oldVersion := ""
+	if len(lhsFields) > 1 {
+		oldVersion = lhsFields[1]
+	}
 	newPath := firstField(strings.TrimSpace(rhs))
 	if oldPath == "" || newPath == "" {
 		return
 	}
-	out[oldPath] = replaceTarget{path: newPath, isLocal: isDirectoryPath(newPath)}
+	e := replaceEntry{
+		oldVersion: oldVersion,
+		target:     replaceTarget{path: newPath, isLocal: isDirectoryPath(newPath)},
+	}
+	entries := out[oldPath]
+	for i, existing := range entries {
+		if existing.oldVersion == oldVersion {
+			entries[i] = e
+			out[oldPath] = entries
+			return
+		}
+	}
+	out[oldPath] = append(entries, e)
 }
 
 // isDirectoryPath mirrors golang.org/x/mod/modfile.IsDirectoryPath: a
@@ -329,24 +390,54 @@ func isDirectoryPath(path string) bool {
 }
 
 // resolveEffectiveModules applies replace directives to a list of required
-// module paths, producing the paths actually fetched over the network: a
+// modules, producing the paths actually fetched over the network: a
 // locally-replaced module is dropped entirely (go reads it off disk, so it
 // can never leak to sum.golang.org regardless of GOPRIVATE), and a
 // module-replaced one is swapped for its replacement's path (that's the
 // path go actually queries the proxy/sumdb for).
-func resolveEffectiveModules(modules []string, replaces map[string]replaceTarget) []string {
+func resolveEffectiveModules(modules []requireEntry, replaces map[string][]replaceEntry) []string {
 	var out []string
 	for _, m := range modules {
-		if r, ok := replaces[m]; ok {
+		if r, ok := selectReplace(replaces[m.path], m.version); ok {
 			if r.isLocal {
 				continue
 			}
 			out = append(out, r.path)
 			continue
 		}
-		out = append(out, m)
+		out = append(out, m.path)
 	}
 	return out
+}
+
+// selectReplace picks the replaceEntry that applies to a required module at
+// the given version, matching the real go toolchain's precedence: a
+// version-specific replace (oldVersion equal to the required version) wins
+// over a version-agnostic one (oldVersion == "", applying to every version
+// of that module) regardless of which is written first in the go.mod —
+// verified live against the real go toolchain (`go list -m all` with both
+// a specific and a general replace for the same module present: the
+// specific one always won, in both file orderings). A go.mod can legally
+// carry both at once; a naive map[string]replaceTarget keyed only by path
+// (this tool's shape before this function existed) can only ever keep one
+// of the two, and — being filled in file order — picked whichever replace
+// happened to be written last, not whichever the go tool actually applies.
+func selectReplace(entries []replaceEntry, version string) (replaceTarget, bool) {
+	var general *replaceTarget
+	for i := range entries {
+		if entries[i].oldVersion == "" {
+			t := entries[i].target
+			general = &t
+			continue
+		}
+		if entries[i].oldVersion == version {
+			return entries[i].target, true
+		}
+	}
+	if general != nil {
+		return *general, true
+	}
+	return replaceTarget{}, false
 }
 
 // goWorkReplaces reads a go.work file's replace directives, using the same
@@ -368,7 +459,7 @@ func resolveEffectiveModules(modules []string, replaces map[string]replaceTarget
 // points a public-looking require at a privately-rewritten host (or vice
 // versa) was invisible to it — the same class of silent miss the `tool`
 // directive gap was, but for a config surface outside go.mod entirely.
-func goWorkReplaces(gowork string) map[string]replaceTarget {
+func goWorkReplaces(gowork string) map[string][]replaceEntry {
 	if gowork == "" || gowork == "off" {
 		return nil
 	}
@@ -385,11 +476,11 @@ func goWorkReplaces(gowork string) map[string]replaceTarget {
 // module's go.mod file, the replacement in the go.work file is used" — so
 // on a conflicting key, overlay wins; a go.work-only replace is simply
 // added.
-func mergeReplaces(base, overlay map[string]replaceTarget) map[string]replaceTarget {
+func mergeReplaces(base, overlay map[string][]replaceEntry) map[string][]replaceEntry {
 	if len(overlay) == 0 {
 		return base
 	}
-	merged := make(map[string]replaceTarget, len(base)+len(overlay))
+	merged := make(map[string][]replaceEntry, len(base)+len(overlay))
 	for k, v := range base {
 		merged[k] = v
 	}

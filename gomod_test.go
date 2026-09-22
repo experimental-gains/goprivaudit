@@ -23,11 +23,11 @@ require (
 )
 `
 	got := parseRequires([]byte(src))
-	want := []string{
-		"github.com/pkg/errors",
-		"github.com/stretchr/testify",
-		"example.com/myorg/private",
-		"golang.org/x/sync",
+	want := []requireEntry{
+		{path: "github.com/pkg/errors", version: "v0.9.1"},
+		{path: "github.com/stretchr/testify", version: "v1.8.0"},
+		{path: "example.com/myorg/private", version: "v0.0.0-20230101000000-abcdef123456"},
+		{path: "golang.org/x/sync", version: "v0.5.0"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -42,7 +42,7 @@ func TestParseRequiresEmpty(t *testing.T) {
 
 func TestParseRequiresSingleLineOnly(t *testing.T) {
 	got := parseRequires([]byte("module example.com/foo\n\nrequire example.com/bar v1.0.0\n"))
-	want := []string{"example.com/bar"}
+	want := []requireEntry{{path: "example.com/bar", version: "v1.0.0"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -54,7 +54,7 @@ func TestParseRequiresBlockNoSpaceBeforeParen(t *testing.T) {
 	// produces one. Confirmed against `go mod edit -json` on a hand-
 	// written go.mod using "require(".
 	got := parseRequires([]byte("module example.com/foo\n\nrequire(\n\tgithub.com/pkg/errors v0.9.1\n)\n"))
-	want := []string{"github.com/pkg/errors"}
+	want := []requireEntry{{path: "github.com/pkg/errors", version: "v0.9.1"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -62,7 +62,7 @@ func TestParseRequiresBlockNoSpaceBeforeParen(t *testing.T) {
 
 func TestParseRequiresBlockTabBeforeParen(t *testing.T) {
 	got := parseRequires([]byte("module example.com/foo\n\nrequire\t(\n\tgithub.com/pkg/errors v0.9.1\n)\n"))
-	want := []string{"github.com/pkg/errors"}
+	want := []requireEntry{{path: "github.com/pkg/errors", version: "v0.9.1"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -78,7 +78,7 @@ func TestParseRequiresBlockTabBeforeParen(t *testing.T) {
 // when "//" is the very first thing on the line.
 func TestParseRequiresCommentOnlyLineIgnored(t *testing.T) {
 	got := parseRequires([]byte("module example.com/foo\n\nrequire (\n// github.com/old/dep v1.0.0\n\tgithub.com/real/dep v1.2.3\n)\n"))
-	want := []string{"github.com/real/dep"}
+	want := []requireEntry{{path: "github.com/real/dep", version: "v1.2.3"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -124,9 +124,9 @@ replace example.com/bar => ../bar
 replace example.com/fork-me => example.com/myorg/fork-me v1.2.3
 `
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar":     {path: "../bar", isLocal: true},
-		"example.com/fork-me": {path: "example.com/myorg/fork-me", isLocal: false},
+	want := map[string][]replaceEntry{
+		"example.com/bar":     {{target: replaceTarget{path: "../bar", isLocal: true}}},
+		"example.com/fork-me": {{target: replaceTarget{path: "example.com/myorg/fork-me", isLocal: false}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -143,8 +143,8 @@ func TestParseReplacesBareDotDot(t *testing.T) {
 	// purely local replace as a network-fetched module path.
 	src := "module example.com/foo\n\nreplace example.com/bar => ..\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: "..", isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "..", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -154,8 +154,8 @@ func TestParseReplacesBareDotDot(t *testing.T) {
 func TestParseReplacesBareDot(t *testing.T) {
 	src := "module example.com/foo\n\nreplace example.com/bar => .\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: ".", isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: ".", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -171,9 +171,9 @@ replace (
 )
 `
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: "./local/bar", isLocal: true},
-		"example.com/baz": {path: "example.com/myorg/baz", isLocal: false},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "./local/bar", isLocal: true}}},
+		"example.com/baz": {{target: replaceTarget{path: "example.com/myorg/baz", isLocal: false}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -183,8 +183,8 @@ replace (
 func TestParseReplacesBlockNoSpaceBeforeParen(t *testing.T) {
 	src := "module example.com/foo\n\nreplace(\n\texample.com/bar => ./local/bar\n)\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: "./local/bar", isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "./local/bar", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -200,8 +200,8 @@ func TestParseReplacesQuotedLocalPathWithSpace(t *testing.T) {
 	// module path instead of a local one.
 	src := "module example.com/foo\n\nreplace example.com/bar => \"../my mod\"\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: "../my mod", isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "../my mod", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -211,8 +211,8 @@ func TestParseReplacesQuotedLocalPathWithSpace(t *testing.T) {
 func TestParseReplacesBacktickQuotedLocalPath(t *testing.T) {
 	src := "module example.com/foo\n\nreplace example.com/bar => `../my mod`\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: "../my mod", isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "../my mod", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -231,8 +231,8 @@ func TestParseReplacesQuotedLocalPathWithDoubleSlash(t *testing.T) {
 	// against GOPRIVATE.
 	src := "module example.com/foo\n\nreplace example.com/bar => \"../vendor//bar\"\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: "../vendor//bar", isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "../vendor//bar", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -249,8 +249,30 @@ func TestParseReplacesQuotedLocalPathWithEscapedQuoteAndComment(t *testing.T) {
 	// marker after the actual close quote is still found and stripped.
 	src := "module example.com/foo\n\nreplace example.com/bar => \"../a\\\"b\" // comment\n"
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"example.com/bar": {path: `../a"b`, isLocal: true},
+	want := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: `../a"b`, isLocal: true}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
+// both a version-specific and a version-agnostic replace for the same old
+// path at once — legal go.mod syntax (verified live: `go list -m all`
+// accepts a go.mod with both present). Before replaceEntry existed,
+// parseReplaces stored a single replaceTarget per old path in a plain map,
+// so the second replace line parsed always clobbered the first regardless
+// of specificity — this asserts both survive parsing as two entries, so
+// selectReplace has both to choose between at resolution time.
+func TestParseReplacesSpecificAndGeneralSameModule(t *testing.T) {
+	src := "module example.com/foo\n\nreplace example.com/bar => ./general\nreplace example.com/bar v1.0.0 => ./specific\n"
+	got := parseReplaces([]byte(src))
+	want := map[string][]replaceEntry{
+		"example.com/bar": {
+			{oldVersion: "", target: replaceTarget{path: "./general", isLocal: true}},
+			{oldVersion: "v1.0.0", target: replaceTarget{path: "./specific", isLocal: true}},
+		},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -264,9 +286,12 @@ func TestParseReplacesNone(t *testing.T) {
 }
 
 func TestResolveEffectiveModulesDropsLocalReplace(t *testing.T) {
-	modules := []string{"example.com/bar", "example.com/kept"}
-	replaces := map[string]replaceTarget{
-		"example.com/bar": {path: "../bar", isLocal: true},
+	modules := []requireEntry{
+		{path: "example.com/bar", version: "v1.0.0"},
+		{path: "example.com/kept", version: "v1.0.0"},
+	}
+	replaces := map[string][]replaceEntry{
+		"example.com/bar": {{target: replaceTarget{path: "../bar", isLocal: true}}},
 	}
 	got := resolveEffectiveModules(modules, replaces)
 	want := []string{"example.com/kept"}
@@ -276,9 +301,9 @@ func TestResolveEffectiveModulesDropsLocalReplace(t *testing.T) {
 }
 
 func TestResolveEffectiveModulesSwapsModuleReplace(t *testing.T) {
-	modules := []string{"example.com/fork-me"}
-	replaces := map[string]replaceTarget{
-		"example.com/fork-me": {path: "example.com/myorg/fork-me", isLocal: false},
+	modules := []requireEntry{{path: "example.com/fork-me", version: "v1.0.0"}}
+	replaces := map[string][]replaceEntry{
+		"example.com/fork-me": {{target: replaceTarget{path: "example.com/myorg/fork-me", isLocal: false}}},
 	}
 	got := resolveEffectiveModules(modules, replaces)
 	want := []string{"example.com/myorg/fork-me"}
@@ -288,9 +313,57 @@ func TestResolveEffectiveModulesSwapsModuleReplace(t *testing.T) {
 }
 
 func TestResolveEffectiveModulesNoReplace(t *testing.T) {
-	modules := []string{"example.com/plain"}
+	modules := []requireEntry{{path: "example.com/plain", version: "v1.0.0"}}
 	got := resolveEffectiveModules(modules, nil)
 	want := []string{"example.com/plain"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestResolveEffectiveModulesVersionSpecificReplaceWinsOverGeneral covers a
+// go.mod carrying both a version-specific and a version-agnostic replace
+// for the same module — legal go.mod syntax. Verified live against the
+// real go toolchain (`go list -m all` with both directives present, in
+// both file orderings): the version-specific one always won, regardless of
+// which line came first. Before selectReplace existed, parseReplaces kept
+// only one replaceTarget per old path in a plain map, so whichever replace
+// line was scanned last silently overwrote the other — matching real go
+// only by accident of file order, not by the version-match rule real go
+// actually uses.
+func TestResolveEffectiveModulesVersionSpecificReplaceWinsOverGeneral(t *testing.T) {
+	modules := []requireEntry{{path: "example.com/foo", version: "v1.0.0"}}
+	replaces := map[string][]replaceEntry{
+		"example.com/foo": {
+			{oldVersion: "", target: replaceTarget{path: "example.com/foo-general", isLocal: false}},
+			{oldVersion: "v1.0.0", target: replaceTarget{path: "example.com/foo-specific", isLocal: false}},
+		},
+	}
+	got := resolveEffectiveModules(modules, replaces)
+	want := []string{"example.com/foo-specific"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestResolveEffectiveModulesGeneralReplaceAppliesWhenNoVersionMatches
+// covers the fallback side of the same rule: a version-specific replace
+// for a version other than the one actually required must not apply (real
+// go leaves it unmatched and falls through to the version-agnostic
+// replace) — verified live: a replace at a non-required version alongside
+// no matching general replace makes `go list -m all` fail outright trying
+// to fetch the untouched module over the network, so a mismatched-version
+// replace is not just "lower priority", it's inapplicable.
+func TestResolveEffectiveModulesGeneralReplaceAppliesWhenNoVersionMatches(t *testing.T) {
+	modules := []requireEntry{{path: "example.com/foo", version: "v2.0.0"}}
+	replaces := map[string][]replaceEntry{
+		"example.com/foo": {
+			{oldVersion: "v1.0.0", target: replaceTarget{path: "example.com/foo-v1-only", isLocal: false}},
+			{oldVersion: "", target: replaceTarget{path: "example.com/foo-general", isLocal: false}},
+		},
+	}
+	got := resolveEffectiveModules(modules, replaces)
+	want := []string{"example.com/foo-general"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
@@ -326,8 +399,8 @@ use (
 replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 `)
 	got := goWorkReplaces(gowork)
-	want := map[string]replaceTarget{
-		"github.com/foo/bar": {path: "git.internal.example.com/mirror/bar", isLocal: false},
+	want := map[string][]replaceEntry{
+		"github.com/foo/bar": {{target: replaceTarget{path: "git.internal.example.com/mirror/bar", isLocal: false}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -335,19 +408,19 @@ replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 }
 
 func TestMergeReplacesOverlayWinsOnConflict(t *testing.T) {
-	base := map[string]replaceTarget{
-		"example.com/shared":     {path: "example.com/from-gomod", isLocal: false},
-		"example.com/gomod-only": {path: "../local", isLocal: true},
+	base := map[string][]replaceEntry{
+		"example.com/shared":     {{target: replaceTarget{path: "example.com/from-gomod", isLocal: false}}},
+		"example.com/gomod-only": {{target: replaceTarget{path: "../local", isLocal: true}}},
 	}
-	overlay := map[string]replaceTarget{
-		"example.com/shared":      {path: "example.com/from-gowork", isLocal: false},
-		"example.com/gowork-only": {path: "example.com/added-by-gowork", isLocal: false},
+	overlay := map[string][]replaceEntry{
+		"example.com/shared":      {{target: replaceTarget{path: "example.com/from-gowork", isLocal: false}}},
+		"example.com/gowork-only": {{target: replaceTarget{path: "example.com/added-by-gowork", isLocal: false}}},
 	}
 	got := mergeReplaces(base, overlay)
-	want := map[string]replaceTarget{
-		"example.com/shared":      {path: "example.com/from-gowork", isLocal: false},
-		"example.com/gomod-only":  {path: "../local", isLocal: true},
-		"example.com/gowork-only": {path: "example.com/added-by-gowork", isLocal: false},
+	want := map[string][]replaceEntry{
+		"example.com/shared":      {{target: replaceTarget{path: "example.com/from-gowork", isLocal: false}}},
+		"example.com/gomod-only":  {{target: replaceTarget{path: "../local", isLocal: true}}},
+		"example.com/gowork-only": {{target: replaceTarget{path: "example.com/added-by-gowork", isLocal: false}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -355,7 +428,9 @@ func TestMergeReplacesOverlayWinsOnConflict(t *testing.T) {
 }
 
 func TestMergeReplacesNilOverlayReturnsBaseUnchanged(t *testing.T) {
-	base := map[string]replaceTarget{"example.com/x": {path: "example.com/y", isLocal: false}}
+	base := map[string][]replaceEntry{
+		"example.com/x": {{target: replaceTarget{path: "example.com/y", isLocal: false}}},
+	}
 	got := mergeReplaces(base, nil)
 	if !reflect.DeepEqual(got, base) {
 		t.Errorf("got %v, want %v", got, base)
@@ -414,7 +489,7 @@ func TestEffectiveToolModulesUncoveredIncluded(t *testing.T) {
 func TestEffectiveToolModulesCoveredByExactRequireExcluded(t *testing.T) {
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private"},
-		[]string{"example.com/myorg/private"},
+		[]requireEntry{{path: "example.com/myorg/private", version: "v1.0.0"}},
 	)
 	if got != nil {
 		t.Errorf("expected a tool path exactly matching a require entry to be excluded, got %v", got)
@@ -424,7 +499,7 @@ func TestEffectiveToolModulesCoveredByExactRequireExcluded(t *testing.T) {
 func TestEffectiveToolModulesCoveredByParentRequireExcluded(t *testing.T) {
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private/cmd/thing"},
-		[]string{"example.com/myorg/private"},
+		[]requireEntry{{path: "example.com/myorg/private", version: "v1.0.0"}},
 	)
 	if got != nil {
 		t.Errorf("expected a tool path under a required module's path to be excluded, got %v", got)
@@ -437,7 +512,7 @@ func TestEffectiveToolModulesSiblingPathNotFalselyCovered(t *testing.T) {
 	// than strings.HasPrefix(t, r+"/") would falsely match here.
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private"},
-		[]string{"example.com/myorg/private2"},
+		[]requireEntry{{path: "example.com/myorg/private2", version: "v1.0.0"}},
 	)
 	want := []string{"example.com/myorg/private"}
 	if !reflect.DeepEqual(got, want) {

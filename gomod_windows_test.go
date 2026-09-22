@@ -20,8 +20,8 @@ require corp.internal/secret v1.0.0
 replace corp.internal/secret => C:\Users\dev\secret
 `
 	got := parseReplaces([]byte(src))
-	want := map[string]replaceTarget{
-		"corp.internal/secret": {path: `C:\Users\dev\secret`, isLocal: true},
+	want := map[string][]replaceEntry{
+		"corp.internal/secret": {{target: replaceTarget{path: `C:\Users\dev\secret`, isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
