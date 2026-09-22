@@ -9,7 +9,7 @@ import (
 	"strings"
 )
 
-var urlSectionRe = regexp.MustCompile(`^\[url\s+"([^"]*)"\]$`)
+var urlSectionRe = regexp.MustCompile(`(?i)^\[url\s+"([^"]*)"\]$`)
 var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
 var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 

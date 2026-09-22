@@ -28,6 +28,26 @@ func TestPrivatePrefixesFromGitConfig(t *testing.T) {
 	}
 }
 
+// git config section names are case-insensitive (only the quoted
+// subsection is case-sensitive) — confirmed live: `git config -l` against
+// a `[URL "..."]`-headed config normalizes it to `url....insteadof=...`
+// exactly like a lowercase header, so real git honors an uppercase or
+// mixed-case section name identically. Before this fix urlSectionRe was a
+// bare case-sensitive literal, silently dropping the whole section (and
+// its insteadOf-derived private prefix) whenever a hand-edited gitconfig
+// used anything but exactly "url" — a false negative on the signal this
+// tool exists to catch.
+func TestPrivatePrefixesFromGitConfigCaseInsensitiveSection(t *testing.T) {
+	src := `[URL "ssh://git@github.com/myorg/"]
+	insteadOf = https://github.com/myorg/
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 // TestPrivatePrefixesFromGitConfigIgnoresPushInsteadOf covers a common
 // personal/CI git config pattern: fetch anonymously over public HTTPS,
 // but push over authenticated SSH, scoped to a specific org (not just a
