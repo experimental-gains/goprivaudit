@@ -85,7 +85,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.22
+- uses: experimental-gains/goprivaudit@v0.1.23
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -104,7 +104,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.22
+    rev: v0.1.23
     hooks:
       - id: goprivaudit
 ```
