@@ -70,6 +70,69 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunFindsLeakViaCredentialHelper covers the real-world case
+// `gh auth setup-git` sets up: no insteadOf rewrite at all, no netrc file
+// — just an org-scoped git credential helper for a plain HTTPS URL, which
+// `go`'s subprocess `git clone` uses to authenticate. Before this signal
+// was recognized, a module authenticated purely this way was invisible to
+// the audit, no matter how uncovered by GOPRIVATE/GONOSUMDB it was.
+func TestRunFindsLeakViaCredentialHelper(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com/myorg"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGhAuthSetupGitBareHostNoLeak reproduces gh auth setup-git's
+// actual default output (host-scoped, not org-scoped) and confirms it's
+// correctly excluded as too broad to be a specific module's signal — the
+// same reasoning as a bare-host insteadOf rewrite.
+func TestRunGhAuthSetupGitBareHostNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("expected no leak finding for a bare-host credential context, got: %s", stdout)
+	}
+}
+
 // TestRunGoSumdbOffNoLeak covers a real false-positive this tool had:
 // GOSUMDB=off disables the checksum database entirely, for every module,
 // per `go help module-auth` — verified live (`GOSUMDB=off go env GOSUMDB`)

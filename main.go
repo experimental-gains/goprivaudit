@@ -1,15 +1,20 @@
 // Command goprivaudit audits a Go module's GOPRIVATE/GONOSUMDB
 // configuration against its go.mod dependencies, git insteadOf rewrites,
-// and netrc credentials, catching two silent misconfigurations:
+// git credential helpers, and netrc credentials, catching two silent
+// misconfigurations:
 //
 //   - A dependency has a private-auth signal — a git insteadOf rewrite for
 //     its host/path (the standard way to authenticate `go get` to a
-//     private host over SSH), or a netrc `machine` entry for its host
-//     (the default GOAUTH mechanism `go` uses for HTTPS module fetches,
-//     see `go help goauth`) — but isn't covered by GOPRIVATE/GONOSUMDB, so
-//     `go` still queries the public sum.golang.org checksum database for
-//     it — leaking the module's path and version even though the source
-//     fetch itself goes over a private, authenticated connection.
+//     private host over SSH), a URL-scoped git credential helper for its
+//     host/path (see `git help gitcredentials`; the mechanism `go`'s own
+//     subprocess `git clone`/`git fetch` uses to authenticate a plain,
+//     unrewritten HTTPS URL — e.g. the config `gh auth setup-git` writes),
+//     or a netrc `machine` entry for its host (the default GOAUTH
+//     mechanism `go` uses for HTTPS module fetches, see `go help
+//     goauth`) — but isn't covered by GOPRIVATE/GONOSUMDB, so `go` still
+//     queries the public sum.golang.org checksum database for it —
+//     leaking the module's path and version even though the source fetch
+//     itself goes over a private, authenticated connection.
 //   - GOPRIVATE/GONOSUMDB contains an overly broad pattern (bare "*") that
 //     disables sumdb verification for every dependency, not just the
 //     intended private ones, quietly removing supply-chain protection for
@@ -181,7 +186,7 @@ func printReport(w *os.File, r Report) {
 		return
 	}
 	for _, m := range r.SumdbLeaks {
-		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth signal (git insteadOf rewrite or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
+		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth signal (git insteadOf rewrite, git credential helper, or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
 	}
 	for _, p := range r.BroadPatterns {
 		_, _ = fmt.Fprintf(w, "BROAD PATTERN: GOPRIVATE/GONOSUMDB pattern %q matches every module, disabling sumdb verification for public dependencies too\n", p)

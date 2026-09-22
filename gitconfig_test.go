@@ -105,6 +105,82 @@ func TestPrivatePrefixesFromGitConfigNoURLSections(t *testing.T) {
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigCredentialHelperOrgScoped covers a
+// URL-scoped git credential helper (gitcredentials(7)) — a separate real
+// private-auth mechanism from insteadOf: `go`'s subprocess `git
+// clone`/`git fetch` authenticates a plain, unrewritten HTTPS URL through
+// whatever credential helper is configured for that context, no insteadOf
+// rewrite required. Confirmed against real git (`git config --file ...
+// --get-all credential.https://github.com/myorg.helper`) that this is
+// exactly how a URL-scoped [credential "..."] section resolves.
+func TestPrivatePrefixesFromGitConfigCredentialHelperOrgScoped(t *testing.T) {
+	src := `[credential "https://github.com/myorg"]
+	helper = store
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigCredentialHelperGhAuthSetupGit
+// reproduces `gh auth setup-git`'s actual real-world output verbatim
+// (confirmed against its --help text and gitcredentials(7)): an empty
+// "helper = " line to clear any inherited default, followed by the real
+// helper. Bare-host-scoped ("https://github.com", no org/path) — the
+// same "public multi-tenant host" case knownPublicGitHosts already
+// excludes for insteadOf, and for the same reason here: treating it as a
+// signal would flag every public GitHub-hosted dependency as a leak.
+func TestPrivatePrefixesFromGitConfigCredentialHelperGhAuthSetupGit(t *testing.T) {
+	src := `[credential "https://github.com"]
+	helper =
+	helper = !/usr/bin/gh auth git-credential
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (bare-host credential context isn't a private signal), got %v", got)
+	}
+}
+
+// An empty helper value clears an inherited helper rather than
+// configuring one — it authenticates nothing, so it isn't a signal.
+func TestPrivatePrefixesFromGitConfigCredentialHelperEmptyValueIgnored(t *testing.T) {
+	src := `[credential "https://github.com/myorg"]
+	helper =
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (empty helper value clears, doesn't configure), got %v", got)
+	}
+}
+
+// A bare, unscoped [credential] section (no URL context) applies to
+// every fetch, not just a specific host — an even broader false-positive
+// risk than the bare-host [url]/[credential] case, so it must not be
+// treated as a signal at all.
+func TestPrivatePrefixesFromGitConfigCredentialHelperUnscopedIgnored(t *testing.T) {
+	src := `[credential]
+	helper = store
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (unscoped [credential] isn't a per-host signal), got %v", got)
+	}
+}
+
+// Both signals can coexist and are independently detected.
+func TestPrivatePrefixesFromGitConfigInsteadOfAndCredentialHelperBoth(t *testing.T) {
+	src := `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+
+[credential "https://example.com/otherorg"]
+	helper = store
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg", "example.com/otherorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestNormalizeToModulePrefix(t *testing.T) {
 	cases := map[string]string{
 		"https://github.com/myorg/":     "github.com/myorg",

@@ -9,50 +9,88 @@ import (
 )
 
 var urlSectionRe = regexp.MustCompile(`(?i)^\[url\s+"([^"]*)"\]$`)
+var credentialSectionRe = regexp.MustCompile(`(?i)^\[credential\s+"([^"]*)"\]$`)
 var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
 var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 
-// privatePrefixesFromGitConfig scans a gitconfig file's contents for
+// privatePrefixesFromGitConfig scans a gitconfig file's contents for two
+// independent private-auth signals:
 //
 //	[url "git@github.com:myorg/"]
 //		insteadOf = https://github.com/myorg/
 //
-// style rewrites, which is the standard way to make `go get`/`go mod
-// download` authenticate to a private host over SSH instead of anonymous
-// HTTPS. It returns the "insteadOf" (origin) side of each rewrite,
-// normalized into a module-path-style prefix (scheme and trailing .git/
-// stripped), since that's the form that module paths in go.mod are written
-// in and the form GOPRIVATE patterns need to cover.
+// the standard way to make `go get`/`go mod download` authenticate to a
+// private host over SSH instead of anonymous HTTPS, and
 //
-// Only "insteadOf" counts as a signal here, not "pushInsteadOf": git only
-// rewrites fetch/clone URLs for the former (verified against real git
-// behavior — a pushInsteadOf-only config leaves `git ls-remote`/`git
-// fetch` hitting the original public HTTPS URL unchanged). `go get`'s
-// module fetches are a read path, so a pushInsteadOf-only rewrite (a
-// common pattern: anonymous HTTPS for reads, authenticated SSH only for
-// pushes) never makes the fetch private, and treating it as a sumdb-leak
-// signal would flag every ordinary public dependency under that prefix.
+//	[credential "https://github.com/myorg"]
+//		helper = store
+//
+// a URL-scoped git credential helper (see gitcredentials(7), "CREDENTIAL
+// CONTEXTS") — the mechanism `go`'s own subprocess `git clone`/`git
+// fetch` uses to authenticate a *plain, unrewritten* HTTPS URL, e.g. the
+// config `gh auth setup-git` writes per-host. No insteadOf rewrite is
+// needed for this path at all, so a module authenticated purely this way
+// was previously invisible to this tool. Both return the "origin" side of
+// the config, normalized into a module-path-style prefix (scheme and
+// trailing .git/ stripped), since that's the form that module paths in
+// go.mod are written in and the form GOPRIVATE patterns need to cover.
+//
+// Only "insteadOf" counts as a signal in a [url] section, not
+// "pushInsteadOf": git only rewrites fetch/clone URLs for the former
+// (verified against real git behavior — a pushInsteadOf-only config leaves
+// `git ls-remote`/`git fetch` hitting the original public HTTPS URL
+// unchanged). `go get`'s module fetches are a read path, so a
+// pushInsteadOf-only rewrite (a common pattern: anonymous HTTPS for
+// reads, authenticated SSH only for pushes) never makes the fetch
+// private, and treating it as a sumdb-leak signal would flag every
+// ordinary public dependency under that prefix.
+//
+// Only a non-empty "helper" counts as a signal in a [credential] section —
+// `gh auth setup-git` itself writes an empty "helper = " line first (to
+// clear any inherited default) before the real "helper = !gh auth
+// git-credential" line, and an empty value configures no credentials at
+// all. A bare top-level [credential] section (no URL context, applying to
+// every fetch) is not scanned as a signal either way: `isKnownPublicHost`
+// only ever excludes a *bare-host* [url]/[credential] context (see its
+// doc comment) — a completely unscoped [credential] section is broader
+// still, applying to hosts that aren't even multi-tenant code hosts, and
+// treating it as "every dependency is private" would be an even worse
+// false-positive flood than the bare-host case it's modeled on.
 func privatePrefixesFromGitConfig(data []byte) []string {
 	var prefixes []string
-	inURLSection := false
+	section := "" // "", "url", "credential"
+	credentialURL := ""
 	for _, raw := range splitLogicalLines(data) {
 		line := strings.TrimSpace(stripLineComment(raw))
 		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			inURLSection = urlSectionRe.MatchString(line)
+			switch {
+			case urlSectionRe.MatchString(line):
+				section = "url"
+			case credentialSectionRe.MatchString(line):
+				section = "credential"
+				credentialURL = credentialSectionRe.FindStringSubmatch(line)[1]
+			default:
+				section = ""
+			}
 			continue
 		}
-		if !inURLSection {
+		if section == "" {
 			continue
 		}
 		key, value, ok := splitKV(line)
 		if !ok {
 			continue
 		}
-		if key == "insteadof" {
+		switch {
+		case section == "url" && key == "insteadof":
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
+				prefixes = append(prefixes, p)
+			}
+		case section == "credential" && key == "helper" && value != "":
+			if p := normalizeToModulePrefix(credentialURL); p != "" && !isKnownPublicHost(p) {
 				prefixes = append(prefixes, p)
 			}
 		}

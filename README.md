@@ -6,12 +6,13 @@
 
 Audits a Go module's `GOPRIVATE`/`GONOSUMDB` configuration against its
 `go.mod` dependencies and its private-module auth setup — git `insteadOf`
-rewrites and netrc credentials — catching two silent misconfigurations
-around private Go modules:
+rewrites, git credential helpers, and netrc credentials — catching two
+silent misconfigurations around private Go modules:
 
-1. **Sumdb leaks.** If you've set up a git `insteadOf` rewrite (or netrc
-   credentials) to authenticate `go get` to a private host, but forgot to
-   add that module's path to `GOPRIVATE`/`GONOSUMDB`, the `go` command
+1. **Sumdb leaks.** If you've set up a git `insteadOf` rewrite, a git
+   credential helper, or netrc credentials to authenticate `go get` to a
+   private host, but forgot to add that module's path to
+   `GOPRIVATE`/`GONOSUMDB`, the `go` command
    still queries the public checksum database (`sum.golang.org`) for it
    on every build. The source fetch is private; the module's existence,
    path, and version are not — they leak to Google's sumdb regardless.
@@ -71,7 +72,7 @@ goprivaudit
 ```
 
 ```
-SUMDB LEAK: github.com/myorg/internal-tool has a private-auth signal (git insteadOf rewrite or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database
+SUMDB LEAK: github.com/myorg/internal-tool has a private-auth signal (git insteadOf rewrite, git credential helper, or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database
 ```
 
 Exits `0` with "no issues found" when clean, `1` when it finds something,
@@ -115,9 +116,9 @@ time.
 
 ## How it detects "this module should be private"
 
-Two independent signals, either one is enough to flag a module.
+Three independent signals, any one is enough to flag a module.
 
-**Git config.** It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
+**Git config: insteadOf.** It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
 files the real `git config` global tier reads — `$XDG_CONFIG_HOME/git/config`
 (or `~/.config/git/config` when that's unset) and `~/.gitconfig`, both of
 which apply together, not one-or-the-other — plus the module's
@@ -141,6 +142,28 @@ identity or rewrite to everything under one directory tree, e.g. a work
 vs. personal setup) are followed the way git itself resolves them, so a
 rewrite living in an included file is still caught. Other `includeIf`
 condition kinds (`onbranch:`, `hasconfig:`, ...) aren't evaluated.
+
+**Git config: credential helper.** It also looks for a URL-scoped git
+credential helper (see `git help gitcredentials`, "CREDENTIAL CONTEXTS")
+in the same config files — the mechanism `go`'s own subprocess `git
+clone`/`git fetch` uses to authenticate a plain, unrewritten HTTPS URL, no
+`insteadOf` rewrite needed at all. This is exactly what `gh auth
+setup-git` configures for you:
+
+```gitconfig
+[credential "https://github.com/myorg"]
+	helper = store
+```
+
+A bare-host context (no org/path, e.g. plain `https://github.com` — what
+`gh auth setup-git` actually writes by default, since it authenticates a
+whole host, not one org) is **not** treated as a signal, the same way a
+bare-host `insteadOf` rewrite isn't: it doesn't name a specific private
+module, and flagging it would mark every public dependency on that host
+as a leak. Only an org- or path-scoped `[credential "..."]` context
+counts. An empty `helper = ` value (git's own way to clear an inherited
+default before setting a real one — `gh auth setup-git` writes exactly
+this pattern) doesn't count either, since it configures no credentials.
 
 **Netrc.** It also checks the netrc file (`$NETRC`, or `~/.netrc` — `~/_netrc` on
 Windows) for `machine` entries with a login and password, since netrc is
