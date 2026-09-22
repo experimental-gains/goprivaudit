@@ -305,8 +305,27 @@ func addReplace(out map[string]replaceTarget, entry string) {
 	if oldPath == "" || newPath == "" {
 		return
 	}
-	local := strings.HasPrefix(newPath, "./") || strings.HasPrefix(newPath, "../") || filepath.IsAbs(newPath)
-	out[oldPath] = replaceTarget{path: newPath, isLocal: local}
+	out[oldPath] = replaceTarget{path: newPath, isLocal: isDirectoryPath(newPath)}
+}
+
+// isDirectoryPath mirrors golang.org/x/mod/modfile.IsDirectoryPath: a
+// replacement without a version must be a directory path, and the real
+// go tool's own grammar (verified live: `replace foo => ..` builds and
+// `go list -m all` resolves it straight off disk, no network call) treats
+// the bare "." and ".." forms as directory paths too, not just "./" and
+// "../" — a plain HasPrefix("./"/"../")-or-IsAbs check misses exactly
+// those two bare forms, misclassifying a purely local replace as a
+// network-fetched module path (and, via resolveEffectiveModules, sending
+// the literal string "." or ".." to be checked against GOPRIVATE/
+// GONOSUMDB in its place) even though `go` never queries anything for it.
+// Windows-style forms (".\", "..\", bare "\", a drive letter) are in the
+// real x/mod check too, but a go.mod containing one fails to parse at all
+// on a non-Windows host (modfile.Parse rejects it explicitly), so this
+// tool — which only ever runs on Linux — doesn't need to recognize them.
+func isDirectoryPath(path string) bool {
+	return path == "." || path == ".." ||
+		strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") ||
+		filepath.IsAbs(path)
 }
 
 // resolveEffectiveModules applies replace directives to a list of required

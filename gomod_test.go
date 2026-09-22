@@ -133,6 +133,35 @@ replace example.com/fork-me => example.com/myorg/fork-me v1.2.3
 	}
 }
 
+func TestParseReplacesBareDotDot(t *testing.T) {
+	// Verified against the real go toolchain: `replace foo => ..` (no
+	// trailing slash) is a valid go.mod construct — `go build` accepts it
+	// and `go list -m all` resolves it straight off disk, never touching
+	// a proxy — but a naive HasPrefix("./"/"../") check misses this bare
+	// form (golang.org/x/mod/modfile.IsDirectoryPath treats "." and ".."
+	// as directory paths too, not just "./" and "../"), misclassifying a
+	// purely local replace as a network-fetched module path.
+	src := "module example.com/foo\n\nreplace example.com/bar => ..\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: "..", isLocal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseReplacesBareDot(t *testing.T) {
+	src := "module example.com/foo\n\nreplace example.com/bar => .\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: ".", isLocal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestParseReplacesBlock(t *testing.T) {
 	src := `module example.com/foo
 
