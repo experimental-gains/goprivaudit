@@ -190,6 +190,44 @@ func TestParseReplacesBacktickQuotedLocalPath(t *testing.T) {
 	}
 }
 
+func TestParseReplacesQuotedLocalPathWithDoubleSlash(t *testing.T) {
+	// A doubled path separator inside a quoted local replace path is
+	// unusual but real go.mod syntax `go build` accepts and resolves
+	// correctly (verified live against the actual go toolchain). Before
+	// stripComment was made quote-aware, its naive strings.Index(line,
+	// "//") found the "//" inside the quotes and truncated the line
+	// there, leaving a stray leading quote in the parsed path and
+	// causing the "../" local-path prefix check to miss — misclassifying
+	// a purely local, never-network-fetched replace as a module to check
+	// against GOPRIVATE.
+	src := "module example.com/foo\n\nreplace example.com/bar => \"../vendor//bar\"\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: "../vendor//bar", isLocal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseReplacesQuotedLocalPathWithEscapedQuoteAndComment(t *testing.T) {
+	// A backslash-escaped quote inside a double-quoted local replace path
+	// (valid go.mod string-literal syntax, same rules leadingQuotedString
+	// already unescapes) followed by a trailing "// ..." comment.
+	// Exercises stripComment's backslash-skip branch: it must consume the
+	// escaped '"' as string content rather than mistaking it for the
+	// close quote, so scanning continues correctly and the real comment
+	// marker after the actual close quote is still found and stripped.
+	src := "module example.com/foo\n\nreplace example.com/bar => \"../a\\\"b\" // comment\n"
+	got := parseReplaces([]byte(src))
+	want := map[string]replaceTarget{
+		"example.com/bar": {path: `../a"b`, isLocal: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestParseReplacesNone(t *testing.T) {
 	if got := parseReplaces([]byte("module example.com/foo\n")); len(got) != 0 {
 		t.Errorf("expected no replaces, got %v", got)

@@ -136,10 +136,39 @@ func effectiveToolModules(tools []string, requires []string) []string {
 }
 
 // stripComment removes a trailing "// ..." line comment, e.g. the
-// "// indirect" annotation go mod tidy adds.
+// "// indirect" annotation go mod tidy adds. "//" inside a double- or
+// backtick-quoted string is left alone rather than treated as a comment
+// marker, mirroring golang.org/x/mod/modfile's lexer (readToken): its
+// quoted-string scan consumes characters up to the matching close quote
+// unconditionally, only looking for "//" again once back outside any
+// string. A plain strings.Index(line, "//") truncates mid-string the
+// moment a quoted local replace path happens to contain a doubled
+// separator — e.g. `replace foo => "../vendor//bar"`, which a real
+// go.mod accepts and `go build` resolves correctly (verified live) —
+// corrupting the parsed path and, via addReplace's "../" prefix check
+// on the now-mangled string, misclassifying a purely local replace as a
+// network-fetched module to check against GOPRIVATE instead.
 func stripComment(line string) string {
-	if i := strings.Index(line, "//"); i >= 0 {
-		return line[:i]
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; c {
+		case '"':
+			i++
+			for i < len(line) && line[i] != '"' {
+				if line[i] == '\\' && i+1 < len(line) {
+					i++
+				}
+				i++
+			}
+		case '`':
+			i++
+			for i < len(line) && line[i] != '`' {
+				i++
+			}
+		case '/':
+			if i+1 < len(line) && line[i+1] == '/' {
+				return line[:i]
+			}
+		}
 	}
 	return line
 }
