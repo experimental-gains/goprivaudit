@@ -230,6 +230,58 @@ func TestPrivatePrefixesFromGitConfigInlineComments(t *testing.T) {
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigLineContinuation covers a real,
+// git-accepted way to keep a long insteadOf URL readable in a hand-edited
+// dotfile: a trailing unescaped backslash immediately before the newline
+// continues the value onto the next physical line. Verified against real
+// git (`git config --file ... --get-regexp '.*'` on this exact input
+// resolves to `url.git@github.com:myorg/.insteadof https://github.com/myorg/`,
+// one continued value, not two garbled lines). Before the
+// splitLogicalLines fix, the line-based scanner treated each physical
+// line independently: `https://git` (unterminated, no real match) on the
+// first line and `hub.com/myorg/` (no `=`, dropped by splitKV) on the
+// second — losing the real private-module signal entirely, a false
+// negative of the same shape as the case-sensitivity and bare "."/".."
+// gaps fixed in prior runs.
+func TestPrivatePrefixesFromGitConfigLineContinuation(t *testing.T) {
+	src := "[url \"git@github.com:myorg/\"]\n\tinsteadOf = https://git\\\nhub.com/myorg/\n"
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigLineContinuationCRLF is the same
+// real-git-verified case as above, on a CRLF gitconfig (common on
+// Windows) — the continuation trigger is a backslash immediately before
+// "\r\n", not just a bare "\n".
+func TestPrivatePrefixesFromGitConfigLineContinuationCRLF(t *testing.T) {
+	src := "[url \"git@github.com:myorg/\"]\r\n\tinsteadOf = https://git\\\r\nhub.com/myorg/\r\n"
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigContinuationNotHonoredInComment
+// confirms the scanner matches real git's actual behavior rather than
+// over-generalizing: a trailing backslash inside a comment does NOT
+// continue onto the next line (verified live — real git raises a syntax
+// error on the dangling next line in this exact input, rather than
+// joining it into the comment). The tool's best-effort scanner doesn't
+// need to error on malformed input, but it must not silently misjoin a
+// comment tail with the following, unrelated line either.
+func TestPrivatePrefixesFromGitConfigContinuationNotHonoredInComment(t *testing.T) {
+	src := "[url \"git@github.com:myorg/\"]\n\tinsteadOf = https://github.com/myorg/ # trailing\\\nstill comment?\n"
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 func TestStripLineComment(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{`insteadOf = https://x/`, `insteadOf = https://x/`},

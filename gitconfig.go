@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"os"
 	"path"
 	"path/filepath"
@@ -36,9 +35,8 @@ var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 func privatePrefixesFromGitConfig(data []byte) []string {
 	var prefixes []string
 	inURLSection := false
-	sc := bufio.NewScanner(strings.NewReader(string(data)))
-	for sc.Scan() {
-		line := strings.TrimSpace(stripLineComment(sc.Text()))
+	for _, raw := range splitLogicalLines(data) {
+		line := strings.TrimSpace(stripLineComment(raw))
 		if line == "" {
 			continue
 		}
@@ -79,9 +77,8 @@ func parseIncludes(data []byte) []includeDirective {
 	var out []includeDirective
 	section := "" // "" | "include" | "includeif"
 	cond := ""
-	sc := bufio.NewScanner(strings.NewReader(string(data)))
-	for sc.Scan() {
-		line := strings.TrimSpace(stripLineComment(sc.Text()))
+	for _, raw := range splitLogicalLines(data) {
+		line := strings.TrimSpace(stripLineComment(raw))
 		if line == "" {
 			continue
 		}
@@ -264,6 +261,67 @@ func privatePrefixesFromConfigFile(configPath, moduleDir string, visited map[str
 // regexes require the line to end right after "]") makes the whole
 // section invisible — a silent false negative on a real private-module
 // signal, the failure mode this tool exists to avoid.
+// splitLogicalLines splits a git config file's raw contents into logical
+// lines, resolving git's own line-continuation rule (config.c's char-by-char
+// source reader, verified against real git behavior): a lone unescaped
+// backslash immediately followed by a newline joins that physical line with
+// the next one, with the backslash and newline both removed and nothing
+// inserted in their place — so `insteadOf = https://git\` followed by
+// `hub.com/myorg/` on the next physical line is one logical value,
+// `https://github.com/myorg/`, not the two-line garbage a naive per-line
+// scanner would produce. Continuation is NOT honored once a line has
+// entered an unquoted, unescaped '#'/';' comment tail (confirmed live: a
+// trailing backslash inside a comment ends the physical line normally and
+// git raises a syntax error on whatever the next line contains standing
+// alone) — mirrored here by freezing "in comment" state until the next
+// newline and skipping continuation checks while it's set. Without this, a
+// hand-wrapped insteadOf/path value spanning two lines (a real, git-
+// accepted way to keep a long URL readable in a dotfile) silently produces
+// a garbled, useless prefix on the first physical line and drops the real
+// private-module signal entirely — a false negative, the same failure
+// class as the case-sensitivity and bare "."/".." gaps fixed earlier.
+// Handles both bare-LF and CRLF line endings (confirmed live: a backslash
+// immediately before "\r\n" continues the line exactly like one before a
+// bare "\n" does) — CRLF gitconfigs are common on Windows.
+func splitLogicalLines(data []byte) []string {
+	var lines []string
+	var cur strings.Builder
+	inQuotes := false
+	inComment := false
+	for i := 0; i < len(data); i++ {
+		c := data[i]
+		switch {
+		case c == '\n':
+			lines = append(lines, strings.TrimSuffix(cur.String(), "\r"))
+			cur.Reset()
+			inQuotes = false
+			inComment = false
+		case inComment:
+			cur.WriteByte(c)
+		case c == '\\' && i+1 < len(data) && data[i+1] == '\n':
+			i++ // continuation: drop the backslash and the newline
+		case c == '\\' && i+2 < len(data) && data[i+1] == '\r' && data[i+2] == '\n':
+			i += 2 // continuation on a CRLF line: drop backslash, CR, and LF
+		case c == '\\' && i+1 < len(data):
+			cur.WriteByte(c)
+			cur.WriteByte(data[i+1])
+			i++
+		case c == '"':
+			inQuotes = !inQuotes
+			cur.WriteByte(c)
+		case !inQuotes && (c == '#' || c == ';'):
+			inComment = true
+			cur.WriteByte(c)
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, strings.TrimSuffix(cur.String(), "\r"))
+	}
+	return lines
+}
+
 func stripLineComment(line string) string {
 	inQuotes := false
 	for i := 0; i < len(line); i++ {
