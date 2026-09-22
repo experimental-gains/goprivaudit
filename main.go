@@ -19,6 +19,11 @@
 // directive (Go 1.24+ — see `go help tool`), that tool's package path
 // too. It makes no network calls: everything it checks is the local
 // go.mod, git config, netrc file, and `go env` output.
+//
+// Both checks are skipped when GOSUMDB=off: that setting disables the
+// checksum database entirely, for every module, so neither an uncovered
+// private module nor an overly broad GOPRIVATE/GONOSUMDB pattern can leak
+// or over-trust anything — there's no sumdb query happening at all.
 package main
 
 import (
@@ -42,6 +47,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	nosumdbOverride := fs.String("nosumdb", "", "override GONOSUMDB instead of reading it from `go env`")
 	goworkOverride := fs.String("gowork", "", "override the go.work path instead of reading GOWORK from `go env`")
 	goauthOverride := fs.String("goauth", "", "override GOAUTH instead of reading it from `go env`")
+	sumdbOverride := fs.String("sumdb", "", "override GOSUMDB instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -52,7 +58,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, goauthSet := false, false, false, false
+	privateSet, nosumdbSet, goworkSet, goauthSet, sumdbSet := false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -63,6 +69,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			goworkSet = true
 		case "goauth":
 			goauthSet = true
+		case "sumdb":
+			sumdbSet = true
 		}
 	})
 
@@ -110,7 +118,23 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 	}
 
-	r := audit(modules, prefixes, splitPatterns(gonosumdb))
+	gosumdb := *sumdbOverride
+	if !sumdbSet {
+		gosumdb = goEnv("GOSUMDB")
+	}
+
+	var r Report
+	if gosumdb != "off" {
+		// GOSUMDB=off disables the checksum database entirely, for every
+		// module — per `go help module-auth`, no sumdb query is ever made
+		// in that mode. Skipping the audit in that case isn't just
+		// "nothing to report": running it would actively misreport a
+		// SUMDB LEAK / BROAD PATTERN finding for a query that structurally
+		// cannot happen (verified live: with GOSUMDB=off, a private module
+		// uncovered by GOPRIVATE/GONOSUMDB is not a leak, since `go` never
+		// contacts sum.golang.org for it or anything else).
+		r = audit(modules, prefixes, splitPatterns(gonosumdb))
+	}
 	printReport(stdout, r)
 	if !r.Clean() {
 		return 1

@@ -70,6 +70,41 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunGoSumdbOffNoLeak covers a real false-positive this tool had:
+// GOSUMDB=off disables the checksum database entirely, for every module,
+// per `go help module-auth` — verified live (`GOSUMDB=off go env GOSUMDB`)
+// that this holds regardless of what GOPRIVATE/GONOSUMDB say. Before the
+// fix, `run` never read GOSUMDB at all, so it still reported a SUMDB LEAK
+// for a module with a private-auth signal but no GOPRIVATE/GONOSUMDB
+// coverage — an alarm for a checksum-database query that structurally
+// cannot happen in this mode.
+func TestRunGoSumdbOffNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-sumdb", "off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean with GOSUMDB=off, got: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaGitConfigInclude covers a real, common git config
 // pattern this tool previously missed entirely: an insteadOf rewrite
 // living in a file pulled in via [include] rather than written directly

@@ -23,6 +23,11 @@ around private Go modules:
 It makes no network calls. Everything it checks — `go.mod`, git config,
 the netrc file, `go env` output — is local.
 
+Both checks are skipped (reported clean) when `GOSUMDB=off`: that setting
+disables the checksum database entirely, for every module, so neither
+finding can apply — there's no sumdb query happening for anything to leak
+from or over-trust.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
@@ -90,6 +95,7 @@ Flags, mainly for testing/CI overrides:
 -nosumdb string  override GONOSUMDB instead of reading it from `go env`
 -gowork string   override the go.work path instead of reading GOWORK from `go env`
 -goauth string   override GOAUTH instead of reading it from `go env`
+-sumdb string    override GOSUMDB instead of reading it from `go env`
 ```
 
 ## Use with pre-commit
