@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/mod/modfile"
 	"golang.org/x/mod/module"
 )
 
@@ -103,6 +104,50 @@ func FuzzOverlyBroadPatternConsistency(f *testing.F) {
 		if starMatches && !patternMatches {
 			t.Fatalf("isOverlyBroadPattern(%q) = true, but it doesn't match %q even though a bare \"*\" does (oracle: x/mod MatchPrefixPatterns) — false claim of broadness",
 				pattern, target)
+		}
+	})
+}
+
+// FuzzIsDirectoryPath diffs isDirectoryPath (gomod.go) against
+// golang.org/x/mod/modfile.IsDirectoryPath, the real go.mod parser's own
+// function for the exact same question — isDirectoryPath's doc comment
+// already claims to mirror it (bare "."/".." plus the "./"/"../"/absolute
+// forms), but that claim had never actually been checked against the real
+// thing, only against a handful of hand-picked cases in
+// TestIsDirectoryPath. Unlike gitconfig.go's real-git-subprocess oracle,
+// this one's a direct importable function — x/mod is already a dependency
+// (see pattern.go's fuzz targets above) — so no subprocess or corpus
+// generation is needed, just the diff.
+func FuzzIsDirectoryPath(f *testing.F) {
+	seeds := []string{
+		".", "..", "./foo", "../foo", "../../foo", "/abs/path",
+		"...", "..foo", ".foo", "foo/..", "foo/.", "github.com/foo/bar",
+		"", "/", "//", "./", "../", "...//foo", "C:\\foo", `.\foo`,
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, path string) {
+		// Windows-style forms (a "C:" drive prefix, a backslash right
+		// after a leading "."/".." component, or a bare leading
+		// backslash) are excluded, matching isDirectoryPath's own doc
+		// comment (".\", "..\", bare "\", a drive letter"): confirmed
+		// live above, for all three shapes, that modfile.Parse itself
+		// rejects any go.mod replace line whose target takes this form
+		// ("replacement directory appears to be Windows path (on a
+		// non-windows system)"), on this tool's own Linux host, before
+		// isDirectoryPath ever runs on it — this tool's own callers can
+		// never observe that input.
+		if len(path) >= 2 && path[1] == ':' {
+			return // drive-letter form, e.g. "C:\foo"
+		}
+		if strings.HasPrefix(path, "\\") || strings.HasPrefix(path, ".\\") || strings.HasPrefix(path, "..\\") {
+			return
+		}
+		got := isDirectoryPath(path)
+		want := modfile.IsDirectoryPath(path)
+		if got != want {
+			t.Fatalf("isDirectoryPath(%q) = %v, want %v (oracle: x/mod modfile.IsDirectoryPath)", path, got, want)
 		}
 	})
 }
