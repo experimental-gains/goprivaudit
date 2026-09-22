@@ -191,6 +191,42 @@ func TestMatchGitdirGlobExactNoWildcard(t *testing.T) {
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigInlineComments covers a hand-edited
+// dotfile pattern: inline comments on both a section header and a value
+// line, both of which `git config --get` still parses correctly (verified
+// live — see stripLineComment's doc comment). Before stripLineComment
+// existed, the section-header comment made the whole section invisible
+// (the section regexes require the line to end right after "]") and the
+// value-line comment would have been appended onto the parsed prefix,
+// so this covers the more severe of the two failure modes.
+func TestPrivatePrefixesFromGitConfigInlineComments(t *testing.T) {
+	src := `[url "git@github.com:myorg/"] ; ssh rewrite for private org
+	insteadOf = https://github.com/myorg/ # keep on HTTPS elsewhere
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestStripLineComment(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`insteadOf = https://x/`, `insteadOf = https://x/`},
+		{`insteadOf = https://x/#note`, `insteadOf = https://x/`},
+		{`insteadOf = https://x/ # note`, `insteadOf = https://x/ `},
+		{`insteadOf = https://x/;note`, `insteadOf = https://x/`},
+		{`[url "x"] ; note`, `[url "x"] `},
+		{`val = "quoted # not a comment ; still not"`, `val = "quoted # not a comment ; still not"`},
+		{`val = "a\"#b" # real comment`, `val = "a\"#b" `},
+	}
+	for _, c := range cases {
+		if got := stripLineComment(c.in); got != c.want {
+			t.Errorf("stripLineComment(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 func TestPrivatePrefixesFromConfigFileIncludeCycleTerminates(t *testing.T) {
 	dir := t.TempDir()
 	a := writeFile(t, dir, "a.gitconfig", `[include]

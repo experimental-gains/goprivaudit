@@ -38,8 +38,8 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 	inURLSection := false
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+		line := strings.TrimSpace(stripLineComment(sc.Text()))
+		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
@@ -81,8 +81,8 @@ func parseIncludes(data []byte) []includeDirective {
 	cond := ""
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
+		line := strings.TrimSpace(stripLineComment(sc.Text()))
+		if line == "" {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
@@ -246,6 +246,37 @@ func privatePrefixesFromConfigFile(configPath, moduleDir string, visited map[str
 		}
 	}
 	return prefixes
+}
+
+// stripLineComment removes a trailing comment from a raw git config file
+// line, mirroring config.c's parse_value/git_parse_source char-by-char
+// scan (verified against real git behavior, see gitconfig_test.go): an
+// unquoted '#' or ';' starts a comment running to end of line, with no
+// whitespace required before it — "insteadOf = https://x/#note" and
+// "insteadOf = https://x/;note" both lose everything from the mark
+// onward, same as "[url \"x\"] ; note" loses the trailing note but keeps
+// the section header intact. A '#'/';' inside a double-quoted value is
+// literal, not a comment start, and a backslash escapes the following
+// character so an escaped quote doesn't toggle quote state. Without this,
+// the very common hand-edited-dotfile pattern of annotating an insteadOf
+// rewrite or a section header with an inline comment either garbles the
+// parsed prefix or (for a commented section header, since the section
+// regexes require the line to end right after "]") makes the whole
+// section invisible — a silent false negative on a real private-module
+// signal, the failure mode this tool exists to avoid.
+func stripLineComment(line string) string {
+	inQuotes := false
+	for i := 0; i < len(line); i++ {
+		switch c := line[i]; {
+		case c == '\\' && i+1 < len(line):
+			i++
+		case c == '"':
+			inQuotes = !inQuotes
+		case !inQuotes && (c == '#' || c == ';'):
+			return line[:i]
+		}
+	}
+	return line
 }
 
 func splitKV(line string) (key, value string, ok bool) {
