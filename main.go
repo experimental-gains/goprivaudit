@@ -33,7 +33,10 @@
 // Both checks are skipped when GOSUMDB=off: that setting disables the
 // checksum database entirely, for every module, so neither an uncovered
 // private module nor an overly broad GOPRIVATE/GONOSUMDB pattern can leak
-// or over-trust anything — there's no sumdb query happening at all.
+// or over-trust anything — there's no sumdb query happening at all. Both are
+// also skipped when the module resolves dependencies from a committed
+// vendor/ directory instead of the network (see vendorModeActive): that
+// build path never contacts sum.golang.org either, for the same reason.
 package main
 
 import (
@@ -57,6 +60,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	nosumdbOverride := fs.String("nosumdb", "", "override GONOSUMDB instead of reading it from `go env`")
 	goworkOverride := fs.String("gowork", "", "override the go.work path instead of reading GOWORK from `go env`")
 	sumdbOverride := fs.String("sumdb", "", "override GOSUMDB instead of reading it from `go env`")
+	goflagsOverride := fs.String("goflags", "", "override GOFLAGS instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -67,7 +71,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, sumdbSet := false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet := false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -78,6 +82,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			goworkSet = true
 		case "sumdb":
 			sumdbSet = true
+		case "goflags":
+			goflagsSet = true
 		}
 	})
 
@@ -139,8 +145,16 @@ func run(args []string, stdout, stderr *os.File) int {
 		gosumdb = goEnv("GOSUMDB")
 	}
 
+	goflags := *goflagsOverride
+	if !goflagsSet {
+		goflags = goEnv("GOFLAGS")
+	}
+	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
+	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt)
+
 	var r Report
-	if gosumdb != "off" {
+	switch {
+	case gosumdb == "off":
 		// GOSUMDB=off disables the checksum database entirely, for every
 		// module — per `go help module-auth`, no sumdb query is ever made
 		// in that mode. Skipping the audit in that case isn't just
@@ -149,6 +163,13 @@ func run(args []string, stdout, stderr *os.File) int {
 		// cannot happen (verified live: with GOSUMDB=off, a private module
 		// uncovered by GOPRIVATE/GONOSUMDB is not a leak, since `go` never
 		// contacts sum.golang.org for it or anything else).
+	case vendorActive:
+		// A vendor-mode build (see vendorModeActive) never contacts the
+		// module proxy or sum.golang.org either — same "cannot leak"
+		// reasoning as GOSUMDB=off above, just reached because the build
+		// reads everything off the committed vendor/ directory instead of
+		// the network, rather than because sumdb checking was turned off.
+	default:
 		r = audit(modules, prefixes, splitPatterns(gonosumdb))
 	}
 	printReport(stdout, r)

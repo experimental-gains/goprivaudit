@@ -31,6 +31,17 @@ disables the checksum database entirely, for every module, so neither
 finding can apply — there's no sumdb query happening for anything to leak
 from or over-trust.
 
+Both checks are also skipped when the module resolves its dependencies from
+a committed `vendor/` directory instead of the network — either because
+`vendor/modules.txt` exists next to `go.mod` and the module's `go` directive
+is 1.14 or higher (the `go` command's own auto-vendor default; see `go help
+modules`), or because `-mod=vendor` is set explicitly via `GOFLAGS`. Verified
+live: a vendor-mode build succeeds even with `GOPROXY` unreachable and
+`GOSUMDB` left at its default, so there's no sumdb query happening in that
+mode either. An explicit `-mod=mod`/`-mod=readonly` in `GOFLAGS` overrides
+the vendor auto-default back to the normal network-resolving path, and
+`goprivaudit` follows that override too.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
@@ -98,6 +109,7 @@ Flags, mainly for testing/CI overrides:
 -nosumdb string  override GONOSUMDB instead of reading it from `go env`
 -gowork string   override the go.work path instead of reading GOWORK from `go env`
 -sumdb string    override GOSUMDB instead of reading it from `go env`
+-goflags string  override GOFLAGS instead of reading it from `go env`
 ```
 
 ## Use with pre-commit

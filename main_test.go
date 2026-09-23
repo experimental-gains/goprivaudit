@@ -247,6 +247,130 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunVendorModeNoLeak covers a real go command behavior distinct from
+// GOSUMDB=off: when a module ships a committed vendor/ directory and its
+// go.mod's `go` directive is 1.14+ (the go command's own auto-vendor
+// condition, see `go help modules`), `go build`/`go install` resolve
+// dependencies from vendor/ and never consult the module proxy or
+// sum.golang.org at all — verified live (see vendorModeActive's doc
+// comment): a real `go build` with vendor mode active succeeds even with
+// GOPROXY pointed at an unreachable address and GOSUMDB left at its
+// default, while flipping to an explicit `-mod=mod` on the identical
+// tree immediately fails trying to reach the network. Before this fix,
+// `run` had no notion of vendoring at all, so it still reported a SUMDB
+// LEAK for a module with a private-auth signal but no GOPRIVATE/GONOSUMDB
+// coverage — an alarm for a checksum-database query that cannot happen in
+// this mode, the same false-positive shape as the GOSUMDB=off case above.
+func TestRunVendorModeNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "vendor/modules.txt", `# github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+## explicit; go 1.20
+github.com/myorg/internal-tool
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-sumdb", "",   // default (not off): vendor mode alone must be enough to skip
+		"-goflags", "", // no explicit -mod= override: rely on the vendor/modules.txt auto-default
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean in vendor mode, got: %s", stdout)
+	}
+}
+
+// TestRunVendorModeBelowGo114StillLeaks confirms the auto-vendor default's
+// go-version gate is honored: a vendor/modules.txt sitting next to a go.mod
+// pinned below go 1.14 does NOT make the go command auto-vendor (verified
+// live — see vendorModeActive's doc comment), so the audit must still run
+// and report the leak normally.
+func TestRunVendorModeBelowGo114StillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.13
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "vendor/modules.txt", `# github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+## explicit; go 1.13
+github.com/myorg/internal-tool
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding below go 1.14: %s", stdout)
+	}
+}
+
+// TestRunVendorModeExplicitModModStillLeaks confirms an explicit -mod=mod
+// (via GOFLAGS) overrides the vendor/ auto-default, matching real go
+// behavior (verified live: GOFLAGS=-mod=mod forces the network-resolving
+// path even with a real vendor/modules.txt present) — so the audit must
+// still run.
+func TestRunVendorModeExplicitModModStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "vendor/modules.txt", `# github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+## explicit; go 1.20
+github.com/myorg/internal-tool
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "-mod=mod",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding under explicit -mod=mod: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaGitConfigInclude covers a real, common git config
 // pattern this tool previously missed entirely: an insteadOf rewrite
 // living in a file pulled in via [include] rather than written directly

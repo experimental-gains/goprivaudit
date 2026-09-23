@@ -75,6 +75,27 @@ func parseRequireLine(s string) (requireEntry, bool) {
 	return e, true
 }
 
+// parseGoVersion extracts a go.mod's `go` directive version string (e.g.
+// "1.24.4" from a line reading "go 1.24.4"), or "" if the file has none. The
+// `go` directive is always a single-line directive, never a `go (...)`
+// block, so this doesn't need parseRequires/parseReplaces' block tracking.
+// Used by vendorModeActive to replicate the go command's own "vendor/
+// requires go >= 1.14" auto-detection rule.
+func parseGoVersion(data []byte) string {
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if rest, ok := cutKeyword(trimmed, "go"); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
 // parseTools extracts package import paths from `tool` directives in a
 // go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
 // names a *package* path, not necessarily a module path — e.g. `tool
