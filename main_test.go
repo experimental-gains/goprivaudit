@@ -284,7 +284,7 @@ github.com/myorg/internal-tool
 		"-gomod", gomod,
 		"-private", "",
 		"-nosumdb", "",
-		"-sumdb", "",   // default (not off): vendor mode alone must be enough to skip
+		"-sumdb", "", // default (not off): vendor mode alone must be enough to skip
 		"-goflags", "", // no explicit -mod= override: rely on the vendor/modules.txt auto-default
 	})
 	if code != 0 {
@@ -473,6 +473,77 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
 		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaGitConfigEnvVars covers the GIT_CONFIG_COUNT/
+// GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> environment-variable form of git
+// config end to end. Before this fix, gitConfigCandidates only ever
+// listed files, so a private-auth signal set purely via these variables —
+// a real, documented (git-config(1)) way to configure git "when you ...
+// cannot depend on a configuration file", e.g. a scripted CI setup that
+// deliberately avoids writing credentials to disk — was invisible even
+// though a real `go get`'s own git subprocess inherits and honors them
+// exactly like it would a config file.
+func TestRunFindsLeakViaGitConfigEnvVars(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // no ~/.gitconfig at all
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "url.git@github.com:myorg/.insteadof")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/myorg/")
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGitConfigGlobalOverride covers GIT_CONFIG_GLOBAL end to end, in
+// both directions git-config(1) documents it changing behavior: it replaces
+// the *entire* normal global tier (confirmed live that neither
+// $XDG_CONFIG_HOME/git/config nor ~/.gitconfig is read at all once it's
+// set), so (a) a real signal kept only in the override file must still be
+// found, and (b) a stale signal left in the now-ignored ~/.gitconfig must
+// NOT be flagged, since git itself would never act on it for this process.
+func TestRunGitConfigGlobalOverride(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".gitconfig", `[url "git@stale.example.com:org/"]
+	insteadOf = https://stale.example.com/org/
+`)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	override := writeFile(t, t.TempDir(), "override.gitconfig", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("GIT_CONFIG_GLOBAL", override)
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+require stale.example.com/org/other-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding from the override file: %s", stdout)
+	}
+	if strings.Contains(stdout, "stale.example.com") {
+		t.Errorf("stdout wrongly flagged a signal from the overridden (git-ignored) ~/.gitconfig: %s", stdout)
 	}
 }
 

@@ -115,6 +115,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	for _, p := range gitConfigCandidates(moduleDir) {
 		prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
 	}
+	prefixes = append(prefixes, privatePrefixesFromEnv(os.Getenv)...)
 
 	// A netrc `machine` entry is treated as a signal unconditionally, the
 	// same as the insteadOf/credential-helper signals above — GOAUTH does
@@ -181,24 +182,38 @@ func run(args []string, stdout, stderr *os.File) int {
 
 func gitConfigCandidates(moduleDir string) []string {
 	var out []string
-	// git-config(1): the "global" config tier is actually two files, not
-	// one — $XDG_CONFIG_HOME/git/config (defaulting to ~/.config/git/config)
-	// is read first, then ~/.gitconfig; single-valued keys in the latter
-	// override the former, but section entries like insteadOf are additive
-	// from both (verified live: a `git config --get-regexp insteadof` run
-	// with a rewrite placed only in ~/.config/git/config, and no
-	// ~/.gitconfig at all, still surfaces it). The pre-fix code only ever
-	// checked ~/.gitconfig, so a rewrite kept in the XDG location (git's
-	// own documented alternative, and the default for XDG-dotfiles-style
-	// setups) was silently invisible — a real false negative on the
-	// sumdb-leak check, not just an untested path.
-	if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-		out = append(out, filepath.Join(xdg, "git", "config"))
-	} else if home, err := os.UserHomeDir(); err == nil {
-		out = append(out, filepath.Join(home, ".config", "git", "config"))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		out = append(out, filepath.Join(home, ".gitconfig"))
+	if override := os.Getenv("GIT_CONFIG_GLOBAL"); override != "" {
+		// git-config(1): GIT_CONFIG_GLOBAL "take[s] the configuration from
+		// the given file[] instead from global ... configuration" — verified
+		// live that this replaces BOTH normal global locations entirely
+		// (neither $XDG_CONFIG_HOME/git/config nor ~/.gitconfig is read at
+		// all once it's set, even if they exist with real content). Reading
+		// them anyway would risk two different wrong results: missing a
+		// real private-auth signal kept only in the override file, or
+		// flagging a stale signal from a file git itself no longer
+		// consults for this process at all.
+		out = append(out, override)
+	} else {
+		// git-config(1): the "global" config tier is actually two files,
+		// not one — $XDG_CONFIG_HOME/git/config (defaulting to
+		// ~/.config/git/config) is read first, then ~/.gitconfig;
+		// single-valued keys in the latter override the former, but
+		// section entries like insteadOf are additive from both (verified
+		// live: a `git config --get-regexp insteadof` run with a rewrite
+		// placed only in ~/.config/git/config, and no ~/.gitconfig at all,
+		// still surfaces it). The pre-fix code only ever checked
+		// ~/.gitconfig, so a rewrite kept in the XDG location (git's own
+		// documented alternative, and the default for XDG-dotfiles-style
+		// setups) was silently invisible — a real false negative on the
+		// sumdb-leak check, not just an untested path.
+		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
+			out = append(out, filepath.Join(xdg, "git", "config"))
+		} else if home, err := os.UserHomeDir(); err == nil {
+			out = append(out, filepath.Join(home, ".config", "git", "config"))
+		}
+		if home, err := os.UserHomeDir(); err == nil {
+			out = append(out, filepath.Join(home, ".gitconfig"))
+		}
 	}
 	out = append(out, filepath.Join(moduleDir, ".git", "config"))
 	return out

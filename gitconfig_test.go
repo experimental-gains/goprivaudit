@@ -455,6 +455,96 @@ func TestStripLineComment(t *testing.T) {
 	}
 }
 
+func TestSplitConfigKey(t *testing.T) {
+	cases := []struct {
+		in                        string
+		section, subsection, name string
+		ok                        bool
+	}{
+		{"url.https://x-access-token@github.example.com/.insteadof", "url", "https://x-access-token@github.example.com/", "insteadof", true},
+		{"credential.https://github.example.com.helper", "credential", "https://github.example.com", "helper", true},
+		{"http.https://github.example.com/.extraheader", "http", "https://github.example.com/", "extraheader", true},
+		{"user.name", "", "", "", false},   // no subsection — can't be a URL-scoped signal
+		{"core.editor", "", "", "", false}, // same
+		{"nodothere", "", "", "", false},
+	}
+	for _, c := range cases {
+		section, subsection, name, ok := splitConfigKey(c.in)
+		if ok != c.ok {
+			t.Errorf("splitConfigKey(%q) ok = %v, want %v", c.in, ok, c.ok)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if section != c.section || subsection != c.subsection || name != c.name {
+			t.Errorf("splitConfigKey(%q) = (%q, %q, %q), want (%q, %q, %q)",
+				c.in, section, subsection, name, c.section, c.subsection, c.name)
+		}
+	}
+}
+
+// TestPrivatePrefixesFromEnv covers the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/
+// GIT_CONFIG_VALUE_<n> environment-variable form of git config — a real,
+// documented (git-config(1)) file-free way to inject config, verified live
+// (see the run-#238-era decision log) that a real `git ls-remote`/`fetch`
+// honors an insteadOf rewrite set this way exactly like one from a file.
+// Before this fix, privatePrefixesFromGitConfig only ever read files, so a
+// private-auth signal set purely via these variables — the documented
+// selling point being "spawn multiple git commands with a common
+// configuration but cannot depend on a configuration file" — was completely
+// invisible, even though `go get`'s own git subprocess inherits and honors
+// them exactly like any other environment variable.
+func TestPrivatePrefixesFromEnv(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "3",
+		"GIT_CONFIG_KEY_0":   "url.https://x-access-token@github.example.com/.insteadof",
+		"GIT_CONFIG_VALUE_0": "https://github.example.com/",
+		"GIT_CONFIG_KEY_1":   "credential.https://gitlab.mycorp.example.helper",
+		"GIT_CONFIG_VALUE_1": "store",
+		"GIT_CONFIG_KEY_2":   "core.editor", // no subsection, must not match anything
+		"GIT_CONFIG_VALUE_2": "vim",
+	}
+	got := privatePrefixesFromEnv(func(k string) string { return env[k] })
+	want := []string{"github.example.com", "gitlab.mycorp.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromEnvIgnoresKnownPublicHost mirrors
+// TestPrivatePrefixesFromGitConfigIgnoresBlanketPublicHostRewrite for the
+// env-var form: a bare-host insteadOf rewrite of github.com itself (go.dev's
+// own documented SSH-auth-convenience pattern) must not be treated as a
+// private-auth signal here either.
+func TestPrivatePrefixesFromEnvIgnoresKnownPublicHost(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "1",
+		"GIT_CONFIG_KEY_0":   "url.ssh://git@github.com/.insteadof",
+		"GIT_CONFIG_VALUE_0": "https://github.com/",
+	}
+	if got := privatePrefixesFromEnv(func(k string) string { return env[k] }); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
+// TestPrivatePrefixesFromEnvEmptyOrMissingCount covers git's own documented
+// rule that an empty/absent GIT_CONFIG_COUNT means zero pairs, not "read
+// until a key is missing" or a panic on out-of-range formatting.
+func TestPrivatePrefixesFromEnvEmptyOrMissingCount(t *testing.T) {
+	cases := []map[string]string{
+		{},
+		{"GIT_CONFIG_COUNT": ""},
+		{"GIT_CONFIG_COUNT": "0"},
+		{"GIT_CONFIG_COUNT": "not-a-number", "GIT_CONFIG_KEY_0": "url.x.insteadof", "GIT_CONFIG_VALUE_0": "https://y/"},
+	}
+	for _, env := range cases {
+		if got := privatePrefixesFromEnv(func(k string) string { return env[k] }); got != nil {
+			t.Errorf("env=%v: got %v, want nil", env, got)
+		}
+	}
+}
+
 func TestPrivatePrefixesFromConfigFileIncludeCycleTerminates(t *testing.T) {
 	dir := t.TempDir()
 	a := writeFile(t, dir, "a.gitconfig", `[include]

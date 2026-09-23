@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -139,6 +141,80 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 		}
 	}
 	return prefixes
+}
+
+// privatePrefixesFromEnv scans the GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> /
+// GIT_CONFIG_VALUE_<n> environment variables (git-config(1)'s documented,
+// file-free way to inject config: "useful for cases where you want to spawn
+// multiple git commands with a common configuration but cannot depend on a
+// configuration file") for the same three private-auth signals
+// privatePrefixesFromGitConfig looks for in files: url.<NEW>.insteadof,
+// credential.<URL>.helper, and http.<URL>.extraheader. Verified live that
+// these variables aren't cosmetic: a real `git ls-remote`/`git fetch`
+// honors an insteadOf rewrite set this way exactly like one from a config
+// file, and — since they're environment variables, not per-invocation
+// flags — they apply to every git subprocess for as long as they're set,
+// including the one `go get` itself spawns for a direct VCS fetch. A CI or
+// script setup that deliberately avoids ever writing credentials to a file
+// (this mechanism's whole documented selling point) leaves a real
+// private-auth signal completely invisible to this tool otherwise, since
+// privatePrefixesFromGitConfig only ever reads files.
+func privatePrefixesFromEnv(getenv func(string) string) []string {
+	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
+	if err != nil || count <= 0 {
+		// Per git-config(1): a missing or non-numeric GIT_CONFIG_COUNT is
+		// the same as GIT_CONFIG_COUNT=0 (git itself treats a genuinely
+		// invalid count as a fatal error rather than "0", but this tool
+		// only needs to not misread absent/empty as a signal, not
+		// replicate git's own error-exit behavior).
+		return nil
+	}
+	var prefixes []string
+	for i := 0; i < count; i++ {
+		key := getenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		value := getenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		section, subsection, name, ok := splitConfigKey(key)
+		if !ok {
+			continue
+		}
+		section = strings.ToLower(section)
+		name = strings.ToLower(name)
+		switch {
+		case section == "url" && name == "insteadof":
+			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
+				prefixes = append(prefixes, p)
+			}
+		case section == "credential" && name == "helper" && value != "":
+			if p := normalizeToModulePrefix(subsection); p != "" && !isKnownPublicHost(p) {
+				prefixes = append(prefixes, p)
+			}
+		case section == "http" && name == "extraheader" && value != "":
+			if p := normalizeToModulePrefix(subsection); p != "" && !isKnownPublicHost(p) {
+				prefixes = append(prefixes, p)
+			}
+		}
+	}
+	return prefixes
+}
+
+// splitConfigKey splits a git config key in the flat "section.subsection.name"
+// form used by GIT_CONFIG_KEY_<n> into its three parts, per git-config(1):
+// the section name is the text up to the first ".", the variable name is the
+// text after the last ".", and whatever's between — which may itself contain
+// dots, since it's typically a URL — is the subsection. Returns ok=false for
+// a key with no subsection (fewer than two dots total), which can't match
+// any of the three URL-scoped signals privatePrefixesFromEnv looks for.
+func splitConfigKey(key string) (section, subsection, name string, ok bool) {
+	i := strings.Index(key, ".")
+	if i < 0 {
+		return "", "", "", false
+	}
+	rest := key[i+1:]
+	j := strings.LastIndex(rest, ".")
+	if j < 0 {
+		return "", "", "", false
+	}
+	return key[:i], rest[:j], rest[j+1:], true
 }
 
 // includeDirective is a raw [include]/[includeIf "..."] path entry found
