@@ -98,7 +98,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.26
+- uses: experimental-gains/goprivaudit@v0.1.27
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -117,7 +117,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.26
+    rev: v0.1.27
     hooks:
       - id: goprivaudit
 ```
@@ -135,9 +135,15 @@ Three independent signals, any one is enough to flag a module.
 files the real `git config` global tier reads — `$XDG_CONFIG_HOME/git/config`
 (or `~/.config/git/config` when that's unset) and `~/.gitconfig`, both of
 which apply together, not one-or-the-other — plus the module's
-`.git/config`. This is the standard way to point `go get` at an
-authenticated SSH remote for a host you don't want to fetch anonymously,
-e.g.:
+`.git/config`. If `GIT_CONFIG_GLOBAL` is set it's honored the way real git
+honors it too: that file replaces the whole global tier above, not an
+addition to it. It also reads the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
+`GIT_CONFIG_VALUE_<n>` environment variables (git-config(1)'s file-free way
+to inject config — common in scripted/CI setups that deliberately avoid
+writing credentials to disk), which a real `git` subprocess — including the
+one `go get` spawns — honors identically to a config file. This is the
+standard way to point `go get` at an authenticated SSH remote for a host
+you don't want to fetch anonymously, e.g.:
 
 ```gitconfig
 [url "git@github.com:myorg/"]
