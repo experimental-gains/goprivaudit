@@ -80,19 +80,3 @@ func privatePrefixesFromNetrc(data []byte) []string {
 	}
 	return prefixes
 }
-
-// goauthUsesNetrc reports whether the effective GOAUTH value (a
-// semicolon-separated command list, default "netrc" per `go help goauth`)
-// includes the netrc auth command. If it doesn't — e.g. GOAUTH=off, or a
-// custom command list that dropped the default — `go` never reads netrc at
-// all, and treating its contents as a private-auth signal would be a false
-// positive rather than the real thing it's meant to catch.
-func goauthUsesNetrc(goauth string) bool {
-	for _, cmd := range strings.Split(goauth, ";") {
-		fields := strings.Fields(cmd)
-		if len(fields) > 0 && fields[0] == "netrc" {
-			return true
-		}
-	}
-	return false
-}

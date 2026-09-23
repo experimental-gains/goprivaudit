@@ -95,7 +95,6 @@ Flags, mainly for testing/CI overrides:
 -private string  override GOPRIVATE instead of reading it from `go env`
 -nosumdb string  override GONOSUMDB instead of reading it from `go env`
 -gowork string   override the go.work path instead of reading GOWORK from `go env`
--goauth string   override GOAUTH instead of reading it from `go env`
 -sumdb string    override GOSUMDB instead of reading it from `go env`
 ```
 
@@ -166,15 +165,15 @@ default before setting a real one — `gh auth setup-git` writes exactly
 this pattern) doesn't count either, since it configures no credentials.
 
 **Netrc.** It also checks the netrc file (`$NETRC`, or `~/.netrc` — `~/_netrc` on
-Windows) for `machine` entries with a login and password, since netrc is
-`go`'s **default** `GOAUTH` mechanism (`go help goauth`) for authenticating
-HTTPS module fetches — no git config or SSH involved at all. This is easy
-to end up relying on by accident: many environments already have a
-`~/.netrc` for unrelated tools, and `go` starts consulting it for module
-fetches automatically, with nothing module-specific to opt into. A
-`machine` entry only counts if the effective `GOAUTH` value actually
-includes `netrc` (it does by default; `GOAUTH=off` or a fully custom
-command list turns this off, and `goprivaudit` follows suit).
+Windows) for `machine` entries with a login and password. This is easy to
+end up relying on by accident: many environments already have a
+`~/.netrc` for unrelated tools, and both `go`'s own HTTPS client (via
+`GOAUTH`, default `netrc` — `go help goauth`) and a `git` subprocess
+fetch (the dominant path for a private, non-proxy-compliant host) consult
+it automatically, with nothing module-specific to opt into. Unlike
+`go`'s own client, `git` has no notion of `GOAUTH` at all — it always
+reads `~/.netrc` for a plain HTTPS remote — so a `machine` entry counts
+as a signal unconditionally, regardless of the effective `GOAUTH` value.
 
 ## What it does not do
 

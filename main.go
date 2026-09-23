@@ -9,9 +9,10 @@
 //     host/path (see `git help gitcredentials`; the mechanism `go`'s own
 //     subprocess `git clone`/`git fetch` uses to authenticate a plain,
 //     unrewritten HTTPS URL — e.g. the config `gh auth setup-git` writes),
-//     or a netrc `machine` entry for its host (the default GOAUTH
-//     mechanism `go` uses for HTTPS module fetches, see `go help
-//     goauth`) — but isn't covered by GOPRIVATE/GONOSUMDB, so `go` still
+//     or a netrc `machine` entry for its host (also consulted by `git`'s
+//     own subprocess fetch, unconditionally — see `go help goauth`: GOAUTH
+//     only governs the `go` command's own HTTP client, not a `git`
+//     subprocess) — but isn't covered by GOPRIVATE/GONOSUMDB, so `go` still
 //     queries the public sum.golang.org checksum database for it —
 //     leaking the module's path and version even though the source fetch
 //     itself goes over a private, authenticated connection.
@@ -51,7 +52,6 @@ func run(args []string, stdout, stderr *os.File) int {
 	privateOverride := fs.String("private", "", "override GOPRIVATE instead of reading it from `go env`")
 	nosumdbOverride := fs.String("nosumdb", "", "override GONOSUMDB instead of reading it from `go env`")
 	goworkOverride := fs.String("gowork", "", "override the go.work path instead of reading GOWORK from `go env`")
-	goauthOverride := fs.String("goauth", "", "override GOAUTH instead of reading it from `go env`")
 	sumdbOverride := fs.String("sumdb", "", "override GOSUMDB instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -63,7 +63,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, goauthSet, sumdbSet := false, false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet := false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -72,8 +72,6 @@ func run(args []string, stdout, stderr *os.File) int {
 			nosumdbSet = true
 		case "gowork":
 			goworkSet = true
-		case "goauth":
-			goauthSet = true
 		case "sumdb":
 			sumdbSet = true
 		}
@@ -108,18 +106,27 @@ func run(args []string, stdout, stderr *os.File) int {
 		prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
 	}
 
-	goauth := *goauthOverride
-	if !goauthSet {
-		goauth = goEnv("GOAUTH")
-	}
-	if goauth == "" {
-		goauth = "netrc" // `go help goauth`: default is netrc when GOAUTH is unset
-	}
-	if goauthUsesNetrc(goauth) {
-		if p := netrcPath(); p != "" {
-			if data, err := os.ReadFile(p); err == nil {
-				prefixes = append(prefixes, privatePrefixesFromNetrc(data)...)
-			}
+	// A netrc `machine` entry is treated as a signal unconditionally, the
+	// same as the insteadOf/credential-helper signals above — GOAUTH does
+	// NOT gate this the way an earlier version of this tool assumed. GOAUTH
+	// (`go help goauth`) only governs the `go` command's *own* HTTP client
+	// (go-import discovery, GOPROXY mirror requests); it has no effect on
+	// `git` invoked as a subprocess for a direct VCS fetch (the dominant
+	// fetch path for a private, non-proxy-compliant host, and the exact
+	// scenario the credential-helper signal above already covers without
+	// any GOAUTH check). Verified live: with GOAUTH=off and no credential
+	// helper or insteadOf configured, a bare `git` HTTPS fetch against a
+	// Basic-Auth-protected server still succeeds purely via ~/.netrc — git
+	// has no notion of GOAUTH at all and always consults netrc itself —
+	// and a real `go get` reproduces the same thing end to end: it
+	// resolves the module and starts downloading it via the netrc-
+	// authenticated fetch, GOAUTH=off notwithstanding. So a module reachable
+	// only via netrc creds is just as privately-fetched, and just as much
+	// of a sumdb-leak risk if GOPRIVATE/GONOSUMDB doesn't cover it, whether
+	// or not GOAUTH happens to mention netrc.
+	if p := netrcPath(); p != "" {
+		if data, err := os.ReadFile(p); err == nil {
+			prefixes = append(prefixes, privatePrefixesFromNetrc(data)...)
 		}
 	}
 

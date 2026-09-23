@@ -86,25 +86,6 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 	}
 }
 
-func TestGoauthUsesNetrc(t *testing.T) {
-	tests := []struct {
-		goauth string
-		want   bool
-	}{
-		{"netrc", true},
-		{"off", false},
-		{"git /home/me/.git-creds", false},
-		{"netrc;off", true},
-		{"off;netrc", true},
-		{"", false},
-	}
-	for _, tt := range tests {
-		if got := goauthUsesNetrc(tt.goauth); got != tt.want {
-			t.Errorf("goauthUsesNetrc(%q) = %v, want %v", tt.goauth, got, tt.want)
-		}
-	}
-}
-
 // TestRunFindsLeakViaNetrc covers a private-module auth path this tool
 // previously missed entirely: netrc credentials, the default GOAUTH
 // mechanism (`go help goauth`) `go` uses for HTTPS module fetches, with no
@@ -125,7 +106,7 @@ require git.privatecorp.internal/team/widgets v1.2.3
 `)
 
 	stdout, _, code := captureRun(t, []string{
-		"-gomod", gomod, "-private", "", "-nosumdb", "", "-goauth", "netrc",
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
 	})
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
@@ -135,15 +116,30 @@ require git.privatecorp.internal/team/widgets v1.2.3
 	}
 }
 
-// TestRunIgnoresNetrcWhenGoauthDoesNotUseIt covers the flip side: if GOAUTH
-// has been overridden away from netrc (e.g. "off", or a custom command
-// list that dropped the default), `go` never reads ~/.netrc at all, and
-// treating its contents as a signal anyway would be a false positive, not
-// the real leak this tool exists to catch.
-func TestRunIgnoresNetrcWhenGoauthDoesNotUseIt(t *testing.T) {
+// TestRunFindsLeakViaNetrcEvenWithGoauthOff is the regression test for the
+// bug fixed here: an earlier version of this tool only treated a netrc
+// `machine` entry as a signal when the effective GOAUTH value included
+// "netrc", on the theory that GOAUTH=off means "`go` never reads netrc at
+// all." That's false for the common case this tool exists to catch — a
+// direct VCS fetch of an uncovered private module, which `go` hands off to
+// a `git` subprocess. GOAUTH (`go help goauth`) only governs the `go`
+// command's own HTTP client (go-import discovery, GOPROXY mirror auth); it
+// has no effect on `git`, which has no notion of GOAUTH and always
+// consults ~/.netrc itself for a plain HTTPS remote. Verified live (see
+// decision log): with GOAUTH=off and no credential helper or insteadOf
+// configured, a bare `git` fetch against a Basic-Auth-protected HTTPS
+// server still succeeds via ~/.netrc alone, and a real `go get` against a
+// GOINSECURE-allowed HTTP git server reproduces the same thing end to end
+// — it resolves and starts downloading the module via the netrc-
+// authenticated fetch despite GOAUTH=off. So the pre-fix tool's "off means
+// skip it" behavior was a false negative: exactly the setup
+// TestRunFindsLeakViaNetrc covers, just with GOAUTH explicitly set to
+// "off", used to report a clean bill of health.
+func TestRunFindsLeakViaNetrcEvenWithGoauthOff(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n")
 	t.Setenv("HOME", home)
+	t.Setenv("GOAUTH", "off")
 
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -152,10 +148,13 @@ require git.privatecorp.internal/team/widgets v1.2.3
 `)
 
 	stdout, _, code := captureRun(t, []string{
-		"-gomod", gomod, "-private", "", "-nosumdb", "", "-goauth", "off",
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
 	})
-	if code != 0 {
-		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
 	}
 }
 
@@ -174,7 +173,7 @@ require git.privatecorp.internal/team/widgets v1.2.3
 `)
 
 	stdout, _, code := captureRun(t, []string{
-		"-gomod", gomod, "-private", "", "-nosumdb", "", "-goauth", "netrc",
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
 	})
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
