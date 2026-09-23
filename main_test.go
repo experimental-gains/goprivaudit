@@ -102,6 +102,85 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestExtraHeaderPrivateHostEndToEnd reproduces, end to end through the
+// real built CLI, the exact `[http "<url>"] extraheader = ...` section
+// `actions/checkout` (the default way almost every GitHub Actions Go
+// workflow checks out code) writes when `github-server-url` points at a
+// self-hosted GitHub Enterprise Server instance — verified against its
+// real source (git-auth-helper.ts, `GitAuthHelper.configureToken`) and
+// reproduced live with the real `git config --file
+// http.<url>.extraheader ...` command that code runs, then confirmed
+// `git config --get-all http.<url>.extraheader` resolves the value back
+// out of exactly this section form before trusting this test.
+// (`actions/checkout` itself wires this file in via an
+// `includeIf.gitdir:<path>/.git` entry in the repo's own .git/config —
+// the include-follows-through-includeIf mechanism is already covered
+// generically by TestRunFindsLeakViaGitConfigIncludeIf for another
+// signal type, so this test scans the section directly, the same way
+// TestRunFindsLeak does for insteadOf, to isolate what's actually new
+// here: recognizing the [http] section at all.) Before this fix,
+// goprivaudit reported "no issues found" for this exact section (built
+// CLI, not just the unit-level parser test) even though the module is
+// fetched with real, job-scoped credentials and isn't covered by
+// GOPRIVATE/GONOSUMDB.
+func TestExtraHeaderPrivateHostEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.mycorp.example/myorg/internal-tool v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[http "https://github.mycorp.example/"]
+	extraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2V0b2tlbg==
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.mycorp.example/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunExtraHeaderBareHostNoLeak covers actions/checkout's far more
+// common default case: a bare, known-public host (plain github.com), the
+// same shape `gh auth setup-git`'s bare-host credential helper takes.
+// Not flagged, for the same reason: it doesn't name a specific private
+// module, and flagging it would mark every public dependency checked out
+// in an ordinary GitHub Actions job as a leak.
+func TestRunExtraHeaderBareHostNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[http "https://github.com/"]
+	extraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2V0b2tlbg==
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("expected no leak finding for a bare-host extraheader, got: %s", stdout)
+	}
+}
+
 // TestRunGhAuthSetupGitBareHostNoLeak reproduces gh auth setup-git's
 // actual default output (host-scoped, not org-scoped) and confirms it's
 // correctly excluded as too broad to be a specific module's signal — the

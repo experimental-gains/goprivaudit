@@ -10,17 +10,18 @@ import (
 
 var urlSectionRe = regexp.MustCompile(`(?i)^\[url\s+"([^"]*)"\]$`)
 var credentialSectionRe = regexp.MustCompile(`(?i)^\[credential\s+"([^"]*)"\]$`)
+var httpSectionRe = regexp.MustCompile(`(?i)^\[http\s+"([^"]*)"\]$`)
 var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
 var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 
-// privatePrefixesFromGitConfig scans a gitconfig file's contents for two
+// privatePrefixesFromGitConfig scans a gitconfig file's contents for three
 // independent private-auth signals:
 //
 //	[url "git@github.com:myorg/"]
 //		insteadOf = https://github.com/myorg/
 //
 // the standard way to make `go get`/`go mod download` authenticate to a
-// private host over SSH instead of anonymous HTTPS, and
+// private host over SSH instead of anonymous HTTPS,
 //
 //	[credential "https://github.com/myorg"]
 //		helper = store
@@ -30,10 +31,18 @@ var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 // fetch` uses to authenticate a *plain, unrewritten* HTTPS URL, e.g. the
 // config `gh auth setup-git` writes per-host. No insteadOf rewrite is
 // needed for this path at all, so a module authenticated purely this way
-// was previously invisible to this tool. Both return the "origin" side of
-// the config, normalized into a module-path-style prefix (scheme and
-// trailing .git/ stripped), since that's the form that module paths in
-// go.mod are written in and the form GOPRIVATE patterns need to cover.
+// was previously invisible to this tool. And:
+//
+//	[http "https://github.mycorp.example/"]
+//		extraheader = AUTHORIZATION: basic <base64 token>
+//
+// a URL-scoped extra HTTP header (git-config(1): `http.<url>.extraHeader`)
+// that embeds the literal credential in the config itself — the mechanism
+// `actions/checkout` uses by default to persist a CI job's token. All
+// three return the "origin" side of the config, normalized into a
+// module-path-style prefix (scheme and trailing .git/ stripped), since
+// that's the form that module paths in go.mod are written in and the
+// form GOPRIVATE patterns need to cover.
 //
 // Only "insteadOf" counts as a signal in a [url] section, not
 // "pushInsteadOf": git only rewrites fetch/clone URLs for the former
@@ -51,15 +60,42 @@ var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 // git-credential" line, and an empty value configures no credentials at
 // all. A bare top-level [credential] section (no URL context, applying to
 // every fetch) is not scanned as a signal either way: `isKnownPublicHost`
-// only ever excludes a *bare-host* [url]/[credential] context (see its
-// doc comment) — a completely unscoped [credential] section is broader
-// still, applying to hosts that aren't even multi-tenant code hosts, and
-// treating it as "every dependency is private" would be an even worse
-// false-positive flood than the bare-host case it's modeled on.
+// only ever excludes a *bare-host* [url]/[credential]/[http] context (see
+// its doc comment) — a completely unscoped [credential] section is
+// broader still, applying to hosts that aren't even multi-tenant code
+// hosts, and treating it as "every dependency is private" would be an
+// even worse false-positive flood than the bare-host case it's modeled
+// on.
+//
+// A third, independent signal: a non-empty "extraheader" in a
+// URL-scoped [http "..."] section (git-config(1): `http.<url>.extraHeader`
+// is a real per-URL config key, section form `[http "https://x/"]
+// extraHeader = ...`, verified against real git's own section-header
+// normalization). Unlike insteadOf/credential.helper, this one embeds the
+// literal credential material in the config value itself rather than
+// naming a mechanism — it's exactly how `actions/checkout` (by far the
+// most-used GitHub Action, the default way Go CI jobs check out code)
+// persists the job's GITHUB_TOKEN by default: it writes
+// `http.<serverURL origin>/.extraheader = AUTHORIZATION: basic <token>`
+// into a config file wired in via includeIf.gitdir, which
+// privatePrefixesFromConfigFile already follows (confirmed against
+// actions/checkout's real git-auth-helper.ts source and reproduced live:
+// `git config --get-all http.<url>.extraheader` resolves through that
+// exact includeIf chain). For github.com/gitlab.com/etc. — the default,
+// bare-host case actions/checkout normally produces — this is correctly
+// exempted by isKnownPublicHost, same as a blanket insteadOf rewrite,
+// since otherwise every public dependency checked out in an ordinary
+// GitHub Actions job would falsely look like a sumdb leak. But for a
+// self-hosted GitHub/GitLab Enterprise instance (`githubServerUrl` set to
+// a private host, an extremely common enterprise Go CI setup), the same
+// mechanism authenticates every fetch to that host with a real,
+// job-scoped token — a genuine private-auth signal that was completely
+// invisible before this fix, since no [http ...] section was parsed at
+// all.
 func privatePrefixesFromGitConfig(data []byte) []string {
 	var prefixes []string
-	section := "" // "", "url", "credential"
-	credentialURL := ""
+	section := "" // "", "url", "credential", "http"
+	sectionURL := ""
 	for _, raw := range splitLogicalLines(data) {
 		line := strings.TrimSpace(stripLineComment(raw))
 		if line == "" {
@@ -71,7 +107,10 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 				section = "url"
 			case credentialSectionRe.MatchString(line):
 				section = "credential"
-				credentialURL = credentialSectionRe.FindStringSubmatch(line)[1]
+				sectionURL = credentialSectionRe.FindStringSubmatch(line)[1]
+			case httpSectionRe.MatchString(line):
+				section = "http"
+				sectionURL = httpSectionRe.FindStringSubmatch(line)[1]
 			default:
 				section = ""
 			}
@@ -90,7 +129,11 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 				prefixes = append(prefixes, p)
 			}
 		case section == "credential" && key == "helper" && value != "":
-			if p := normalizeToModulePrefix(credentialURL); p != "" && !isKnownPublicHost(p) {
+			if p := normalizeToModulePrefix(sectionURL); p != "" && !isKnownPublicHost(p) {
+				prefixes = append(prefixes, p)
+			}
+		case section == "http" && key == "extraheader" && value != "":
+			if p := normalizeToModulePrefix(sectionURL); p != "" && !isKnownPublicHost(p) {
 				prefixes = append(prefixes, p)
 			}
 		}
@@ -173,6 +216,30 @@ func resolveIncludePath(value, configFileDir string) string {
 // identity/rewrite to everything under a directory tree, e.g. a work vs.
 // personal SSH setup); "onbranch:"/"hasconfig:" and other forms are treated
 // as non-matching rather than guessed at.
+//
+// Per git-config(1), a "gitdir:" pattern is matched against the absolute
+// path of the repository's *.git directory* ($GIT_DIR), not the working
+// tree — matching against moduleDir itself (the pre-fix behavior) happened
+// to still work for the common hand-written, wildcard-terminated pattern
+// style (e.g. "gitdir:~/work/", which expands to a "**" suffix that
+// absorbs a trailing "/.git" difference regardless), but silently never
+// matched a pattern that names the .git directory explicitly with no
+// trailing wildcard — exactly the literal, non-wildcard
+// "gitdir:<absolute-workdir-path>/.git" form `actions/checkout` (the
+// default way almost every GitHub Actions Go workflow checks out code)
+// generates for its own includeIf entries (verified against its real
+// source, git-auth-helper.ts: `gitDir = path.join(workingDirectory,
+// '.git')`). A false negative on that exact real, currently-shipping
+// config was confirmed live before this fix (see
+// TestIncludeIfMatchesActionsCheckoutGitdirPattern). target intentionally
+// has no trailing "/" appended (an earlier version of this fix added
+// one, matching the old moduleDir-only behavior): a "**"-terminated
+// pattern matches with or without it (globMatchSegs returns true the
+// moment it reaches a trailing "**" segment, before even looking at what
+// remains of target), but an exact non-wildcard pattern — like
+// actions/checkout's — needs the segment counts to line up exactly, and
+// a stray trailing "/" adds a spurious empty final segment that never
+// matches.
 func includeIfMatches(cond, moduleDir string) bool {
 	kind, pattern, ok := strings.Cut(cond, ":")
 	if !ok {
@@ -187,7 +254,7 @@ func includeIfMatches(cond, moduleDir string) bool {
 	if err != nil {
 		return false
 	}
-	target = filepath.ToSlash(target) + "/"
+	target = filepath.ToSlash(filepath.Join(target, ".git"))
 	pattern = expandGitdirPattern(pattern)
 	if caseInsensitive {
 		pattern = strings.ToLower(pattern)

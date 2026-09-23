@@ -6,11 +6,13 @@
 
 Audits a Go module's `GOPRIVATE`/`GONOSUMDB` configuration against its
 `go.mod` dependencies and its private-module auth setup — git `insteadOf`
-rewrites, git credential helpers, and netrc credentials — catching two
-silent misconfigurations around private Go modules:
+rewrites, git credential helpers, URL-scoped extra HTTP headers, and
+netrc credentials — catching two silent misconfigurations around private
+Go modules:
 
 1. **Sumdb leaks.** If you've set up a git `insteadOf` rewrite, a git
-   credential helper, or netrc credentials to authenticate `go get` to a
+   credential helper, a URL-scoped `http.<url>.extraHeader`, or netrc
+   credentials to authenticate `go get` to a
    private host, but forgot to add that module's path to
    `GOPRIVATE`/`GONOSUMDB`, the `go` command
    still queries the public checksum database (`sum.golang.org`) for it
@@ -72,7 +74,7 @@ goprivaudit
 ```
 
 ```
-SUMDB LEAK: github.com/myorg/internal-tool has a private-auth signal (git insteadOf rewrite, git credential helper, or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database
+SUMDB LEAK: github.com/myorg/internal-tool has a private-auth signal (git insteadOf rewrite, git credential helper, extraHeader, or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database
 ```
 
 Exits `0` with "no issues found" when clean, `1` when it finds something,
@@ -163,6 +165,25 @@ as a leak. Only an org- or path-scoped `[credential "..."]` context
 counts. An empty `helper = ` value (git's own way to clear an inherited
 default before setting a real one — `gh auth setup-git` writes exactly
 this pattern) doesn't count either, since it configures no credentials.
+
+**Git config: extraHeader.** It also looks for a URL-scoped
+`http.<url>.extraHeader` (git-config(1)) — the mechanism `actions/
+checkout` (the default way almost every GitHub Actions Go workflow checks
+out code) uses to persist the job's token, by default:
+
+```gitconfig
+[http "https://github.example.com/"]
+	extraheader = AUTHORIZATION: basic <base64 token>
+```
+
+Unlike `insteadOf`/`credential.helper`, this embeds the literal
+credential in the config value itself. The same bare-host exemption
+applies: `actions/checkout`'s default run against `https://github.com`
+(or another known public host) is not flagged, since it isn't
+module-specific and would otherwise mark every public dependency checked
+out in an ordinary CI job as a leak — but the identical mechanism against
+a self-hosted GitHub/GitLab Enterprise instance (a common enterprise
+`githubServerUrl` setup) is a genuine per-host private-auth signal.
 
 **Netrc.** It also checks the netrc file (`$NETRC`, or `~/.netrc` — `~/_netrc` on
 Windows) for `machine` entries with a login and password. This is easy to

@@ -166,6 +166,58 @@ func TestPrivatePrefixesFromGitConfigCredentialHelperUnscopedIgnored(t *testing.
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigExtraHeaderPrivateHost reproduces the
+// exact config `actions/checkout` (the default way almost every GitHub
+// Actions Go workflow checks out code) writes for a self-hosted GitHub
+// Enterprise Server instance — verified against its real source
+// (git-auth-helper.ts, `GitAuthHelper.configureToken`): a URL-scoped
+// `http.<serverUrl origin>/.extraheader` set to
+// `AUTHORIZATION: basic <base64 x-access-token:token>`. Reproduced live
+// with the real `git config --file` sequence that code runs, confirming
+// git itself resolves `http.<url>.extraheader` from exactly this section
+// form. Before this fix, `privatePrefixesFromGitConfig` had zero
+// awareness of `[http "..."]` sections at all, so a module hosted on that
+// same private Enterprise host — authenticated on every fetch by this
+// mechanism, no insteadOf or credential helper required — was invisible
+// to the sumdb-leak check entirely: a real false negative confirmed
+// end-to-end via the built CLI (see TestExtraHeaderPrivateHostEndToEnd in
+// main_test.go), not just this unit-level check.
+func TestPrivatePrefixesFromGitConfigExtraHeaderPrivateHost(t *testing.T) {
+	src := `[http "https://github.mycorp.example/"]
+	extraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2V0b2tlbg==
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.mycorp.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// The default, far more common case: actions/checkout against plain
+// github.com (or another known public multi-tenant host). Bare-host, so
+// exempted the same way a blanket insteadOf rewrite is — otherwise every
+// public dependency checked out in an ordinary GitHub Actions job would
+// falsely look like a sumdb leak.
+func TestPrivatePrefixesFromGitConfigExtraHeaderIgnoresBlanketPublicHost(t *testing.T) {
+	src := `[http "https://github.com/"]
+	extraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2V0b2tlbg==
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (blanket public-host extraheader isn't a private signal), got %v", got)
+	}
+}
+
+// An empty extraheader value configures no header at all, same reasoning
+// as an empty credential helper.
+func TestPrivatePrefixesFromGitConfigExtraHeaderEmptyValueIgnored(t *testing.T) {
+	src := `[http "https://github.mycorp.example/"]
+	extraheader =
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (empty extraheader value configures nothing), got %v", got)
+	}
+}
+
 // Both signals can coexist and are independently detected.
 func TestPrivatePrefixesFromGitConfigInsteadOfAndCredentialHelperBoth(t *testing.T) {
 	src := `[url "git@github.com:myorg/"]
@@ -253,6 +305,34 @@ func TestIncludeIfMatchesGitdir(t *testing.T) {
 		if got := includeIfMatches(c.cond, c.dir); got != c.want {
 			t.Errorf("includeIfMatches(%q, %q) = %v, want %v (%s)", c.cond, c.dir, got, c.want, c.reason)
 		}
+	}
+}
+
+// TestIncludeIfMatchesActionsCheckoutGitdirPattern reproduces the exact,
+// literal (non-wildcard, ".git"-suffixed) gitdir pattern `actions/
+// checkout` generates for its own includeIf entries — verified against
+// its real source (git-auth-helper.ts: `gitDir =
+// path.join(workingDirectory, '.git')`, then
+// `includeIf.gitdir:${gitDir}.path = credentialsConfigPath`). Per
+// git-config(1), "gitdir:" matches against the absolute path of the
+// repository's .git directory, not the working tree — the pre-fix code
+// matched against moduleDir itself, which happened to still work for the
+// common hand-written wildcard-terminated pattern style ("gitdir:~/work/"
+// tested above) since its trailing "**" absorbs the "/.git" difference
+// regardless, but never matched this literal non-wildcard form: a real
+// false negative on the single most common real-world source of a
+// gitdir-scoped includeIf (a GitHub Actions Go CI job), confirmed live
+// against the real generated .git/config before this fix.
+func TestIncludeIfMatchesActionsCheckoutGitdirPattern(t *testing.T) {
+	dir := t.TempDir()
+	gitDir := filepath.ToSlash(filepath.Join(dir, ".git"))
+	cond := "gitdir:" + gitDir
+	if !includeIfMatches(cond, dir) {
+		t.Errorf("includeIfMatches(%q, %q) = false, want true (actions/checkout's exact literal .git-suffixed pattern)", cond, dir)
+	}
+	other := t.TempDir()
+	if includeIfMatches(cond, other) {
+		t.Errorf("includeIfMatches(%q, %q) = true, want false (different module dir must not match)", cond, other)
 	}
 }
 
