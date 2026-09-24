@@ -16,8 +16,9 @@
 //     (also consulted by `git`'s own subprocess fetch, unconditionally —
 //     see `go help goauth`: GOAUTH only governs the `go` command's own
 //     HTTP client, not a `git` subprocess) — but isn't covered by
-//     GOPRIVATE/GONOSUMDB, so `go` still queries the public sum.golang.org
-//     checksum database for it — leaking the module's path and version
+//     GOPRIVATE/GONOSUMDB, so `go` still queries the configured checksum
+//     database for it (sum.golang.org by default, but GOSUMDB can point
+//     elsewhere — see sumdbName) — leaking the module's path and version
 //     even though the source fetch itself goes over a private,
 //     authenticated connection.
 //   - GOPRIVATE/GONOSUMDB contains an overly broad pattern (bare "*") that
@@ -175,11 +176,34 @@ func run(args []string, stdout, stderr *os.File) int {
 	default:
 		r = audit(modules, prefixes, splitPatterns(gonosumdb))
 	}
-	printReport(stdout, r)
+	printReport(stdout, r, sumdbName(gosumdb))
 	if !r.Clean() {
 		return 1
 	}
 	return 0
+}
+
+// sumdbName extracts the checksum database's name from a GOSUMDB value,
+// stripping the optional "+<key>" suffix and " <url>" field documented in
+// `go help environment` (GOSUMDB="name[+key] [url]"). An empty GOSUMDB
+// (unset) means the documented default, sum.golang.org. This is purely for
+// display: it lets the SUMDB LEAK message name the database that will
+// actually be queried instead of assuming it's always sum.golang.org —
+// verified live that GOSUMDB's URL field fully controls the query
+// destination (`GOSUMDB="sum.golang.org+<realkey> http://127.0.0.1:PORT"`
+// against a real private-auth-uncovered dependency sent the lookup request
+// to that local URL, not sum.golang.org), so a custom GOSUMDB — a
+// documented, supported way to run a private/self-hosted checksum database
+// specifically to keep module info off Google's infrastructure — makes the
+// old hardcoded "public checksum database" wording actively wrong, not just
+// imprecise.
+func sumdbName(gosumdb string) string {
+	if gosumdb == "" {
+		return "sum.golang.org"
+	}
+	name, _, _ := strings.Cut(gosumdb, " ")
+	name, _, _ = strings.Cut(name, "+")
+	return name
 }
 
 // suppressProtocolBlockedInsteadOf removes SUMDB-LEAK-signal prefixes whose
@@ -309,13 +333,13 @@ func goEnv(name string) string {
 	return strings.TrimSpace(string(out))
 }
 
-func printReport(w *os.File, r Report) {
+func printReport(w *os.File, r Report, sumdbName string) {
 	if r.Clean() {
 		_, _ = fmt.Fprintln(w, "goprivaudit: no issues found")
 		return
 	}
 	for _, m := range r.SumdbLeaks {
-		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth signal (git insteadOf rewrite, git credential helper, extraHeader, or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the public checksum database\n", m)
+		_, _ = fmt.Fprintf(w, "SUMDB LEAK: %s has a private-auth signal (git insteadOf rewrite, git credential helper, extraHeader, or netrc credentials) but is not covered by GOPRIVATE/GONOSUMDB — its path and version will be sent to the %s checksum database\n", m, sumdbName)
 	}
 	for _, p := range r.BroadPatterns {
 		_, _ = fmt.Fprintf(w, "BROAD PATTERN: GOPRIVATE/GONOSUMDB pattern %q matches every module, disabling sumdb verification for public dependencies too\n", p)

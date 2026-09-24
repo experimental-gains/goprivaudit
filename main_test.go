@@ -247,6 +247,51 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunCustomSumdbNamesActualDatabase covers a real correctness bug: the
+// SUMDB LEAK message used to hardcode "the public checksum database"
+// regardless of GOSUMDB's actual value. GOSUMDB's multi-field form
+// (`go help environment`: "name[+key] [url]") lets it point at any
+// database, including a private, self-hosted one run specifically to keep
+// module info off Google's infrastructure — verified live that the URL
+// field fully controls the query destination (a real `go get` against a
+// dependency with GOSUMDB's URL field pointed at a local HTTP server sent
+// the lookup request there, not to sum.golang.org). Calling an arbitrary
+// configured destination "the public checksum database" is wrong, not just
+// imprecise, so the message must name the actual configured database
+// instead.
+func TestRunCustomSumdbNamesActualDatabase(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-sumdb", "sum.mycorp.example+abc123 https://sum.mycorp.internal",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+	if !strings.Contains(stdout, "sent to the sum.mycorp.example checksum database") {
+		t.Errorf("stdout should name the configured sumdb (sum.mycorp.example), not assume sum.golang.org/\"public\": %s", stdout)
+	}
+	if strings.Contains(stdout, "public checksum database") {
+		t.Errorf("stdout should not call a custom, possibly-private GOSUMDB \"public\": %s", stdout)
+	}
+}
+
 // TestRunVendorModeNoLeak covers a real go command behavior distinct from
 // GOSUMDB=off: when a module ships a committed vendor/ directory and its
 // go.mod's `go` directive is 1.14+ (the go command's own auto-vendor
