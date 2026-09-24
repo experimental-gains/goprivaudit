@@ -366,12 +366,32 @@ func gitConfigCandidates(moduleDir string) []string {
 // front). Mirrors goproxycheck's own localGoproxyOff/firstGoproxyEntry,
 // which this project's companion tool already verified live against the
 // real go command.
+//
+// Empty entries (a leading/interior/trailing comma or pipe, e.g. from
+// `GOPROXY="$UNSET_VAR,off"`) don't count as an entry at all — verified
+// live against real `go`: `GOPROXY=",off"` disables lookups exactly like
+// `GOPROXY=off` does (cmd/go's own proxyList walk skips blank entries, see
+// goproxycheck's parseGoproxyChain, which already gets this right). The
+// naive "trim once, split on the first separator" version below used to
+// treat the first entry as the empty string and never reach "off" at all,
+// so a stray leading comma made this tool misreport a real, structurally
+// impossible SUMDB leak.
 func goproxyEffectivelyOff(goproxy string) bool {
-	proxy := strings.TrimSpace(goproxy)
-	if i := strings.IndexAny(proxy, ",|"); i >= 0 {
-		proxy = proxy[:i]
+	rest := goproxy
+	for rest != "" {
+		var entry string
+		if i := strings.IndexAny(rest, ",|"); i >= 0 {
+			entry, rest = rest[:i], rest[i+1:]
+		} else {
+			entry, rest = rest, ""
+		}
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		return entry == "off"
 	}
-	return proxy == "off"
+	return false
 }
 
 func goEnv(name string) string {

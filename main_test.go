@@ -1093,6 +1093,17 @@ func TestGoproxyEffectivelyOff(t *testing.T) {
 		{"direct", false},
 		{"", false},
 		{"offbeat.example.com", false},
+		// Empty entries (stray/leading/trailing separators, e.g. from
+		// `GOPROXY="$UNSET_VAR,off"`) don't count as an entry — verified
+		// live that real `go` skips them and evaluates the first
+		// *non-empty* entry instead of treating the blank as "the first
+		// entry, and it's not off".
+		{",off", true},
+		{",,off", true},
+		{" , ,off", true},
+		{"|off", true},
+		{",direct", false},
+		{" ,https://proxy.golang.org,off", false},
 	}
 	for _, c := range cases {
 		if got := goproxyEffectivelyOff(c.goproxy); got != c.want {
