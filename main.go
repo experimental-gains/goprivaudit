@@ -35,7 +35,10 @@
 // checksum database entirely, for every module, so neither an uncovered
 // private module nor an overly broad GOPRIVATE/GONOSUMDB pattern can leak
 // or over-trust anything — there's no sumdb query happening at all. Both are
-// also skipped when the module resolves dependencies from a committed
+// also skipped when GOPROXY's effective first chain entry is "off" (see
+// goproxyEffectivelyOff): that disables all module-proxy-protocol network
+// access, sumdb lookups included, before a query could ever be sent. Both
+// are also skipped when the module resolves dependencies from a committed
 // vendor/ directory instead of the network (see vendorModeActive): that
 // build path never contacts sum.golang.org either, for the same reason.
 package main
@@ -62,6 +65,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	goworkOverride := fs.String("gowork", "", "override the go.work path instead of reading GOWORK from `go env`")
 	sumdbOverride := fs.String("sumdb", "", "override GOSUMDB instead of reading it from `go env`")
 	goflagsOverride := fs.String("goflags", "", "override GOFLAGS instead of reading it from `go env`")
+	proxyOverride := fs.String("proxy", "", "override GOPROXY instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -72,7 +76,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet := false, false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet := false, false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -85,6 +89,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			sumdbSet = true
 		case "goflags":
 			goflagsSet = true
+		case "proxy":
+			proxySet = true
 		}
 	})
 
@@ -156,6 +162,12 @@ func run(args []string, stdout, stderr *os.File) int {
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt)
 
+	goproxy := *proxyOverride
+	if !proxySet {
+		goproxy = goEnv("GOPROXY")
+	}
+	proxyOff := goproxyEffectivelyOff(goproxy)
+
 	var r Report
 	switch {
 	case gosumdb == "off":
@@ -167,6 +179,26 @@ func run(args []string, stdout, stderr *os.File) int {
 		// cannot happen (verified live: with GOSUMDB=off, a private module
 		// uncovered by GOPRIVATE/GONOSUMDB is not a leak, since `go` never
 		// contacts sum.golang.org for it or anything else).
+	case proxyOff:
+		// GOPROXY's effective first entry (comma/pipe-separated chain,
+		// same precedence goproxycheck's own localGoproxyOff uses) being
+		// "off" disables ALL module-proxy-protocol network access,
+		// including sumdb lookups — not just GOPROXY=off on its own, but
+		// any chain whose first reachable entry is the literal "off"
+		// keyword. Verified live with a local logging HTTP server standing
+		// in for GOSUMDB's URL: with a real, reachable GOPROXY, `go get`
+		// sent a real `/lookup/<module>@<version>` request to it (the
+		// exact leak this tool warns about); with GOPROXY=off and the
+		// identical GOSUMDB target, `go get` failed immediately with
+		// "module lookup disabled by GOPROXY=off" and the logging server
+		// received no request at all — no lookup ever happens, so no leak
+		// can happen, the same "cannot leak" reasoning as GOSUMDB=off and
+		// vendor mode above, just reached via a config surface this tool
+		// didn't check before. (A module already recorded in go.sum can
+		// still build successfully under GOPROXY=off from the local module
+		// cache without any network call at all, regardless of this flag —
+		// same general caveat that already applies to every finding this
+		// tool reports.)
 	case vendorActive:
 		// A vendor-mode build (see vendorModeActive) never contacts the
 		// module proxy or sum.golang.org either — same "cannot leak"
@@ -323,6 +355,23 @@ func gitConfigCandidates(moduleDir string) []string {
 	}
 	out = append(out, filepath.Join(moduleDir, ".git", "config"))
 	return out
+}
+
+// goproxyEffectivelyOff reports whether a GOPROXY value's first
+// comma-separated ("try next on not-found") or pipe-separated ("try next
+// on any error") chain entry is the literal keyword "off" — the same
+// precedence `cmd/go` itself applies (a later "off" in the chain is never
+// reached unless every earlier entry fails first, so only the *first*
+// entry being "off" makes the whole fetch structurally impossible up
+// front). Mirrors goproxycheck's own localGoproxyOff/firstGoproxyEntry,
+// which this project's companion tool already verified live against the
+// real go command.
+func goproxyEffectivelyOff(goproxy string) bool {
+	proxy := strings.TrimSpace(goproxy)
+	if i := strings.IndexAny(proxy, ",|"); i >= 0 {
+		proxy = proxy[:i]
+	}
+	return proxy == "off"
 }
 
 func goEnv(name string) string {

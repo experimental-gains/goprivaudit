@@ -3,7 +3,7 @@ description: 'Audit GOPRIVATE/GONOSUMDB coverage against go.mod dependencies and
 author: 'experimental-gains'
 inputs:
   args:
-    description: 'Arguments to pass to goprivaudit (e.g. -gomod, -private, -nosumdb)'
+    description: 'Arguments to pass to goprivaudit (e.g. -gomod, -private, -nosumdb, -proxy)'
     required: false
     default: ''
   version:

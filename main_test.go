@@ -247,6 +247,113 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunGoproxyOffNoLeak covers a real correctness bug: GOPROXY=off
+// disables all module-proxy-protocol network access, sumdb lookups
+// included — verified live with a local logging HTTP server standing in
+// for GOSUMDB's URL: a real `go get` under a normal, reachable GOPROXY
+// sent a genuine `/lookup/<module>@<version>` request to it, while the
+// identical setup under GOPROXY=off failed immediately with "module
+// lookup disabled by GOPROXY=off" and the logging server received no
+// request at all. Before this fix, `run` had no notion of GOPROXY at
+// all, so it still reported a SUMDB LEAK for a query that structurally
+// cannot happen — the same false-positive shape as the GOSUMDB=off and
+// vendor-mode cases above, just reached via a config surface this tool
+// didn't check yet.
+func TestRunGoproxyOffNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-sumdb", "",
+		"-proxy", "off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean with GOPROXY=off, got: %s", stdout)
+	}
+}
+
+// TestRunGoproxyOffChainFirstEntryNoLeak covers the same "off" precedence
+// goproxycheck's own localGoproxyOff already relies on: a comma- or
+// pipe-separated GOPROXY chain is only structurally blocked when "off" is
+// its *first* entry (a later "off" is only reached if every earlier real
+// proxy entry fails first, which this test doesn't set up, so it must not
+// be treated as blocked).
+func TestRunGoproxyOffChainFirstEntryNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-sumdb", "",
+		"-proxy", "off,https://proxy.golang.org",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean with GOPROXY=off,... (off first), got: %s", stdout)
+	}
+}
+
+// TestRunGoproxyOffNotFirstStillLeaks is the mirror of the two tests
+// above: when "off" is present in the GOPROXY chain but isn't the first
+// entry, the real go command still tries the earlier real proxy first, so
+// the fetch (and the resulting sumdb query) isn't structurally blocked —
+// this must still report the leak.
+func TestRunGoproxyOffNotFirstStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-sumdb", "",
+		"-proxy", "https://proxy.golang.org,off",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding when 'off' isn't the first GOPROXY entry: %s", stdout)
+	}
+}
+
 // TestRunCustomSumdbNamesActualDatabase covers a real correctness bug: the
 // SUMDB LEAK message used to hardcode "the public checksum database"
 // regardless of GOSUMDB's actual value. GOSUMDB's multi-field form
@@ -969,5 +1076,27 @@ tool github.com/myorg/internal-tool/cmd/gen
 	}
 	if strings.Contains(stdout, "SUMDB LEAK") {
 		t.Errorf("expected no leak once covered, got: %s", stdout)
+	}
+}
+
+func TestGoproxyEffectivelyOff(t *testing.T) {
+	cases := []struct {
+		goproxy string
+		want    bool
+	}{
+		{"off", true},
+		{" off ", true},
+		{"off,https://proxy.golang.org", true},
+		{"off|https://proxy.golang.org", true},
+		{"https://proxy.golang.org,off", false},
+		{"https://proxy.golang.org,direct", false},
+		{"direct", false},
+		{"", false},
+		{"offbeat.example.com", false},
+	}
+	for _, c := range cases {
+		if got := goproxyEffectivelyOff(c.goproxy); got != c.want {
+			t.Errorf("goproxyEffectivelyOff(%q) = %v, want %v", c.goproxy, got, c.want)
+		}
 	}
 }

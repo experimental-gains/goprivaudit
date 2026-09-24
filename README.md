@@ -31,6 +31,21 @@ disables the checksum database entirely, for every module, so neither
 finding can apply — there's no sumdb query happening for anything to leak
 from or over-trust.
 
+Both checks are also skipped when `GOPROXY`'s effective first chain entry
+(comma-separated "try next on not-found", or pipe-separated "try next on
+any error" — same precedence `goproxycheck` already applies) is the
+literal keyword `off`. That disables all module-proxy-protocol network
+access, sumdb lookups included, before a lookup could ever be sent.
+Verified live with a local logging HTTP server standing in for `GOSUMDB`'s
+URL: with a normal, reachable `GOPROXY`, a real `go get` sent a genuine
+`/lookup/<module>@<version>` request to it; with `GOPROXY=off` and the
+identical `GOSUMDB` target, `go get` failed immediately with "module
+lookup disabled by GOPROXY=off" and the logging server received no
+request at all. A later `off` in the chain that isn't the first entry
+doesn't count — the real go command only reaches it if every earlier
+entry fails first, so a chain like `https://proxy.golang.org,off` is not
+treated as blocked.
+
 Both checks are also skipped when the module resolves its dependencies from
 a committed `vendor/` directory instead of the network — either because
 `vendor/modules.txt` exists next to `go.mod` and the module's `go` directive
@@ -110,6 +125,7 @@ Flags, mainly for testing/CI overrides:
 -gowork string   override the go.work path instead of reading GOWORK from `go env`
 -sumdb string    override GOSUMDB instead of reading it from `go env`
 -goflags string  override GOFLAGS instead of reading it from `go env`
+-proxy string    override GOPROXY instead of reading it from `go env`
 ```
 
 ## Use with pre-commit
