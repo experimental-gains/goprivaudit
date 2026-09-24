@@ -924,6 +924,53 @@ replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 	}
 }
 
+// TestRunGoWorkVersionSpecificReplaceLeavesUnrelatedGoModReplaceIntact is
+// the direct regression test for the bug found run #288: a go.work replace
+// that's specific to a version other than the one actually required must
+// not blot out an unrelated go.mod-level replace for the same path.
+// Verified live against the real go toolchain before fixing (`go list -m
+// all` inside a workspace with this exact shape still resolves through the
+// go.mod replace — go.work's version-specific entry never applies, since
+// the required version doesn't match it) — the pre-fix tool reported "no
+// issues found" here, silently missing a real sumdb leak, because
+// mergeReplaces discarded every go.mod entry for a path the moment go.work
+// carried *any* entry for it, version-specific or not.
+func TestRunGoWorkVersionSpecificReplaceLeavesUnrelatedGoModReplaceIntact(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/foo/bar v1.2.3
+
+replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+
+replace github.com/foo/bar v9.9.9 => example.com/unrelated-sibling-pin v0.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@git.internal.example.com/"]
+	insteadOf = https://git.internal.example.com/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: go.work's v9.9.9-specific replace doesn't apply to the required v1.2.3, so go.mod's replace must still be in effect; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.internal.example.com/mirror/bar") {
+		t.Errorf("stdout missing expected leak on the go.mod replacement path, which a version-specific go.work entry for a different version must not shadow: %s", stdout)
+	}
+}
+
 // TestRunGoWorkOffIgnored covers GOWORK=off (workspace mode explicitly
 // disabled) and an empty gowork (no workspace at all) both being treated
 // as "no go.work replaces to apply", not an error.

@@ -437,6 +437,68 @@ func TestMergeReplacesNilOverlayReturnsBaseUnchanged(t *testing.T) {
 	}
 }
 
+// TestMergeReplacesVersionSpecificOverlayLeavesUnrelatedGomodReplaceIntact
+// reproduces the false negative found live against the real go toolchain
+// (run #288): a go.work replace that's specific to a version other than
+// the one actually required must not discard a go.mod-level replace for
+// the same path — selectReplace(mergeReplaces(...), requiredVersion) must
+// still resolve through the go.mod entry, exactly like `go list -m all`
+// does in a real workspace.
+func TestMergeReplacesVersionSpecificOverlayLeavesUnrelatedGomodReplaceIntact(t *testing.T) {
+	base := map[string][]replaceEntry{
+		"example.com/dep": {{target: replaceTarget{path: "github.com/myorg/dep-private", isLocal: false}}},
+	}
+	overlay := map[string][]replaceEntry{
+		"example.com/dep": {{oldVersion: "v1.5.0", target: replaceTarget{path: "example.com/other-fork", isLocal: false}}},
+	}
+	merged := mergeReplaces(base, overlay)
+	got, ok := selectReplace(merged["example.com/dep"], "v1.0.0")
+	if !ok || got.path != "github.com/myorg/dep-private" {
+		t.Errorf("selectReplace(v1.0.0) = %v, %v; want github.com/myorg/dep-private, true", got, ok)
+	}
+	got, ok = selectReplace(merged["example.com/dep"], "v1.5.0")
+	if !ok || got.path != "example.com/other-fork" {
+		t.Errorf("selectReplace(v1.5.0) = %v, %v; want example.com/other-fork, true", got, ok)
+	}
+}
+
+// TestMergeReplacesGeneralOverlayOverridesGeneralBase reproduces the
+// general-vs-general precedence verified live against the real go
+// toolchain (run #288): when both go.work and go.mod carry a
+// version-agnostic replace for the same path, go.work's wins for every
+// version, not just the ones go.work happens to list.
+func TestMergeReplacesGeneralOverlayOverridesGeneralBase(t *testing.T) {
+	base := map[string][]replaceEntry{
+		"example.com/dep": {{target: replaceTarget{path: "bitbucket.org/other/y", isLocal: false}}},
+	}
+	overlay := map[string][]replaceEntry{
+		"example.com/dep": {{target: replaceTarget{path: "github.com/myorg/x", isLocal: false}}},
+	}
+	merged := mergeReplaces(base, overlay)
+	got, ok := selectReplace(merged["example.com/dep"], "v9.9.9")
+	if !ok || got.path != "github.com/myorg/x" {
+		t.Errorf("selectReplace(v9.9.9) = %v, %v; want github.com/myorg/x, true", got, ok)
+	}
+}
+
+// TestMergeReplacesExactVersionTieGoesToOverlay reproduces the exact-tie
+// precedence verified live against the real go toolchain (run #288): when
+// both go.work and go.mod replace the exact same required version,
+// go.work's replacement is used, per `go help work`.
+func TestMergeReplacesExactVersionTieGoesToOverlay(t *testing.T) {
+	base := map[string][]replaceEntry{
+		"example.com/dep": {{oldVersion: "v1.0.0", target: replaceTarget{path: "bitbucket.org/other/y", isLocal: false}}},
+	}
+	overlay := map[string][]replaceEntry{
+		"example.com/dep": {{oldVersion: "v1.0.0", target: replaceTarget{path: "github.com/myorg/x", isLocal: false}}},
+	}
+	merged := mergeReplaces(base, overlay)
+	got, ok := selectReplace(merged["example.com/dep"], "v1.0.0")
+	if !ok || got.path != "github.com/myorg/x" {
+		t.Errorf("selectReplace(v1.0.0) = %v, %v; want github.com/myorg/x, true", got, ok)
+	}
+}
+
 func TestParseToolsSingleLine(t *testing.T) {
 	src := "module example.com/foo\n\ngo 1.24\n\ntool golang.org/x/tools/cmd/stringer\n"
 	got := parseTools([]byte(src))

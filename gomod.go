@@ -494,19 +494,51 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // mergeReplaces overlays a workspace's go.work replace directives on top of
 // a module's own go.mod replaces. Per `go help work`: "If a module is
 // replaced in both the workspace's go.work file and in the workspace
-// module's go.mod file, the replacement in the go.work file is used" — so
-// on a conflicting key, overlay wins; a go.work-only replace is simply
-// added.
+// module's go.mod file, the replacement in the go.work file is used" — but
+// that describes selectReplace's existing specific-beats-general, first-
+// specific-match-wins precedence *per required version*, not a blanket
+// per-path override. Verified live against the real go toolchain: a
+// go.work replace that's version-specific for a version other than the one
+// actually required leaves an unrelated go.mod-level replace (general or a
+// different specific version) fully in effect — `go list -m all` still
+// resolves through the go.mod entry. A prior version of this function
+// (`merged[k] = v`) discarded every go.mod-level entry for a path the
+// moment go.work carried *any* entry for it, which silently dropped a
+// go.mod's own replace of a public-looking path to a private host/fork
+// whenever go.work also replaced a different version of the same path —
+// confirmed live to produce a false "no issues found" on a real
+// SUMDB LEAK (the private replace target reverted to the raw, unreplaced
+// require path, which no longer matched the private-auth signal). Fixed by
+// concatenating go.work's entries before go.mod's for each path: go.work's
+// version-specific entries still win their own version (selectReplace
+// returns on the first oldVersion match), a go.work general entry still
+// overrides outright — a go.mod general entry for the same path is dropped
+// (selectReplace's `general` var is last-write-wins, so an undropped
+// go.mod general scanned after go.work's would silently win instead), and
+// a go.mod entry irrelevant to go.work (a different specific version, or
+// any entry for a path go.work doesn't touch at all) survives untouched
+// instead of being discarded wholesale.
 func mergeReplaces(base, overlay map[string][]replaceEntry) map[string][]replaceEntry {
 	if len(overlay) == 0 {
 		return base
 	}
-	merged := make(map[string][]replaceEntry, len(base)+len(overlay))
-	for k, v := range base {
-		merged[k] = v
+	generalInOverlay := map[string]bool{}
+	for path, entries := range overlay {
+		for _, e := range entries {
+			if e.oldVersion == "" {
+				generalInOverlay[path] = true
+			}
+		}
 	}
-	for k, v := range overlay {
-		merged[k] = v
+	merged := make(map[string][]replaceEntry, len(base)+len(overlay))
+	for path, entries := range base {
+		if generalInOverlay[path] {
+			continue
+		}
+		merged[path] = entries
+	}
+	for path, entries := range overlay {
+		merged[path] = append(append([]replaceEntry{}, entries...), merged[path]...)
 	}
 	return merged
 }
