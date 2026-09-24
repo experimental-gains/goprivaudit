@@ -15,6 +15,7 @@ var credentialSectionRe = regexp.MustCompile(`(?i)^\[credential\s+"([^"]*)"\]$`)
 var httpSectionRe = regexp.MustCompile(`(?i)^\[http\s+"([^"]*)"\]$`)
 var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
 var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
+var protocolSectionRe = regexp.MustCompile(`(?i)^\[protocol(?:\s+"([^"]*)")?\]$`)
 
 // privatePrefixesFromGitConfig scans a gitconfig file's contents for three
 // independent private-auth signals:
@@ -215,6 +216,211 @@ func splitConfigKey(key string) (section, subsection, name string, ok bool) {
 		return "", "", "", false
 	}
 	return key[:i], rest[:j], rest[j+1:], true
+}
+
+// schemeOf extracts the transport scheme git would use for a remote URL
+// (the "new" side of a `[url "<new>"] insteadOf = <old>` rewrite), covering
+// every form git-config(1)/gitremote-helpers(7) document: an explicit
+// "<scheme>://" prefix; the "ext::<command>" form (git treats "ext" as its
+// own scheme despite the missing "//" — see protocol.allow's docs); the
+// "user@host:path" SCP-like shorthand, which git resolves to the ssh
+// transport with no explicit scheme at all and is the *exact* form go.dev's
+// own FAQ recommends for insteadOf (`[url "git@github.com:"] insteadOf =
+// https://github.com/`, already this file's primary documented example);
+// and a bare filesystem path (absolute or relative, no "@"/"://" at all),
+// which git treats as the "file" transport. Returns "" when the form can't
+// be determined with confidence, so callers fail open (treat the transport
+// as allowed, i.e. don't suppress a signal) rather than risk misreading a
+// real one as protocol-blocked.
+func schemeOf(url string) string {
+	url = strings.TrimSpace(url)
+	if url == "" {
+		return ""
+	}
+	if strings.HasPrefix(url, "ext::") {
+		return "ext"
+	}
+	if i := strings.Index(url, "://"); i > 0 {
+		scheme := strings.ToLower(url[:i])
+		for j := 0; j < len(scheme); j++ {
+			c := scheme[j]
+			isAlpha := c >= 'a' && c <= 'z'
+			isDigit := c >= '0' && c <= '9'
+			switch {
+			case j == 0 && !isAlpha:
+				return ""
+			case j > 0 && !isAlpha && !isDigit && c != '+' && c != '-' && c != '.':
+				return ""
+			}
+		}
+		return scheme
+	}
+	// SCP-like shorthand: [user@]host.xz:path/to/repo (git-clone(1)). Only
+	// recognized with a leading "user@" host, matching how git itself
+	// disambiguates this from a Windows-style absolute path ("C:\...") or a
+	// bare relative path containing a colon.
+	if at := strings.Index(url, "@"); at >= 0 {
+		rest := url[at+1:]
+		if colon := strings.Index(rest, ":"); colon >= 0 {
+			if slash := strings.Index(rest, "/"); slash < 0 || colon < slash {
+				return "ssh"
+			}
+		}
+	}
+	return "file"
+}
+
+// insteadOfSchemes scans a gitconfig file's contents for `[url "<new>"]
+// insteadOf = <old>` entries the same way privatePrefixesFromGitConfig
+// does, but returns a map from the normalized module-path prefix (the
+// "old" side, same as privatePrefixesFromGitConfig's return value) to the
+// transport scheme(s) of the "new" side — the piece
+// privatePrefixesFromGitConfig itself discards, needed to check the
+// rewrite against protocol.allow/GIT_ALLOW_PROTOCOL (see
+// gitProtocolAllowed). A prefix rewritten by more than one insteadOf rule
+// (an unusual but possible config) collects every scheme seen.
+func insteadOfSchemes(data []byte) map[string][]string {
+	out := map[string][]string{}
+	inURL := false
+	sectionURL := ""
+	for _, raw := range splitLogicalLines(data) {
+		line := strings.TrimSpace(stripLineComment(raw))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if urlSectionRe.MatchString(line) {
+				inURL = true
+				sectionURL = urlSectionRe.FindStringSubmatch(line)[1]
+			} else {
+				inURL = false
+			}
+			continue
+		}
+		if !inURL {
+			continue
+		}
+		key, value, ok := splitKV(line)
+		if !ok || key != "insteadof" {
+			continue
+		}
+		if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
+			out[p] = append(out[p], schemeOf(sectionURL))
+		}
+	}
+	return out
+}
+
+// insteadOfSchemesFromEnv is insteadOfSchemes' counterpart for the
+// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var config
+// mechanism privatePrefixesFromEnv already reads the plain insteadOf
+// signal from — see its doc comment for why env-set config is a real,
+// live-verified signal source, not just a file-parsing nicety.
+func insteadOfSchemesFromEnv(getenv func(string) string) map[string][]string {
+	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
+	if err != nil || count <= 0 {
+		return nil
+	}
+	out := map[string][]string{}
+	for i := 0; i < count; i++ {
+		key := getenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		value := getenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		section, subsection, name, ok := splitConfigKey(key)
+		if !ok {
+			continue
+		}
+		section = strings.ToLower(section)
+		name = strings.ToLower(name)
+		if section == "url" && name == "insteadof" {
+			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
+				out[p] = append(out[p], schemeOf(subsection))
+			}
+		}
+	}
+	return out
+}
+
+// protocolAllowFromGitConfig scans a gitconfig file's contents for
+// `[protocol]`/`[protocol "<name>"]` sections' "allow" key — git-config(1)'s
+// protocol.allow / protocol.<name>.allow, the config-file counterpart to
+// GIT_ALLOW_PROTOCOL (see gitProtocolAllowed). The bare `[protocol]` form
+// (no subsection) is returned under the "" key, representing the default
+// policy for any protocol without its own protocol.<name>.allow entry.
+func protocolAllowFromGitConfig(data []byte) map[string]string {
+	out := map[string]string{}
+	inProtocol := false
+	protoName := ""
+	for _, raw := range splitLogicalLines(data) {
+		line := strings.TrimSpace(stripLineComment(raw))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			if m := protocolSectionRe.FindStringSubmatch(line); m != nil {
+				inProtocol = true
+				protoName = strings.ToLower(m[1])
+			} else {
+				inProtocol = false
+			}
+			continue
+		}
+		if !inProtocol {
+			continue
+		}
+		key, value, ok := splitKV(line)
+		if !ok || key != "allow" {
+			continue
+		}
+		out[protoName] = value
+	}
+	return out
+}
+
+// gitProtocolAllowed reports whether git would permit fetching over the
+// given transport scheme, applying the exact precedence git(1)/
+// git-config(1) document: GIT_ALLOW_PROTOCOL, if set, is fully
+// authoritative — "behave as if protocol.allow is set to never, and each
+// of the listed protocols has protocol.<name>.allow set to always
+// (overriding any existing configuration)". Verified live (2026-09): with
+// GIT_ALLOW_PROTOCOL=https set, `git ls-remote` against an ssh://
+// insteadOf target — go.dev's own documented private-auth pattern — fails
+// outright with "fatal: transport 'ssh' not allowed", even though ssh's
+// own built-in default policy is "always" and no protocol.ssh.allow entry
+// exists anywhere. Absent GIT_ALLOW_PROTOCOL, protocol.<scheme>.allow
+// (most specific) then the bare protocol.allow default (least specific)
+// from the resolved git config apply; absent either, git's own built-in
+// policy table applies — confirmed live: "ext" defaults to "never",
+// http/https/git/ssh default to "always". Everything else (including
+// "file") defaults to "user", which is treated as allowed here since this
+// tool only ever reasons about a direct, top-level `go get`/`go build`
+// invocation, not the recursive/untrusted-URL context
+// (GIT_PROTOCOL_FROM_USER=0) where "user" would actually mean "never".
+// scheme=="" (schemeOf couldn't determine the transport with confidence)
+// always returns true — fail open, never suppress a real signal on a
+// guess.
+func gitProtocolAllowed(scheme string, fileAllow map[string]string, getenv func(string) string) bool {
+	if scheme == "" {
+		return true
+	}
+	if raw := getenv("GIT_ALLOW_PROTOCOL"); raw != "" {
+		for _, p := range strings.Split(raw, ":") {
+			if strings.EqualFold(strings.TrimSpace(p), scheme) {
+				return true
+			}
+		}
+		return false
+	}
+	if policy, ok := fileAllow[scheme]; ok {
+		return policyAllows(policy)
+	}
+	if policy, ok := fileAllow[""]; ok {
+		return policyAllows(policy)
+	}
+	return scheme != "ext"
+}
+
+func policyAllows(policy string) bool {
+	return !strings.EqualFold(strings.TrimSpace(policy), "never")
 }
 
 // includeDirective is a raw [include]/[includeIf "..."] path entry found
@@ -424,6 +630,86 @@ func privatePrefixesFromConfigFile(configPath, moduleDir string, visited map[str
 		}
 	}
 	return prefixes
+}
+
+// insteadOfSchemesFromConfigFile is insteadOfSchemes' counterpart to
+// privatePrefixesFromConfigFile: same file-read and [include]/[includeIf]
+// following (sharing a visited set with its own call tree, separate from
+// privatePrefixesFromConfigFile's, since this is an independent scan of
+// the same files for different information — see blockedInsteadOfPrefixCounts).
+func insteadOfSchemesFromConfigFile(configPath, moduleDir string, visited map[string]bool) map[string][]string {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil
+	}
+	if visited[abs] {
+		return nil
+	}
+	visited[abs] = true
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+
+	out := insteadOfSchemes(data)
+	dir := filepath.Dir(configPath)
+	for _, inc := range parseIncludes(data) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+			continue
+		}
+		if p := resolveIncludePath(inc.path, dir); p != "" {
+			for k, v := range insteadOfSchemesFromConfigFile(p, moduleDir, visited) {
+				out[k] = append(out[k], v...)
+			}
+		}
+	}
+	return out
+}
+
+// protocolAllowFromConfigFile is protocolAllowFromGitConfig's counterpart
+// to privatePrefixesFromConfigFile: same file-read and include-following,
+// but for single-valued protocol.allow/protocol.<name>.allow keys instead
+// of the multi-valued insteadOf signal, so included files' values are
+// merged with (and, on conflict, overridden by) this file's own — the
+// file that directly names an included one is treated as the more
+// specific/authoritative source, the same precedence direction git-config
+// itself uses for a value set both before and after an [include] line
+// textually (this tool doesn't track that finer textual ordering, so this
+// is an approximation, not an exact reimplementation — see
+// gitProtocolAllowed's doc comment for why erring toward "not blocked" on
+// an ambiguous read is the safe direction anyway).
+func protocolAllowFromConfigFile(configPath, moduleDir string, visited map[string]bool) map[string]string {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return nil
+	}
+	if visited[abs] {
+		return nil
+	}
+	visited[abs] = true
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil
+	}
+
+	out := map[string]string{}
+	dir := filepath.Dir(configPath)
+	for _, inc := range parseIncludes(data) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+			continue
+		}
+		if p := resolveIncludePath(inc.path, dir); p != "" {
+			for k, v := range protocolAllowFromConfigFile(p, moduleDir, visited) {
+				out[k] = v
+			}
+		}
+	}
+	for k, v := range protocolAllowFromGitConfig(data) {
+		out[k] = v // this file's own settings take precedence over its includes'
+	}
+	return out
 }
 
 // stripLineComment removes a trailing comment from a raw git config file

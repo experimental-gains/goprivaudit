@@ -141,6 +141,8 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 	}
 
+	prefixes = suppressProtocolBlockedInsteadOf(prefixes, moduleDir, os.Getenv)
+
 	gosumdb := *sumdbOverride
 	if !sumdbSet {
 		gosumdb = goEnv("GOSUMDB")
@@ -178,6 +180,86 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 1
 	}
 	return 0
+}
+
+// suppressProtocolBlockedInsteadOf removes SUMDB-LEAK-signal prefixes whose
+// only source is an insteadOf rewrite to a transport git itself would
+// refuse to use — see gitProtocolAllowed for the exact GIT_ALLOW_PROTOCOL/
+// protocol.allow/protocol.<name>.allow precedence this checks. A fetch that
+// can never complete can never leak a module path/version to
+// sum.golang.org either: verified live that a real `go mod download`/`go
+// get` fails with e.g. "fatal: transport 'ssh' not allowed" *before* ever
+// computing a hash to send to the checksum database — the same "cannot
+// leak" reasoning run() already applies to GOSUMDB=off and vendor-mode
+// builds, just reached via a different mechanism (a blocked git transport
+// instead of sumdb verification being off or bypassed entirely). This is
+// a real, mainstream scenario, not a contrived one: `GIT_ALLOW_PROTOCOL=
+// https` (SSH disabled org-wide, a common modern hardening pattern now
+// that short-lived HTTPS tokens have widely replaced long-lived SSH keys)
+// combined with a leftover ssh:// insteadOf rewrite — go.dev's own
+// documented private-auth pattern, and the primary example in this file's
+// own doc comments — makes every `go get` for that module fail outright,
+// yet pre-fix goprivaudit still reported SUMDB LEAK unconditionally.
+//
+// Only removes as many occurrences of a prefix as have a confirmed-blocked
+// insteadOf source (blockedInsteadOfPrefixCounts counts them per prefix,
+// and each occurrence is removed at most once): a prefix that's ALSO
+// signaled by an unblocked insteadOf rule, a credential helper, an
+// extraHeader, or a netrc entry keeps enough occurrences to stay flagged.
+// This only ever narrows a false positive, never suppresses a real leak.
+func suppressProtocolBlockedInsteadOf(prefixes []string, moduleDir string, getenv func(string) string) []string {
+	blocked := blockedInsteadOfPrefixCounts(moduleDir, getenv)
+	if len(blocked) == 0 {
+		return prefixes
+	}
+	out := make([]string, 0, len(prefixes))
+	for _, p := range prefixes {
+		if blocked[p] > 0 {
+			blocked[p]--
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// blockedInsteadOfPrefixCounts scans the same git config sources
+// gitConfigCandidates/privatePrefixesFromEnv do for insteadOf rewrites
+// (via insteadOfSchemesFromConfigFile/insteadOfSchemesFromEnv, which
+// additionally capture each rewrite's target transport scheme), resolves
+// the effective protocol.allow policy from the same config files
+// (protocolAllowFromConfigFile) plus GIT_ALLOW_PROTOCOL, and counts, per
+// module-path prefix, how many of its insteadOf rewrites target a
+// transport git would refuse.
+func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) map[string]int {
+	protocolAllow := map[string]string{}
+	visitedProto := map[string]bool{}
+	for _, p := range gitConfigCandidates(moduleDir) {
+		for k, v := range protocolAllowFromConfigFile(p, moduleDir, visitedProto) {
+			protocolAllow[k] = v
+		}
+	}
+
+	schemes := map[string][]string{}
+	visitedSchemes := map[string]bool{}
+	for _, p := range gitConfigCandidates(moduleDir) {
+		for prefix, ss := range insteadOfSchemesFromConfigFile(p, moduleDir, visitedSchemes) {
+			schemes[prefix] = append(schemes[prefix], ss...)
+		}
+	}
+	for prefix, ss := range insteadOfSchemesFromEnv(getenv) {
+		schemes[prefix] = append(schemes[prefix], ss...)
+	}
+
+	counts := map[string]int{}
+	for prefix, ss := range schemes {
+		for _, s := range ss {
+			if !gitProtocolAllowed(s, protocolAllow, getenv) {
+				counts[prefix]++
+			}
+		}
+	}
+	return counts
 }
 
 func gitConfigCandidates(moduleDir string) []string {
