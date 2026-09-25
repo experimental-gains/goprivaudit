@@ -1,0 +1,23 @@
+# goprivaudit
+
+> CLI that audits a Go module's GOPRIVATE/GONOSUMDB config against its go.mod dependencies and private-module auth setup (git insteadOf, credential helpers, extraHeader, netrc), catching sumdb leaks of private module paths and overly broad GOPRIVATE=* patterns that silently disable checksum verification for public deps too.
+
+Use this when you authenticate `go get` to a private host (via git
+`insteadOf`, a credential helper, a URL-scoped `http.<url>.extraHeader`,
+or netrc) and want to know whether that module's path, existence, and
+version are still leaking to the public `sum.golang.org` checksum
+database because `GOPRIVATE`/`GONOSUMDB` doesn't cover it — or whether
+a blanket `GOPRIVATE=*` has silently turned off checksum verification
+for every public dependency too. It makes no network calls; everything
+checked is local (go.mod, git config, netrc, `go env`).
+
+## Install
+- [go install](https://github.com/experimental-gains/goprivaudit#install): `go install github.com/experimental-gains/goprivaudit@latest`
+- [Homebrew](https://github.com/experimental-gains/homebrew-tap): `brew install experimental-gains/tap/goprivaudit`
+
+## Docs
+- [README](https://github.com/experimental-gains/goprivaudit/blob/main/README.md): full check list, GOSUMDB/GOPROXY=off skip conditions, and example output
+- [pkg.go.dev](https://pkg.go.dev/github.com/experimental-gains/goprivaudit): generated Go API docs
+
+## Repo
+- [Source](https://github.com/experimental-gains/goprivaudit): MIT-licensed, currently at v0.1.36
