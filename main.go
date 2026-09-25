@@ -323,6 +323,39 @@ func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) 
 
 func gitConfigCandidates(moduleDir string) []string {
 	var out []string
+	// git-config(1): the system-wide $(prefix)/etc/gitconfig file is git's
+	// lowest-precedence config tier — read before the global/local tiers
+	// below, and consulted for a plain, unrewritten `git` invocation exactly
+	// like they are (git-config(1), "FILES"). It was never checked at all
+	// before this fix. Verified live (2026-09): an insteadOf rewrite placed
+	// only in /etc/gitconfig genuinely rewrites a real `git ls-remote` fetch
+	// to the ssh transport (confirmed via GIT_TRACE=1 showing the ssh
+	// subprocess invocation), both at git's compiled-in default path and via
+	// an explicit GIT_CONFIG_SYSTEM override. This is a real, mainstream
+	// scenario: baking an org-wide insteadOf rewrite or credential helper
+	// into a container base image or CI runner image via /etc/gitconfig,
+	// specifically so it applies to every job/user on the machine
+	// regardless of $HOME (which may be unset, unwritable, or ephemeral in a
+	// container) — a pattern several real base-image and CI-hardening
+	// guides recommend for exactly that reason.
+	//
+	// `git var GIT_CONFIG_SYSTEM` (rather than hardcoding "/etc/gitconfig",
+	// which is only this platform's compiled-in default — Homebrew git on
+	// macOS instead defaults to a path under /opt/homebrew or /usr/local)
+	// delegates both the platform-specific default path resolution AND the
+	// GIT_CONFIG_NOSYSTEM boolean parsing to git itself: verified live that
+	// it prints the resolved path and exits 0 when the system tier is
+	// active, but prints nothing and exits nonzero the moment
+	// GIT_CONFIG_NOSYSTEM is set to any of git's recognized truthy boolean
+	// forms (1/true/yes/on, case-insensitively) — exactly mirroring real
+	// git's own "skip the system file entirely" behavior confirmed
+	// separately via GIT_TRACE. gitVar's existing "treat a failed/empty
+	// invocation as no value" convention (same as goEnv) already does the
+	// right thing here with no separate boolean-parsing code of this tool's
+	// own needed.
+	if sys := gitVar("GIT_CONFIG_SYSTEM"); sys != "" {
+		out = append(out, sys)
+	}
 	if override := os.Getenv("GIT_CONFIG_GLOBAL"); override != "" {
 		// git-config(1): GIT_CONFIG_GLOBAL "take[s] the configuration from
 		// the given file[] instead from global ... configuration" — verified
@@ -399,6 +432,21 @@ func goproxyEffectivelyOff(goproxy string) bool {
 
 func goEnv(name string) string {
 	out, err := exec.Command("go", "env", name).Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// gitVar shells out to `git var <name>`, the same "ask the real tool
+// instead of guessing" pattern goEnv already uses for `go env`. Returns ""
+// on any error (including a nonzero exit, which `git var GIT_CONFIG_SYSTEM`
+// itself uses to report that the system config tier is disabled — see
+// gitConfigCandidates), so callers can't distinguish "not applicable" from
+// "git itself failed", but every current caller only needs a fail-open
+// empty-means-no-signal result anyway.
+func gitVar(name string) string {
+	out, err := exec.Command("git", "var", name).Output()
 	if err != nil {
 		return ""
 	}

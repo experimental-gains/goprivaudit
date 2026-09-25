@@ -1215,3 +1215,72 @@ func TestGoproxyEffectivelyOff(t *testing.T) {
 		}
 	}
 }
+
+// TestRunFindsLeakViaSystemGitConfig covers git's lowest-precedence config
+// tier — the system-wide $(prefix)/etc/gitconfig file, relocatable via
+// GIT_CONFIG_SYSTEM — which gitConfigCandidates never read at all before
+// this fix. A real, common pattern: an org bakes an insteadOf rewrite (or
+// credential helper / extraHeader) into a container base image or CI
+// runner's system-wide git config so it applies to every job on the
+// machine regardless of $HOME. Uses a real `git var GIT_CONFIG_SYSTEM`
+// subprocess (same live-behavior-over-guessing approach as
+// gitconfig_realgit_test.go) rather than assuming the path, since it's
+// platform-dependent (this fix's whole point).
+func TestRunFindsLeakViaSystemGitConfig(t *testing.T) {
+	sysConfig := writeFile(t, t.TempDir(), "gitconfig", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("GIT_CONFIG_SYSTEM", sysConfig)
+	t.Setenv("HOME", t.TempDir()) // no ~/.gitconfig at all
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunIgnoresSystemGitConfigWhenNoSystemSet covers the flip side of
+// TestRunFindsLeakViaSystemGitConfig: GIT_CONFIG_NOSYSTEM (git-config(1))
+// makes real git skip the system config tier entirely (confirmed live via
+// GIT_TRACE against a real `git ls-remote`: with GIT_CONFIG_NOSYSTEM=1 set,
+// an insteadOf rewrite that lives only in the system file never fires, and
+// the fetch goes out over the original, unrewritten HTTPS URL instead of
+// ssh). So a module whose only private-auth signal is a
+// GIT_CONFIG_NOSYSTEM-suppressed system-config rewrite has no real signal
+// at all, and should be reported clean — not a false SUMDB LEAK from a
+// config file git itself never actually reads in this mode.
+func TestRunIgnoresSystemGitConfigWhenNoSystemSet(t *testing.T) {
+	sysConfig := writeFile(t, t.TempDir(), "gitconfig", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("GIT_CONFIG_SYSTEM", sysConfig)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	t.Setenv("HOME", t.TempDir()) // no ~/.gitconfig at all
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("GIT_CONFIG_GLOBAL", "")
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (GIT_CONFIG_NOSYSTEM should suppress the system-config signal); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout has a false leak finding despite GIT_CONFIG_NOSYSTEM: %s", stdout)
+	}
+}
