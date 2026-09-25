@@ -273,9 +273,11 @@ is covered automatically; nothing extra to configure.
 
 ## Support
 
-This project is free and open source. If it's useful to you, tips are
-welcome via [Liberapay](https://liberapay.com/experimental-gains/) or
-this ETH address (self-custody, no KYC, no obligation):
+If this caught something useful, a star helps others find it — that's
+the main thing. This project is free and open source; if it's useful
+to you, tips are also welcome via
+[Liberapay](https://liberapay.com/experimental-gains/) or this ETH
+address (self-custody, no KYC, no obligation):
 `0x87053a1898994043e7476800cB5d4BDB423eADD7`
 
 ## License
