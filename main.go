@@ -97,9 +97,26 @@ func run(args []string, stdout, stderr *os.File) int {
 		}
 	})
 
+	// moduleDir must be resolved before any goEnv call below: several of
+	// the variables being read (GOWORK above all, since its default is
+	// "search upward from the current directory for a go.work file" per
+	// `go help environment`) are directory-dependent, not global. Every
+	// `go env` invocation is run with cmd.Dir set to moduleDir so it
+	// reflects the go.mod actually being audited, not whatever directory
+	// this process happened to be launched from — verified live that a
+	// perfectly normal invocation shape (a wrapper script fixed at one
+	// cwd, auditing a target module via `-gomod /path/to/other/go.mod`,
+	// the same "audit script" pattern the run #333 modslop cmd.Dir fix
+	// called out) previously made GOWORK auto-discovery resolve against
+	// the wrong directory tree entirely, silently missing a real
+	// workspace-level replace and reporting "no issues found" on a real
+	// SUMDB LEAK — a false negative on the tool's core signal, the exact
+	// scenario the go.work support added in run #298 exists to catch.
+	moduleDir := filepath.Dir(*gomodPath)
+
 	gowork := *goworkOverride
 	if !goworkSet {
-		gowork = goEnv("GOWORK")
+		gowork = goEnv(moduleDir, "GOWORK")
 	}
 
 	requires := parseRequires(data)
@@ -109,17 +126,16 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	goprivate := *privateOverride
 	if !privateSet {
-		goprivate = goEnv("GOPRIVATE")
+		goprivate = goEnv(moduleDir, "GOPRIVATE")
 	}
 	gonosumdb := *nosumdbOverride
 	if !nosumdbSet {
-		gonosumdb = goEnv("GONOSUMDB")
+		gonosumdb = goEnv(moduleDir, "GONOSUMDB")
 	}
 	if gonosumdb == "" {
 		gonosumdb = goprivate // GOPRIVATE is the fallback default for GONOSUMDB
 	}
 
-	moduleDir := filepath.Dir(*gomodPath)
 	visited := map[string]bool{}
 	var prefixes []string
 	for _, p := range gitConfigCandidates(moduleDir) {
@@ -155,19 +171,19 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	gosumdb := *sumdbOverride
 	if !sumdbSet {
-		gosumdb = goEnv("GOSUMDB")
+		gosumdb = goEnv(moduleDir, "GOSUMDB")
 	}
 
 	goflags := *goflagsOverride
 	if !goflagsSet {
-		goflags = goEnv("GOFLAGS")
+		goflags = goEnv(moduleDir, "GOFLAGS")
 	}
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
 
 	goproxy := *proxyOverride
 	if !proxySet {
-		goproxy = goEnv("GOPROXY")
+		goproxy = goEnv(moduleDir, "GOPROXY")
 	}
 	proxyOff := goproxyEffectivelyOff(goproxy)
 
@@ -430,8 +446,14 @@ func goproxyEffectivelyOff(goproxy string) bool {
 	return false
 }
 
-func goEnv(name string) string {
-	out, err := exec.Command("go", "env", name).Output()
+// goEnv runs `go env <name>` with cmd.Dir set to dir, so directory-dependent
+// values (GOWORK's default auto-discovery above all — see the comment
+// where moduleDir is computed in run()) reflect the module actually being
+// audited rather than this process's own working directory.
+func goEnv(dir, name string) string {
+	cmd := exec.Command("go", "env", name)
+	cmd.Dir = dir
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}

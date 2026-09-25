@@ -765,12 +765,47 @@ require stale.example.com/org/other-tool v0.0.0-20230101000000-abcdef123456
 // wrong-for-the-wrong-reason output was indistinguishable from correct
 // output in every existing test's environment.
 func TestGoEnvReturnsRealValue(t *testing.T) {
-	got := goEnv("GOOS")
+	got := goEnv(".", "GOOS")
 	if got == "" {
-		t.Fatal("goEnv(\"GOOS\") returned empty; want a real value")
+		t.Fatal("goEnv(\".\", \"GOOS\") returned empty; want a real value")
 	}
 	if got != runtime.GOOS {
-		t.Errorf("goEnv(\"GOOS\") = %q, want %q", got, runtime.GOOS)
+		t.Errorf("goEnv(\".\", \"GOOS\") = %q, want %q", got, runtime.GOOS)
+	}
+}
+
+// TestGoEnvUsesGivenDir covers the run #348 bug directly at the goEnv
+// level: GOWORK's default is directory-dependent (auto-discovered by
+// searching upward from wherever `go env GOWORK` is actually run), so
+// goEnv must run `go env` with cmd.Dir set to the given dir rather than
+// this test process's own working directory. Creates a real go.work in a
+// temp dir (a real module nested under it, matching `go help workspaces`
+// layout) and confirms goEnv("GOWORK", dir) finds it even though the test
+// process's own cwd is unrelated and has no go.work of its own.
+func TestGoEnvUsesGivenDir(t *testing.T) {
+	root := t.TempDir()
+	modDir := filepath.Join(root, "member")
+	if err := os.MkdirAll(modDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(modDir, "go.mod"), []byte("module example.com/member\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workPath := filepath.Join(root, "go.work")
+	if err := os.WriteFile(workPath, []byte("go 1.24\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := goEnv(modDir, "GOWORK")
+	if got != workPath {
+		t.Errorf("goEnv(%q, \"GOWORK\") = %q, want %q", modDir, got, workPath)
+	}
+
+	// Sanity check the negative: a dir with no go.work in its own tree
+	// (t.TempDir()'s parent, guaranteed unrelated) resolves to "".
+	unrelated := t.TempDir()
+	if got := goEnv(unrelated, "GOWORK"); got != "" {
+		t.Errorf("goEnv(%q, \"GOWORK\") = %q, want \"\" (no go.work in this tree)", unrelated, got)
 	}
 }
 
@@ -933,6 +968,52 @@ replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 	}
 	if !strings.Contains(stdout, "SUMDB LEAK: git.internal.example.com/mirror/bar") {
 		t.Errorf("stdout missing expected leak on the go.work replacement path: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaGoWorkAutoDiscovery is the run #348 regression test:
+// unlike TestRunFindsLeakViaGoWorkReplace above (which passes an explicit
+// -gowork override, bypassing auto-discovery entirely), this test omits
+// -gowork so GOWORK is resolved the normal way — via `go env GOWORK`'s own
+// auto-discovery, which searches upward from wherever it's run for a
+// go.work file (`go help environment`). This test's own process cwd (the
+// package directory, unrelated to the TempDir below and containing no
+// go.work of its own) stands in for the ordinary case of a wrapper/CI
+// script invoking `goprivaudit -gomod /path/to/target/go.mod` from a fixed
+// working directory. Before the run #348 fix (goEnv never set cmd.Dir),
+// `go env GOWORK` ran from the test binary's own cwd and found nothing,
+// so the go.work replace below was silently invisible and the tool
+// reported "no issues found" on a real SUMDB LEAK.
+func TestRunFindsLeakViaGoWorkAutoDiscovery(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+require github.com/foo/bar v1.2.3
+`)
+	writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+
+replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
+`)
+	writeFile(t, dir, "app/.git/config", `[url "ssh://git@git.internal.example.com/"]
+	insteadOf = https://git.internal.example.com/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: GOWORK auto-discovery from the go.mod's own directory should find go.work and its replacement, which is privately hosted; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.internal.example.com/mirror/bar") {
+		t.Errorf("stdout missing expected leak found via GOWORK auto-discovery: %s", stdout)
 	}
 }
 
