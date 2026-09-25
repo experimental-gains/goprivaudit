@@ -523,6 +523,63 @@ github.com/myorg/internal-tool
 	}
 }
 
+// TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
+// for the bug found in the 49th real-world-testing pass: the vendor/
+// auto-default (see vendorModeActive) must NOT apply inside an active
+// go.work workspace, even when every per-module condition (vendor/
+// modules.txt present, go.mod's `go` directive >= 1.14) is otherwise met.
+// Verified live against the real go toolchain before fixing: a member
+// module with a qualifying per-module vendor/ directory built fine offline
+// with GOWORK unset, but the identical module — same go.mod, same vendor/ —
+// failed trying to reach an unreachable GOPROXY as soon as GOWORK pointed
+// at a real workspace file, proving the auto-default never engaged.
+// Workspace-wide vendoring is a distinct, opt-in mechanism (`go work
+// vendor` + explicit -mod=vendor) that's a different test (the explicit
+// override already applies inside a workspace too, per
+// TestVendorModeActive). Before this fix, `run` treated the per-module
+// vendor/modules.txt as sufficient on its own, so it silently reported "no
+// issues found" instead of the real SUMDB LEAK a workspace build actually
+// risks sending.
+func TestRunVendorModeInsideWorkspaceStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "vendor/modules.txt", `# github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+## explicit; go 1.20
+github.com/myorg/internal-tool
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "", // no explicit -mod= override: the per-module vendor auto-default must not apply inside a workspace
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: a workspace suppresses the per-module vendor auto-default, so the audit must still run; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding inside an active workspace: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaGitConfigInclude covers a real, common git config
 // pattern this tool previously missed entirely: an insteadOf rewrite
 // living in a file pulled in via [include] rather than written directly

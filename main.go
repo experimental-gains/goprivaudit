@@ -41,6 +41,9 @@
 // are also skipped when the module resolves dependencies from a committed
 // vendor/ directory instead of the network (see vendorModeActive): that
 // build path never contacts sum.golang.org either, for the same reason.
+// That vendor auto-default does not apply inside an active go.work
+// workspace, so it's only honored when GOWORK is unset/"off" (or an
+// explicit -mod=vendor override is present, which applies either way).
 package main
 
 import (
@@ -160,7 +163,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		goflags = goEnv("GOFLAGS")
 	}
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
-	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt)
+	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
 
 	goproxy := *proxyOverride
 	if !proxySet {

@@ -26,10 +26,20 @@ import (
 //     default entirely.
 //   - Absent an explicit override, vendor mode is the default exactly when
 //     vendorModulesTxtPath exists AND the go.mod's own `go` directive is
-//     1.14 or higher. Verified live: the identical vendor/modules.txt with
-//     the go.mod's `go` directive lowered to 1.13 does NOT auto-vendor —
-//     `go build` with an unreachable GOPROXY fails trying to fetch from it,
-//     exactly like the no-vendor-directory case.
+//     1.14 or higher — but ONLY outside an active workspace. Verified live:
+//     the identical vendor/modules.txt with the go.mod's `go` directive
+//     lowered to 1.13 does NOT auto-vendor (`go build` with an unreachable
+//     GOPROXY fails trying to fetch from it, exactly like the
+//     no-vendor-directory case); separately, the identical qualifying
+//     per-module vendor/modules.txt (go >= 1.14, directory present) is ALSO
+//     ignored the moment GOWORK points at a real workspace file — `go
+//     build` inside that member module still reaches the network exactly
+//     as if no vendor/ existed at all. Workspace-wide vendoring is a
+//     distinct, opt-in mechanism (`go work vendor`, producing a single
+//     vendor/ at the workspace root) that always requires an explicit
+//     `-mod=vendor`, already covered by the branch above — so gowork being
+//     non-empty (and not "off") suppresses only the auto-default, never an
+//     explicit override in either direction.
 //
 // This matters because a vendor-mode build never consults the module proxy
 // or sum.golang.org at all — verified live: `go build` with vendor mode
@@ -42,9 +52,15 @@ import (
 // happen" reasoning the existing GOSUMDB=off skip already applies, just
 // reached via a different mechanism (vendoring bypasses the network
 // entirely, rather than a config flag disabling one specific check on it).
-func vendorModeActive(goflags, goVersion, vendorModulesTxtPath string) bool {
+//
+// gowork uses the same convention as goWorkReplaces: the path from `go env
+// GOWORK` (or a test override), where "" or "off" means no workspace.
+func vendorModeActive(goflags, goVersion, vendorModulesTxtPath, gowork string) bool {
 	if mod, ok := explicitModFlag(goflags); ok {
 		return mod == "vendor"
+	}
+	if gowork != "" && gowork != "off" {
+		return false
 	}
 	if _, err := os.Stat(vendorModulesTxtPath); err != nil {
 		return false

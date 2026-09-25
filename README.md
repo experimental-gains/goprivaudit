@@ -55,7 +55,14 @@ live: a vendor-mode build succeeds even with `GOPROXY` unreachable and
 `GOSUMDB` left at its default, so there's no sumdb query happening in that
 mode either. An explicit `-mod=mod`/`-mod=readonly` in `GOFLAGS` overrides
 the vendor auto-default back to the normal network-resolving path, and
-`goprivaudit` follows that override too.
+`goprivaudit` follows that override too. The auto-default does NOT apply
+inside an active [Go workspace](https://go.dev/ref/mod#workspaces) — verified
+live, a per-module `vendor/` directory that would auto-vendor on its own is
+silently ignored the moment `GOWORK` points at a real workspace file, and
+`go build` reaches the network exactly as if no `vendor/` existed. Workspace
+vendoring is a separate, opt-in mechanism (`go work vendor`, one `vendor/` at
+the workspace root, always paired with an explicit `-mod=vendor`), which
+`goprivaudit` still honors as an explicit override either way.
 
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
@@ -113,7 +120,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.32
+- uses: experimental-gains/goprivaudit@v0.1.33
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -133,7 +140,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.32
+    rev: v0.1.33
     hooks:
       - id: goprivaudit
 ```

@@ -76,7 +76,7 @@ func TestVendorModeActive(t *testing.T) {
 	vendorTxt := filepath.Join(dir, "vendor", "modules.txt")
 
 	// No vendor/modules.txt at all: never active regardless of go version.
-	if vendorModeActive("", "1.24.4", vendorTxt) {
+	if vendorModeActive("", "1.24.4", vendorTxt, "") {
 		t.Error("vendorModeActive should be false with no vendor/modules.txt present")
 	}
 
@@ -88,25 +88,52 @@ func TestVendorModeActive(t *testing.T) {
 	}
 
 	// vendor/modules.txt present + go >= 1.14: auto-vendor default applies.
-	if !vendorModeActive("", "1.24.4", vendorTxt) {
+	if !vendorModeActive("", "1.24.4", vendorTxt, "") {
 		t.Error("vendorModeActive should be true: vendor/modules.txt present, go 1.24.4, no override")
 	}
 
 	// vendor/modules.txt present but go < 1.14: auto-vendor default does
 	// NOT apply (verified live against the real go command).
-	if vendorModeActive("", "1.13", vendorTxt) {
+	if vendorModeActive("", "1.13", vendorTxt, "") {
 		t.Error("vendorModeActive should be false: go < 1.14 doesn't auto-vendor even with vendor/modules.txt present")
 	}
 
 	// Explicit -mod=mod overrides the auto-default even with vendor/
 	// modules.txt present and go >= 1.14.
-	if vendorModeActive("-mod=mod", "1.24.4", vendorTxt) {
+	if vendorModeActive("-mod=mod", "1.24.4", vendorTxt, "") {
 		t.Error("vendorModeActive should be false: explicit -mod=mod overrides the vendor auto-default")
 	}
 
 	// Explicit -mod=vendor is active even without a real vendor/modules.txt
 	// (go itself would fail in that case, a separate problem).
-	if !vendorModeActive("-mod=vendor", "1.24.4", filepath.Join(dir, "nonexistent", "modules.txt")) {
+	if !vendorModeActive("-mod=vendor", "1.24.4", filepath.Join(dir, "nonexistent", "modules.txt"), "") {
 		t.Error("vendorModeActive should be true: explicit -mod=vendor forces vendor mode")
+	}
+
+	// An active go.work workspace suppresses the auto-default even though
+	// every per-module condition (vendor/modules.txt present, go >= 1.14)
+	// is met — verified live against the real go toolchain: a per-module
+	// vendor/ directory that would auto-vendor standalone is silently
+	// ignored the moment GOWORK points at a real workspace file, and `go
+	// build` inside that member module reaches the network exactly as if
+	// no vendor/ existed at all. Workspace-wide vendoring is a distinct,
+	// opt-in mechanism (`go work vendor` + explicit -mod=vendor) covered by
+	// the explicit-override branch above, not this auto-default.
+	if vendorModeActive("", "1.24.4", vendorTxt, filepath.Join(dir, "go.work")) {
+		t.Error("vendorModeActive should be false: an active workspace suppresses the per-module vendor auto-default")
+	}
+
+	// GOWORK=off (workspace mode explicitly disabled) must NOT suppress the
+	// auto-default, matching goWorkReplaces' existing "" / "off" convention.
+	if !vendorModeActive("", "1.24.4", vendorTxt, "off") {
+		t.Error("vendorModeActive should be true: GOWORK=off means no workspace, auto-default still applies")
+	}
+
+	// An explicit -mod=vendor override still forces vendor mode inside an
+	// active workspace (the override branch is checked before the
+	// workspace suppression, matching real go: an explicit flag always
+	// wins over any auto-default in either direction).
+	if !vendorModeActive("-mod=vendor", "1.24.4", vendorTxt, filepath.Join(dir, "go.work")) {
+		t.Error("vendorModeActive should be true: explicit -mod=vendor overrides workspace suppression too")
 	}
 }
