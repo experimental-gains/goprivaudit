@@ -150,6 +150,18 @@ Runs on any commit that touches `go.mod`, auditing the current
 network calls). `pre-commit` builds the hook via `go install` the first
 time.
 
+## Use as a Claude Code plugin
+
+goprivaudit also ships as a skill in the
+[`supplychain-guard`](https://github.com/experimental-gains/claude-plugins)
+Claude Code plugin, so an agent audits `GOPRIVATE`/`go.work` coverage
+before committing a `go.mod` change in a repo with private modules:
+
+```
+claude plugin marketplace add experimental-gains/claude-plugins
+claude plugin install supplychain-guard@experimental-gains-plugins
+```
+
 ## How it detects "this module should be private"
 
 Three independent signals, any one is enough to flag a module.
