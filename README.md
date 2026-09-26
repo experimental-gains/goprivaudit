@@ -200,12 +200,15 @@ treated as having a private-auth signal, then checked against
 `GOPRIVATE`/`GONOSUMDB` using the same glob-per-path-segment, prefix-match
 semantics the `go` command itself uses (see `go help goproxy`).
 
-`[include]` and `[includeIf "gitdir:..."]`/`"gitdir/i:..."` directives
-(git-config(1)'s "Includes" — the standard way to scope a different
-identity or rewrite to everything under one directory tree, e.g. a work
-vs. personal setup) are followed the way git itself resolves them, so a
-rewrite living in an included file is still caught. Other `includeIf`
-condition kinds (`onbranch:`, `hasconfig:`, ...) aren't evaluated.
+`[include]` and `[includeIf "gitdir:..."]`/`"gitdir/i:..."`/
+`"onbranch:..."`/`"onbranch/i:..."` directives (git-config(1)'s
+"Includes" — the standard way to scope a different identity or rewrite
+to everything under one directory tree, or to one branch/branch
+hierarchy, e.g. a work vs. personal setup) are followed the way git
+itself resolves them, so a rewrite living in an included file is still
+caught. The `hasconfig:` condition kind isn't evaluated (see
+`includeIfMatches`'s doc comment for why: resolving it requires a
+two-pass scan git itself implements specially).
 
 **Git config: credential helper.** It also looks for a URL-scoped git
 credential helper (see `git help gitcredentials`, "CREDENTIAL CONTEXTS")

@@ -668,11 +668,14 @@ func resolveGitDir(moduleDir string) (gitDir, commonDir string, ok bool) {
 }
 
 // includeIfMatches reports whether an [includeIf "cond"] condition applies
-// when git is run inside moduleDir. Only the "gitdir:"/"gitdir/i:" forms are
-// supported (by far the most common use of includeIf — scoping a different
-// identity/rewrite to everything under a directory tree, e.g. a work vs.
-// personal SSH setup); "onbranch:"/"hasconfig:" and other forms are treated
-// as non-matching rather than guessed at.
+// when git is run inside moduleDir. "gitdir:"/"gitdir/i:" and
+// "onbranch:"/"onbranch/i:" are supported; "hasconfig:" and other forms are
+// treated as non-matching rather than guessed at (per git-config(1),
+// resolving "hasconfig:remote.*.url:" requires scanning ahead through every
+// other config file the audit would otherwise read independently, a
+// structurally different, chicken-and-egg-avoiding two-pass algorithm git
+// itself implements specially — not a case this tool's single-pass reader
+// can approximate safely).
 //
 // Per git-config(1), a "gitdir:" pattern is matched against the absolute
 // path of the repository's *.git directory* ($GIT_DIR), not the working
@@ -702,11 +705,17 @@ func includeIfMatches(cond, moduleDir string) bool {
 	if !ok {
 		return false
 	}
-	caseInsensitive := kind == "gitdir/i"
-	if kind != "gitdir" && !caseInsensitive {
+	switch kind {
+	case "gitdir", "gitdir/i":
+		return includeIfMatchesGitdir(kind == "gitdir/i", pattern, moduleDir)
+	case "onbranch", "onbranch/i":
+		return includeIfMatchesOnbranch(kind == "onbranch/i", pattern, moduleDir)
+	default:
 		return false
 	}
+}
 
+func includeIfMatchesGitdir(caseInsensitive bool, pattern, moduleDir string) bool {
 	gitDir, _, ok2 := resolveGitDir(moduleDir)
 	if !ok2 {
 		// No resolvable .git at all (e.g. moduleDir isn't a repo yet, or a
@@ -725,6 +734,83 @@ func includeIfMatches(cond, moduleDir string) bool {
 		target = strings.ToLower(target)
 	}
 	return matchGitdirGlob(pattern, target)
+}
+
+// includeIfMatchesOnbranch implements the "onbranch:"/"onbranch/i:"
+// condition: per git-config(1), it matches the name of the branch currently
+// checked out in the worktree rooted at moduleDir — unlike gitdir, there's
+// no "~/"/"./"-prefix handling and no implicit "**/" prepend for a bare
+// pattern. Verified live: a real `git` repo with an
+// `[includeIf "onbranch:feature/*"]` entry applies the included file's
+// config (a credential.helper, in the reproduction) only while
+// "feature/x" is checked out, not on "main" — confirmed by reading
+// `git config --get-all` before and after a real `git checkout -b`.
+//
+// A trailing "/" is a second, subtler asymmetry with gitdir, also verified
+// live rather than assumed from the doc wording alone: gitdir's docs say a
+// trailing-slash pattern "matches foo and everything inside, recursively"
+// (confirmed live — "gitdir:/x/work/" matches the bare directory
+// "/x/work" itself, not just things under it), but onbranch's docs instead
+// say it "matches all branches that begin with foo/" — no mention of
+// matching the bare name. A real `[includeIf "onbranch:feature/"]` entry,
+// confirmed live, does NOT apply while a branch literally named "feature"
+// (no further path segment) is checked out, only while something like
+// "feature/x" is. So unlike expandGitdirPattern's equivalent "append **"
+// step, the appended "**" here must consume at least one branch path
+// segment, not zero-or-more.
+func includeIfMatchesOnbranch(caseInsensitive bool, pattern, moduleDir string) bool {
+	gitDir, _, ok := resolveGitDir(moduleDir)
+	if !ok {
+		return false
+	}
+	branch, ok := currentBranch(gitDir)
+	if !ok {
+		// Detached HEAD: per git-config(1) ("if we are in a worktree where
+		// the name of the branch that is currently checked out matches"),
+		// there is no checked-out branch name for any pattern to match.
+		return false
+	}
+	requireSubBranch := strings.HasSuffix(pattern, "/")
+	if requireSubBranch {
+		pattern += "**"
+	}
+	if caseInsensitive {
+		pattern = strings.ToLower(pattern)
+		branch = strings.ToLower(branch)
+	}
+	pSegs := strings.Split(pattern, "/")
+	bSegs := strings.Split(branch, "/")
+	if !globMatchSegs(pSegs, bSegs) {
+		return false
+	}
+	if requireSubBranch && len(bSegs) == len(pSegs)-1 {
+		// The appended "**" (dropped here via len(pSegs)-1) matched zero
+		// segments — exactly the bare-prefix case just above confirms
+		// onbranch must reject, unlike gitdir.
+		return false
+	}
+	return true
+}
+
+// currentBranch reads gitDir/HEAD directly (no `git` subprocess required,
+// consistent with the rest of this file's config-file-only resolution) and
+// returns the checked-out branch name, or ok=false if HEAD is detached (a
+// raw commit SHA, not a "ref: refs/heads/..." symbolic ref) or unreadable.
+func currentBranch(gitDir string) (branch string, ok bool) {
+	data, err := os.ReadFile(filepath.Join(gitDir, "HEAD"))
+	if err != nil {
+		return "", false
+	}
+	rest, found := strings.CutPrefix(strings.TrimSpace(string(data)), "ref:")
+	if !found {
+		return "", false
+	}
+	rest = strings.TrimSpace(rest)
+	name, found := strings.CutPrefix(rest, "refs/heads/")
+	if !found {
+		return "", false
+	}
+	return name, true
 }
 
 // expandGitdirPattern applies git's documented normalization for gitdir

@@ -394,7 +394,7 @@ func TestIncludeIfMatchesGitdir(t *testing.T) {
 		{"gitdir:~/work/", home + "/work/app", true, "tilde expansion"},
 		{"gitdir:" + home + "/work/", home + "/workshop/app", false, "sibling dir sharing a string prefix must not match ('work' vs 'workshop')"},
 		{"gitdir/i:" + strings.ToUpper(home) + "/WORK/", home + "/work/app", true, "case-insensitive variant"},
-		{"onbranch:main", home + "/work/app", false, "unsupported condition kind never matches"},
+		{"hasconfig:remote.*.url:*github*", home + "/work/app", false, "unsupported condition kind never matches"},
 	}
 	for _, c := range cases {
 		if got := includeIfMatches(c.cond, c.dir); got != c.want {
@@ -461,6 +461,89 @@ func TestIncludeIfMatchesLinkedWorktreeGitdir(t *testing.T) {
 	staleCond := "gitdir:" + filepath.ToSlash(filepath.Join(worktree, ".git"))
 	if includeIfMatches(staleCond, worktree) {
 		t.Errorf("includeIfMatches(%q, %q) = true, want false (worktree/.git is a file, not the real $GIT_DIR, and must not match)", staleCond, worktree)
+	}
+}
+
+// writeHEAD writes a gitDir/HEAD file, either a symbolic ref to branch (if
+// branch != "") or a detached-HEAD-style raw commit SHA (if branch == "").
+func writeHEAD(t *testing.T, gitDir, branch string) {
+	t.Helper()
+	if err := os.MkdirAll(gitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	content := "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391\n"
+	if branch != "" {
+		content = "ref: refs/heads/" + branch + "\n"
+	}
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestIncludeIfMatchesOnbranch pins the "onbranch:"/"onbranch/i:" condition
+// kinds added alongside "gitdir:" — verified live first (see
+// includeIfMatchesOnbranch's doc comment) against a real `git checkout`
+// before writing these fixture-based cases: a real credential.helper
+// scoped via "[includeIf \"onbranch:feature/*\"]" was active with
+// "feature/x" checked out and inactive on "main", confirming both that real
+// git branch-scopes includeIf this way and that the pre-fix code (which
+// unconditionally returned false for any "onbranch:" condition) silently
+// missed it — a false negative on a real SUMDB LEAK.
+func TestIncludeIfMatchesOnbranch(t *testing.T) {
+	cases := []struct {
+		cond   string
+		branch string
+		want   bool
+		reason string
+	}{
+		{"onbranch:feature/x", "feature/x", true, "exact match"},
+		{"onbranch:feature/x", "main", false, "different branch"},
+		{"onbranch:feature/*", "feature/x", true, "glob wildcard"},
+		{"onbranch:feature/", "feature/x", true, "trailing slash matches hierarchically"},
+		{"onbranch:feature/", "feature", false, "trailing slash requires something under the prefix"},
+		{"onbranch:foo", "bar/foo", false, "bare pattern is NOT auto-prefixed with **/ unlike gitdir"},
+		{"onbranch/i:FEATURE/X", "feature/x", true, "case-insensitive variant"},
+	}
+	for _, c := range cases {
+		dir := t.TempDir()
+		gitDir := filepath.Join(dir, ".git")
+		writeHEAD(t, gitDir, c.branch)
+		if got := includeIfMatches(c.cond, dir); got != c.want {
+			t.Errorf("%s: includeIfMatches(%q) on branch %q = %v, want %v", c.reason, c.cond, c.branch, got, c.want)
+		}
+	}
+}
+
+func TestIncludeIfMatchesOnbranchDetachedHEAD(t *testing.T) {
+	dir := t.TempDir()
+	writeHEAD(t, filepath.Join(dir, ".git"), "")
+	cond := "onbranch:*"
+	if includeIfMatches(cond, dir) {
+		t.Errorf("includeIfMatches(%q, detached HEAD) = true, want false (git-config(1): no branch name to match against)", cond)
+	}
+}
+
+func TestIncludeIfMatchesOnbranchNoRepo(t *testing.T) {
+	dir := t.TempDir() // no .git at all
+	if includeIfMatches("onbranch:*", dir) {
+		t.Error("includeIfMatches(\"onbranch:*\", no-repo dir) = true, want false")
+	}
+}
+
+func TestCurrentBranchNonBranchRef(t *testing.T) {
+	gitDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(gitDir, "HEAD"), []byte("ref: refs/tags/v1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := currentBranch(gitDir); ok {
+		t.Error("currentBranch on a HEAD pointing at refs/tags/... = ok, want !ok (not a branch ref)")
+	}
+}
+
+func TestCurrentBranchUnreadableHEAD(t *testing.T) {
+	gitDir := t.TempDir() // no HEAD file at all
+	if _, ok := currentBranch(gitDir); ok {
+		t.Error("currentBranch with no HEAD file = ok, want !ok")
 	}
 }
 
