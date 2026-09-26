@@ -136,12 +136,28 @@ func run(args []string, stdout, stderr *os.File) int {
 		gonosumdb = goprivate // GOPRIVATE is the fallback default for GONOSUMDB
 	}
 
+	// One shared slots/credSlots/httpSlots set threaded across every tier
+	// (and, last, the GIT_CONFIG_COUNT/KEY/VALUE env form) instead of
+	// scanning each independently and concatenating the results: real git
+	// resolves credential.helper/http.extraHeader as one continuous,
+	// ordered scan across tiers, so a later tier's reset (an empty value)
+	// must be able to cancel an earlier tier's real setting, and vice
+	// versa — see privatePrefixesFromConfigFileInto's doc comment for the
+	// real false positive this fixes.
 	visited := map[string]bool{}
-	var prefixes []string
+	var slots []*prefixSlot
+	credSlots := map[string]*prefixSlot{}
+	httpSlots := map[string]*prefixSlot{}
 	for _, p := range gitConfigCandidates(moduleDir) {
-		prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
+		privatePrefixesFromConfigFileInto(p, moduleDir, visited, &slots, credSlots, httpSlots)
 	}
-	prefixes = append(prefixes, privatePrefixesFromEnv(os.Getenv)...)
+	privatePrefixesFromEnvInto(os.Getenv, &slots, credSlots, httpSlots)
+	var prefixes []string
+	for _, s := range slots {
+		if s.active {
+			prefixes = append(prefixes, s.value)
+		}
+	}
 
 	// A netrc `machine` entry is treated as a signal unconditionally, the
 	// same as the insteadOf/credential-helper signals above — GOAUTH does

@@ -102,6 +102,99 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunFindsLeakViaRelativeGitdirIncludeIf covers a real, commonly
+// recommended dotfiles pattern this tool missed before expandGitdirPattern
+// learned to resolve a "./"-prefixed gitdir pattern relative to the
+// directory of the config file the [includeIf] directive itself lives in
+// (git-config(1): "the pattern can also be a path relative to the
+// directory containing the configuration file... e.g. ... if the
+// condition is 'gitdir:./foo/bar', the full pattern would be
+// '/home/user/foo/bar'"). Verified live against real git 2.47 before this
+// fix (see expandGitdirPattern's doc comment): a real ~/.gitconfig
+// containing exactly `[includeIf "gitdir:./work/"] path =
+// ~/.gitconfig-work` genuinely applies gitconfig-work's credential helper
+// to every repo cloned under ~/work/, per `git config --get-all` — a
+// pattern several real "separate work/personal git identity" dotfiles
+// guides recommend specifically because it avoids hardcoding an absolute
+// $HOME-rooted path on every machine. Before the fix, this tool's
+// includeIfMatches never threaded the enclosing config file's own
+// directory through to expandGitdirPattern, so "./work/" was glob-matched
+// as a literal relative fragment against the audited repo's absolute
+// $GIT_DIR and could never match — reporting "no issues found" for a
+// require'd module only reachable via that helper.
+func TestRunFindsLeakViaRelativeGitdirIncludeIf(t *testing.T) {
+	home := t.TempDir()
+	repoDir := filepath.Join(home, "work", "myrepo")
+
+	gomod := writeFile(t, repoDir, "go.mod", `module example.com/app
+
+require relative-example.test/pkg v0.0.0-20230101000000-abcdef123456
+`)
+	// A real repo needs its own .git so resolveGitDir has something to
+	// resolve — its content is irrelevant to this test.
+	writeFile(t, repoDir, ".git/config", "")
+
+	writeFile(t, home, ".gitconfig", `[includeIf "gitdir:./work/"]
+	path = `+filepath.Join(home, ".gitconfig-work")+`
+`)
+	writeFile(t, home, ".gitconfig-work", `[credential "https://relative-example.test"]
+	helper = /path/to/real-helper
+`)
+
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: relative-example.test/pkg") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakCredentialHelperResetAcrossTiers covers a real false
+// positive the old per-tier-then-concatenate architecture had: a global
+// ~/.gitconfig credential helper (e.g. left over from a one-time `gh auth
+// setup-git` run) that a repo's local .git/config deliberately resets with
+// an empty `helper =` line, to disable it for that one repo, is not
+// actually an active private-auth signal at all — verified live (`git
+// credential fill` against a real fake-helper script and the equivalent
+// two-tier config) that the reset genuinely stops git from invoking any
+// helper. Scanning each tier's own file independently and concatenating
+// their prefixes (what run() used to do) can't see a later tier's reset
+// canceling an earlier tier's real setting, since the earlier tier's scan
+// has no visibility into the later one at all.
+func TestRunFindsLeakCredentialHelperResetAcrossTiers(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".gitconfig", `[credential "https://github.com/myorg"]
+	helper = store
+`)
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com/myorg"]
+	helper =
+`)
+
+	stdout, _, code := captureRun(t, []string{"-gomod", gomod, "-private", "", "-nosumdb", ""})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (the local tier's reset cancels the global tier's helper); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout has a false-positive leak finding: %s", stdout)
+	}
+}
+
 // TestExtraHeaderPrivateHostEndToEnd reproduces, end to end through the
 // real built CLI, the exact `[http "<url>"] extraheader = ...` section
 // `actions/checkout` (the default way almost every GitHub Actions Go

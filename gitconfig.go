@@ -176,8 +176,49 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 	var slots []*prefixSlot
 	credSlots := map[string]*prefixSlot{}
 	httpSlots := map[string]*prefixSlot{}
-	section := "" // "", "url", "credential", "http"
+	scanConfigSignals(data, &slots, credSlots, httpSlots, nil)
+
+	var prefixes []string
+	for _, s := range slots {
+		if s.active {
+			prefixes = append(prefixes, s.value)
+		}
+	}
+	return prefixes
+}
+
+// scanConfigSignals scans one git config source's raw contents, in file
+// order, for the url.insteadof / credential.helper / http.extraheader
+// private-auth signals, feeding them into the shared slots/credSlots/
+// httpSlots state (see prefixSlot and setSignalSlot).
+//
+// When onInclude is non-nil, an [include]/[includeIf "cond"] section's
+// "path" key is also recognized and handed to onInclude(cond, path) —
+// with cond == "" for a plain [include] — at the exact position it
+// appears in the scan, before continuing on to the rest of this source's
+// own lines. That "exact position" part is the reason this exists as one
+// combined scan rather than "handle url/credential/http here, handle
+// includes separately, merge afterward" (privatePrefixesFromConfigFile
+// used to do the latter, via the now-unused-for-this-purpose parseIncludes):
+// real git expands an [include]'s contents in place, as part of the very
+// same linear config read, so a credential.helper/http.extraHeader reset
+// (an empty value — see setSignalSlot) living in an included file must be
+// able to cancel a real one set earlier in the file that includes it, and
+// a real one set inside an included file must be cancelable by a reset
+// that appears later in the including file, textually after the [include]
+// line. Verified live with `git credential fill` against a real fake
+// credential helper script, both directions — see
+// TestPrivatePrefixesFromConfigFileIncludeResetOrdering and
+// TestRunFindsLeakCredentialHelperResetAcrossTiers, and the doc comment on
+// privatePrefixesFromConfigFileInto for the cross-tier (not just
+// cross-include) half of the same fix. A caller that doesn't need
+// include-following at all (privatePrefixesFromGitConfig, used directly by
+// most of this file's tests) passes onInclude == nil and those directives
+// are silently skipped, same as before this function existed.
+func scanConfigSignals(data []byte, slots *[]*prefixSlot, credSlots, httpSlots map[string]*prefixSlot, onInclude func(cond, path string)) {
+	section := "" // "", "url", "credential", "http", "include", "includeif"
 	sectionURL := ""
+	cond := ""
 	for _, raw := range splitLogicalLines(data) {
 		line := strings.TrimSpace(stripLineComment(raw))
 		if line == "" {
@@ -193,6 +234,11 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 			case httpSectionRe.MatchString(line):
 				section = "http"
 				sectionURL = httpSectionRe.FindStringSubmatch(line)[1]
+			case includeSectionRe.MatchString(line):
+				section, cond = "include", ""
+			case includeIfSectionRe.MatchString(line):
+				section = "includeif"
+				cond = includeIfSectionRe.FindStringSubmatch(line)[1]
 			default:
 				section = ""
 			}
@@ -208,22 +254,20 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 		switch {
 		case section == "url" && key == "insteadof":
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-				slots = append(slots, &prefixSlot{value: p, active: true})
+				*slots = append(*slots, &prefixSlot{value: p, active: true})
 			}
 		case section == "credential" && key == "helper":
-			setSignalSlot(&slots, credSlots, sectionURL, value)
+			setSignalSlot(slots, credSlots, sectionURL, value)
 		case section == "http" && key == "extraheader":
-			setSignalSlot(&slots, httpSlots, sectionURL, value)
+			setSignalSlot(slots, httpSlots, sectionURL, value)
+		case (section == "include" || section == "includeif") && key == "path" && onInclude != nil:
+			c := cond
+			if section == "include" {
+				c = ""
+			}
+			onInclude(c, value)
 		}
 	}
-
-	var prefixes []string
-	for _, s := range slots {
-		if s.active {
-			prefixes = append(prefixes, s.value)
-		}
-	}
-	return prefixes
 }
 
 // privatePrefixesFromEnv scans the GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> /
@@ -243,6 +287,37 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 // private-auth signal completely invisible to this tool otherwise, since
 // privatePrefixesFromGitConfig only ever reads files.
 func privatePrefixesFromEnv(getenv func(string) string) []string {
+	var slots []*prefixSlot
+	credSlots := map[string]*prefixSlot{}
+	httpSlots := map[string]*prefixSlot{}
+	privatePrefixesFromEnvInto(getenv, &slots, credSlots, httpSlots)
+
+	var prefixes []string
+	for _, s := range slots {
+		if s.active {
+			prefixes = append(prefixes, s.value)
+		}
+	}
+	return prefixes
+}
+
+// privatePrefixesFromEnvInto is privatePrefixesFromEnv's shared-state form:
+// it accumulates the GIT_CONFIG_COUNT/KEY/VALUE signals into the caller's
+// own slots/credSlots/httpSlots instead of returning a fresh []string, so
+// run() (see main.go) can thread the SAME state through it that it already
+// threads through the git config file tiers via
+// privatePrefixesFromConfigFileInto — matching real git's actual
+// precedence, where GIT_CONFIG_COUNT/KEY/VALUE behaves like a trailing set
+// of `-c` overrides applied after every config file, not an independent
+// signal source merged in afterward. Verified live: a real credential
+// helper set in a real config file, reset via a single
+// GIT_CONFIG_COUNT=1/GIT_CONFIG_KEY_0=credential.<url>.helper/
+// GIT_CONFIG_VALUE_0= trio, left `git credential fill` invoking no helper
+// at all — the env-based reset really does cancel a file-based real
+// setting, which privatePrefixesFromEnv's old independent-slots-then-
+// concatenate architecture couldn't reflect (see
+// TestRunFindsLeakCredentialHelperResetAcrossTiers).
+func privatePrefixesFromEnvInto(getenv func(string) string, slots *[]*prefixSlot, credSlots, httpSlots map[string]*prefixSlot) {
 	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
 	if err != nil || count <= 0 {
 		// Per git-config(1): a missing or non-numeric GIT_CONFIG_COUNT is
@@ -250,11 +325,8 @@ func privatePrefixesFromEnv(getenv func(string) string) []string {
 		// invalid count as a fatal error rather than "0", but this tool
 		// only needs to not misread absent/empty as a signal, not
 		// replicate git's own error-exit behavior).
-		return nil
+		return
 	}
-	var slots []*prefixSlot
-	credSlots := map[string]*prefixSlot{}
-	httpSlots := map[string]*prefixSlot{}
 	for i := 0; i < count; i++ {
 		key := getenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
 		value := getenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
@@ -267,7 +339,7 @@ func privatePrefixesFromEnv(getenv func(string) string) []string {
 		switch {
 		case section == "url" && name == "insteadof":
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-				slots = append(slots, &prefixSlot{value: p, active: true})
+				*slots = append(*slots, &prefixSlot{value: p, active: true})
 			}
 		case section == "credential" && name == "helper":
 			// Same real-git reset-on-empty list semantics as the config-file
@@ -277,18 +349,11 @@ func privatePrefixesFromEnv(getenv func(string) string) []string {
 			// credential.<url>.helper set via index 0 and then reset to "" via
 			// index 1 leaves `git credential fill` invoking no helper at all,
 			// the same as the equivalent two-line config-file form.
-			setSignalSlot(&slots, credSlots, subsection, value)
+			setSignalSlot(slots, credSlots, subsection, value)
 		case section == "http" && name == "extraheader":
-			setSignalSlot(&slots, httpSlots, subsection, value)
+			setSignalSlot(slots, httpSlots, subsection, value)
 		}
 	}
-	var prefixes []string
-	for _, s := range slots {
-		if s.active {
-			prefixes = append(prefixes, s.value)
-		}
-	}
-	return prefixes
 }
 
 // splitConfigKey splits a git config key in the flat "section.subsection.name"
@@ -578,7 +643,7 @@ func worktreeConfigValueFromConfigFile(configPath, moduleDir string, visited map
 
 	dir := filepath.Dir(configPath)
 	for _, inc := range parseIncludes(data) {
-		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir, dir) {
 			continue
 		}
 		if p := resolveIncludePath(inc.path, dir); p != "" {
@@ -815,14 +880,22 @@ func resolveGitDir(moduleDir string) (gitDir, commonDir string, ok bool) {
 // actions/checkout's — needs the segment counts to line up exactly, and
 // a stray trailing "/" adds a spurious empty final segment that never
 // matches.
-func includeIfMatches(cond, moduleDir string) bool {
+// configFileDir is the directory containing the config file the
+// [includeIf "cond"] directive being resolved was read from — needed only
+// for a "gitdir:./..." pattern (see expandGitdirPattern), which resolves
+// relative to that file's own directory rather than moduleDir. Every
+// caller already has this on hand (it's the same "dir" each one computes
+// via filepath.Dir(configPath) to resolve the directive's own "path="
+// value with resolveIncludePath) except includeIfMatches' direct unit
+// tests, which don't exercise a "./"-prefixed pattern and pass "".
+func includeIfMatches(cond, moduleDir, configFileDir string) bool {
 	kind, pattern, ok := strings.Cut(cond, ":")
 	if !ok {
 		return false
 	}
 	switch kind {
 	case "gitdir", "gitdir/i":
-		return includeIfMatchesGitdir(kind == "gitdir/i", pattern, moduleDir)
+		return includeIfMatchesGitdir(kind == "gitdir/i", pattern, moduleDir, configFileDir)
 	case "onbranch", "onbranch/i":
 		return includeIfMatchesOnbranch(kind == "onbranch/i", pattern, moduleDir)
 	default:
@@ -830,7 +903,7 @@ func includeIfMatches(cond, moduleDir string) bool {
 	}
 }
 
-func includeIfMatchesGitdir(caseInsensitive bool, pattern, moduleDir string) bool {
+func includeIfMatchesGitdir(caseInsensitive bool, pattern, moduleDir, configFileDir string) bool {
 	gitDir, _, ok2 := resolveGitDir(moduleDir)
 	if !ok2 {
 		// No resolvable .git at all (e.g. moduleDir isn't a repo yet, or a
@@ -843,7 +916,7 @@ func includeIfMatchesGitdir(caseInsensitive bool, pattern, moduleDir string) boo
 		gitDir = filepath.Join(abs, ".git")
 	}
 	target := filepath.ToSlash(gitDir)
-	pattern = expandGitdirPattern(pattern)
+	pattern = expandGitdirPattern(pattern, configFileDir)
 	if caseInsensitive {
 		pattern = strings.ToLower(pattern)
 		target = strings.ToLower(target)
@@ -934,11 +1007,44 @@ func currentBranch(gitDir string) (branch string, ok bool) {
 // as matching anywhere in the tree (prefixed with "**/"), and a
 // trailing "/" gets an implicit "**" so a bare directory prefix still
 // matches everything under it.
-func expandGitdirPattern(p string) string {
+//
+// A "./"-prefixed pattern is a fourth, distinct form, documented right
+// next to the other three: "the pattern can also be a path relative to
+// the directory containing the configuration file... e.g. if the config
+// file in which the condition is found is /home/user/.gitconfig and the
+// condition is 'gitdir:./foo/bar', the full pattern would be
+// '/home/user/foo/bar'" — relative to the file the [includeIf] directive
+// itself lives in, NOT the module directory being audited (those two can
+// be, and in the motivating real case are, unrelated). Before this fix,
+// configFileDir wasn't threaded through this call chain at all and a
+// "./"-prefixed pattern was left completely untouched by this switch
+// (falling to neither the "~/" nor the implicit-"**/"-prefix case, since
+// the second case explicitly excludes it too) — so it was later glob-
+// matched as a literal relative path fragment against target's absolute,
+// "/"-rooted $GIT_DIR segments, which can never match. Verified live: a
+// real ~/.gitconfig containing exactly `[includeIf "gitdir:./work/"]
+// path = ~/.gitconfig-work` — a real, commonly recommended pattern for
+// scoping a work-specific credential helper to everything cloned under
+// ~/work/ without hardcoding $HOME in every machine's dotfiles — applied
+// gitconfig-work's credential helper to a repo at ~/work/myrepo per real
+// `git config --get-all` (confirmed against git 2.47), while this
+// function's pre-fix output made this tool report "no issues found" for
+// a require'd module only reachable via that helper: a genuine SUMDB LEAK
+// silently missed. Resolved the same simple-concatenation way as the
+// "~/" case above (not filepath.Join, which would silently eat the
+// trailing "/" a directory-matching pattern like "./work/" depends on to
+// pick up the implicit "**" below).
+func expandGitdirPattern(p, configFileDir string) string {
 	switch {
 	case strings.HasPrefix(p, "~/"):
 		if home, err := os.UserHomeDir(); err == nil {
 			p = filepath.ToSlash(home) + "/" + p[2:]
+		}
+	case strings.HasPrefix(p, "./"):
+		if configFileDir != "" {
+			if abs, err := filepath.Abs(configFileDir); err == nil {
+				p = filepath.ToSlash(abs) + "/" + p[2:]
+			}
 		}
 	case !strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "./"):
 		p = "**/" + p
@@ -981,38 +1087,94 @@ func globMatchSegs(pSegs, tSegs []string) bool {
 }
 
 // privatePrefixesFromConfigFile reads the git config file at path and
-// returns its insteadOf-derived private prefixes, following any
-// [include]/[includeIf "gitdir:..."] directives it contains the way git
-// itself would when run inside moduleDir. visited guards against include
-// cycles and is shared across the whole call tree (including across the
-// separate ~/.gitconfig and <module>/.git/config roots) so a file is only
-// ever read once.
+// returns its insteadOf/credential-helper/extraHeader-derived private
+// prefixes, following any [include]/[includeIf "gitdir:..."] directives it
+// contains the way git itself would when run inside moduleDir. visited
+// guards against include cycles and is shared across the whole call tree
+// (including across the separate ~/.gitconfig and <module>/.git/config
+// roots) so a file is only ever read once.
+//
+// This is a single-tier convenience wrapper around
+// privatePrefixesFromConfigFileInto, starting from fresh, empty slot
+// state — see that function's doc comment for why a caller auditing more
+// than one git config tier (run(), in main.go) calls it directly instead,
+// threading one shared set of slots across every tier so a later tier's
+// credential-helper/extraHeader reset can cancel an earlier tier's real
+// one, and vice versa.
 func privatePrefixesFromConfigFile(configPath, moduleDir string, visited map[string]bool) []string {
+	var slots []*prefixSlot
+	credSlots := map[string]*prefixSlot{}
+	httpSlots := map[string]*prefixSlot{}
+	privatePrefixesFromConfigFileInto(configPath, moduleDir, visited, &slots, credSlots, httpSlots)
+
+	var prefixes []string
+	for _, s := range slots {
+		if s.active {
+			prefixes = append(prefixes, s.value)
+		}
+	}
+	return prefixes
+}
+
+// privatePrefixesFromConfigFileInto is privatePrefixesFromConfigFile's
+// shared-state form: it accumulates configPath's (and, recursively, its
+// [include]/[includeIf]-referenced files') signals into the caller's own
+// slots/credSlots/httpSlots instead of returning a fresh []string.
+//
+// This fixes a real false positive the old per-tier-then-concatenate
+// architecture had: run() audits several git config tiers in git's own
+// precedence order (XDG global, ~/.gitconfig, local, worktree — see
+// gitConfigCandidates), and a credential.helper/http.extraHeader reset (an
+// empty value — see setSignalSlot) in a LATER tier is real git's way of
+// turning off a helper set in an EARLIER one (e.g. a global `gh auth
+// setup-git` helper, intentionally disabled for one repo via its local
+// .git/config). Scanning each tier independently and appending their
+// results — what this function's callers used to do — left the earlier
+// tier's now-reset helper permanently flagged as an active signal, a real,
+// live-verified false positive (see
+// TestRunFindsLeakCredentialHelperResetAcrossTiers in main_test.go: `git
+// credential fill` against the equivalent two-tier config invokes no
+// helper at all, yet the old code still reported a SUMDB LEAK). Threading
+// one shared slots/credSlots/httpSlots set across every
+// privatePrefixesFromConfigFileInto call in run()'s tier loop (plus the
+// final privatePrefixesFromEnvInto call — GIT_CONFIG_COUNT/KEY/VALUE
+// behaves like a trailing set of `-c` overrides applied after every file,
+// see its own doc comment) fixes this the same way real git actually
+// resolves it: one continuous, ordered scan, not several independent ones
+// merged afterward.
+//
+// [include]/[includeIf "..."] directives are, for the identical reason,
+// followed INLINE via scanConfigSignals' onInclude callback — at the exact
+// line position they appear — rather than collected up front via
+// parseIncludes and processed after this file's own signals, which is
+// what this function used to do and has the same bug one level down: a
+// reset living in an included file couldn't cancel a real helper set
+// earlier in the file that includes it (or vice versa) — see
+// TestPrivatePrefixesFromConfigFileIncludeResetOrdering.
+func privatePrefixesFromConfigFileInto(configPath, moduleDir string, visited map[string]bool, slots *[]*prefixSlot, credSlots, httpSlots map[string]*prefixSlot) {
 	abs, err := filepath.Abs(configPath)
 	if err != nil {
-		return nil
+		return
 	}
 	if visited[abs] {
-		return nil
+		return
 	}
 	visited[abs] = true
 
 	data, err := os.ReadFile(configPath)
 	if err != nil {
-		return nil
+		return
 	}
-
-	prefixes := privatePrefixesFromGitConfig(data)
 	dir := filepath.Dir(configPath)
-	for _, inc := range parseIncludes(data) {
-		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
-			continue
+
+	scanConfigSignals(data, slots, credSlots, httpSlots, func(cond, incPath string) {
+		if cond != "" && !includeIfMatches(cond, moduleDir, dir) {
+			return
 		}
-		if p := resolveIncludePath(inc.path, dir); p != "" {
-			prefixes = append(prefixes, privatePrefixesFromConfigFile(p, moduleDir, visited)...)
+		if p := resolveIncludePath(incPath, dir); p != "" {
+			privatePrefixesFromConfigFileInto(p, moduleDir, visited, slots, credSlots, httpSlots)
 		}
-	}
-	return prefixes
+	})
 }
 
 // insteadOfSchemesFromConfigFile is insteadOfSchemes' counterpart to
@@ -1038,7 +1200,7 @@ func insteadOfSchemesFromConfigFile(configPath, moduleDir string, visited map[st
 	out := insteadOfSchemes(data)
 	dir := filepath.Dir(configPath)
 	for _, inc := range parseIncludes(data) {
-		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir, dir) {
 			continue
 		}
 		if p := resolveIncludePath(inc.path, dir); p != "" {
@@ -1080,7 +1242,7 @@ func protocolAllowFromConfigFile(configPath, moduleDir string, visited map[strin
 	out := map[string]string{}
 	dir := filepath.Dir(configPath)
 	for _, inc := range parseIncludes(data) {
-		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir, dir) {
 			continue
 		}
 		if p := resolveIncludePath(inc.path, dir); p != "" {

@@ -116,6 +116,72 @@ func TestSplitLogicalLinesAgainstRealGit(t *testing.T) {
 	}
 }
 
+// TestIncludeIfGitdirRelativePatternAgainstRealGit is an oracle-diff test
+// for the "gitdir:./..." includeIf form against the real `git` binary: a
+// generated tree of nested directories under a fake "$HOME", a
+// includeIf.gitdir:./<subpath>/ directive in a fake global gitconfig
+// naming a second file with a marker credential helper, and a comparison
+// of "does real git's `git config --get-all` (run with GIT_CONFIG_GLOBAL
+// pointed at the fake global file, from inside each candidate directory)
+// resolve the marker helper" against "does this tool's own
+// includeIfMatches say the same directory matches the same condition" —
+// for both a directory that should match (under the named subpath) and a
+// sibling that shouldn't (a different subpath, and a proper prefix of the
+// named one that stops one segment short of the required directory).
+func TestIncludeIfGitdirRelativePatternAgainstRealGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	home := t.TempDir()
+	includedFile := filepath.Join(home, "gitconfig-included")
+	if err := os.WriteFile(includedFile, []byte("[credential \"https://marker.example\"]\n\thelper = /bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globalFile := filepath.Join(home, "gitconfig-global")
+	if err := os.WriteFile(globalFile, []byte("[includeIf \"gitdir:./nested/deeper/\"]\n\tpath = "+includedFile+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		relDir string
+		want   bool
+	}{
+		{"nested/deeper/repo", true},
+		{"nested/deeper", true}, // trailing "/" on the pattern matches the bare named dir too
+		{"nested/other", false},
+		{"nested", false}, // one segment short of the required "deeper"
+	}
+
+	for _, c := range cases {
+		dir := filepath.Join(home, filepath.FromSlash(c.relDir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initCmd := exec.Command("git", "init", "-q")
+		initCmd.Dir = dir
+		initCmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "HOME="+home)
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init in %q: %v: %s", dir, err, out)
+		}
+
+		cmd := exec.Command("git", "config", "--get-all", "credential.https://marker.example.helper")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+globalFile, "GIT_CONFIG_NOSYSTEM=1", "HOME="+home)
+		out, err := cmd.Output()
+		realGitMatches := err == nil && strings.TrimSpace(string(out)) == "/bin/true"
+
+		if realGitMatches != c.want {
+			t.Fatalf("test setup check failed for %q: real git resolved the marker helper = %v, want %v (fix the fixture, not the assertion below)", c.relDir, realGitMatches, c.want)
+		}
+
+		got := includeIfMatches("gitdir:./nested/deeper/", dir, filepath.Dir(globalFile))
+		if got != realGitMatches {
+			t.Errorf("%q: includeIfMatches = %v, want %v (real git: %v)", c.relDir, got, realGitMatches, realGitMatches)
+		}
+	}
+}
+
 // extractRawInsteadOfValue mirrors privatePrefixesFromGitConfig's scan loop
 // up to (not including) normalizeToModulePrefix/isKnownPublicHost, so the
 // oracle-diff test above compares the raw joined-and-comment-stripped value

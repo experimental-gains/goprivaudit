@@ -397,8 +397,51 @@ func TestIncludeIfMatchesGitdir(t *testing.T) {
 		{"hasconfig:remote.*.url:*github*", home + "/work/app", false, "unsupported condition kind never matches"},
 	}
 	for _, c := range cases {
-		if got := includeIfMatches(c.cond, c.dir); got != c.want {
+		if got := includeIfMatches(c.cond, c.dir, ""); got != c.want {
 			t.Errorf("includeIfMatches(%q, %q) = %v, want %v (%s)", c.cond, c.dir, got, c.want, c.reason)
+		}
+	}
+}
+
+// TestIncludeIfMatchesGitdirRelativeToConfigFile pins the "gitdir:./..."
+// form (git-config(1): resolved relative to the directory containing the
+// config file the [includeIf] directive itself lives in, NOT the audited
+// module directory) — see expandGitdirPattern's doc comment for the real
+// false negative this fixes.
+func TestIncludeIfMatchesGitdirRelativeToConfigFile(t *testing.T) {
+	configFileDir := t.TempDir() // stands in for e.g. $HOME, where ~/.gitconfig lives
+	cases := []struct {
+		cond          string
+		moduleDir     string
+		configFileDir string
+		want          bool
+		reason        string
+	}{
+		{
+			"gitdir:./work/", filepath.Join(configFileDir, "work", "app"), configFileDir, true,
+			"module dir under configFileDir/work/ matches",
+		},
+		{
+			"gitdir:./work/", filepath.Join(configFileDir, "personal", "app"), configFileDir, false,
+			"module dir outside configFileDir/work/ must not match",
+		},
+		{
+			"gitdir:./work/", filepath.Join(t.TempDir(), "work", "app"), configFileDir, false,
+			"a same-named work/ dir under an unrelated tree must not match — the pattern is anchored at configFileDir, not just any 'work' ancestor",
+		},
+		{
+			"gitdir:./work/myrepo/.git", filepath.Join(configFileDir, "work", "myrepo"), configFileDir, true,
+			"no trailing slash still resolves relative to configFileDir for an exact literal .git-suffixed pattern (verified live against real git: a bare 'gitdir:./work', no .git suffix, does NOT match a repo at .../work/.git — real git requires an exact segment match without a wildcard/trailing slash, same as the non-relative literal form TestIncludeIfMatchesActionsCheckoutGitdirPattern covers)",
+		},
+		{
+			"gitdir:./work/", filepath.Join(configFileDir, "work", "app"), "", false,
+			"an empty configFileDir (e.g. a caller that never learned it) must not silently match everything",
+		},
+	}
+	for _, c := range cases {
+		if got := includeIfMatches(c.cond, c.moduleDir, c.configFileDir); got != c.want {
+			t.Errorf("includeIfMatches(%q, moduleDir=%q, configFileDir=%q) = %v, want %v (%s)",
+				c.cond, c.moduleDir, c.configFileDir, got, c.want, c.reason)
 		}
 	}
 }
@@ -422,11 +465,11 @@ func TestIncludeIfMatchesActionsCheckoutGitdirPattern(t *testing.T) {
 	dir := t.TempDir()
 	gitDir := filepath.ToSlash(filepath.Join(dir, ".git"))
 	cond := "gitdir:" + gitDir
-	if !includeIfMatches(cond, dir) {
+	if !includeIfMatches(cond, dir, "") {
 		t.Errorf("includeIfMatches(%q, %q) = false, want true (actions/checkout's exact literal .git-suffixed pattern)", cond, dir)
 	}
 	other := t.TempDir()
-	if includeIfMatches(cond, other) {
+	if includeIfMatches(cond, other, "") {
 		t.Errorf("includeIfMatches(%q, %q) = true, want false (different module dir must not match)", cond, other)
 	}
 }
@@ -454,12 +497,12 @@ func TestIncludeIfMatchesLinkedWorktreeGitdir(t *testing.T) {
 	}
 
 	cond := "gitdir:" + filepath.ToSlash(worktreeGitDir)
-	if !includeIfMatches(cond, worktree) {
+	if !includeIfMatches(cond, worktree, "") {
 		t.Errorf("includeIfMatches(%q, %q) = false, want true (pattern names the worktree's real $GIT_DIR)", cond, worktree)
 	}
 
 	staleCond := "gitdir:" + filepath.ToSlash(filepath.Join(worktree, ".git"))
-	if includeIfMatches(staleCond, worktree) {
+	if includeIfMatches(staleCond, worktree, "") {
 		t.Errorf("includeIfMatches(%q, %q) = true, want false (worktree/.git is a file, not the real $GIT_DIR, and must not match)", staleCond, worktree)
 	}
 }
@@ -508,7 +551,7 @@ func TestIncludeIfMatchesOnbranch(t *testing.T) {
 		dir := t.TempDir()
 		gitDir := filepath.Join(dir, ".git")
 		writeHEAD(t, gitDir, c.branch)
-		if got := includeIfMatches(c.cond, dir); got != c.want {
+		if got := includeIfMatches(c.cond, dir, ""); got != c.want {
 			t.Errorf("%s: includeIfMatches(%q) on branch %q = %v, want %v", c.reason, c.cond, c.branch, got, c.want)
 		}
 	}
@@ -518,14 +561,14 @@ func TestIncludeIfMatchesOnbranchDetachedHEAD(t *testing.T) {
 	dir := t.TempDir()
 	writeHEAD(t, filepath.Join(dir, ".git"), "")
 	cond := "onbranch:*"
-	if includeIfMatches(cond, dir) {
+	if includeIfMatches(cond, dir, "") {
 		t.Errorf("includeIfMatches(%q, detached HEAD) = true, want false (git-config(1): no branch name to match against)", cond)
 	}
 }
 
 func TestIncludeIfMatchesOnbranchNoRepo(t *testing.T) {
 	dir := t.TempDir() // no .git at all
-	if includeIfMatches("onbranch:*", dir) {
+	if includeIfMatches("onbranch:*", dir, "") {
 		t.Error("includeIfMatches(\"onbranch:*\", no-repo dir) = true, want false")
 	}
 }
@@ -559,6 +602,47 @@ func TestPrivatePrefixesFromConfigFileFollowsInclude(t *testing.T) {
 	want := []string{"github.com/myorg"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromConfigFileIncludeResetOrdering covers a real false
+// positive the old "scan this file's own lines, then append each include's
+// independently-scanned result" architecture had: a credential.helper
+// reset (an empty value) living in an included file couldn't cancel a real
+// helper set earlier in the file that includes it, because each file's
+// slots were tracked independently and only merged by concatenation
+// afterward. Verified live with `git credential fill` against a real fake
+// credential-helper script: with the real helper set before the [include]
+// line and the included file resetting that same URL context, git invokes
+// no helper at all — exactly as if the two files were one continuous file,
+// which is how git actually reads an include's contents. Both directions
+// matter and are covered here: a reset that comes after the set via the
+// include, and a reset that comes before a set that arrives via the
+// include.
+func TestPrivatePrefixesFromConfigFileIncludeResetOrdering(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "reset.gitconfig", `[credential "https://github.com/myorg"]
+	helper =
+`)
+	writeFile(t, dir, "set-then-include-reset", `[credential "https://github.com/myorg"]
+	helper = /path/to/real-helper
+[include]
+	path = ./reset.gitconfig
+`)
+	if got := privatePrefixesFromConfigFile(filepath.Join(dir, "set-then-include-reset"), dir, map[string]bool{}); got != nil {
+		t.Errorf("set-then-include-reset: got %v, want nil (the included file's reset must cancel the real helper set before it)", got)
+	}
+
+	writeFile(t, dir, "set.gitconfig", `[credential "https://github.com/myorg"]
+	helper = /path/to/real-helper
+`)
+	writeFile(t, dir, "include-set-then-reset", `[include]
+	path = ./set.gitconfig
+[credential "https://github.com/myorg"]
+	helper =
+`)
+	if got := privatePrefixesFromConfigFile(filepath.Join(dir, "include-set-then-reset"), dir, map[string]bool{}); got != nil {
+		t.Errorf("include-set-then-reset: got %v, want nil (a reset after the include must cancel the real helper the include set)", got)
 	}
 }
 
