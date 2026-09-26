@@ -218,6 +218,61 @@ func TestPrivatePrefixesFromGitConfigExtraHeaderEmptyValueIgnored(t *testing.T) 
 	}
 }
 
+// A non-empty helper followed by an empty one for the SAME URL context —
+// the reverse of gh auth setup-git's own empty-then-real order — leaves no
+// credential helper active for that host at all: per gitcredentials(7),
+// "If credential.helper is configured to the empty string, this resets the
+// helper list to empty", regardless of which side of an earlier non-empty
+// entry the reset appears on. Verified live: with
+// `[credential "https://x"] helper = /path/to/helper` followed by a second
+// `helper =` line in the same section, `git credential fill` never invokes
+// the helper at all and fails with "could not read Username ... No such
+// device or address" — so this must not be treated as a signal, the same
+// as a lone empty helper line already isn't.
+func TestPrivatePrefixesFromGitConfigCredentialHelperResetAfterSet(t *testing.T) {
+	src := `[credential "https://mycorp.example"]
+	helper = /path/to/real-helper
+	helper =
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (a later empty helper line resets an earlier non-empty one), got %v", got)
+	}
+}
+
+// The reset must be scoped to its own URL context: a second, unrelated
+// [credential "..."] section's helper must survive a different section's
+// reset.
+func TestPrivatePrefixesFromGitConfigCredentialHelperResetIsPerURL(t *testing.T) {
+	src := `[credential "https://mycorp.example/reset-me"]
+	helper = /path/to/real-helper
+	helper =
+
+[credential "https://mycorp.example/keep-me"]
+	helper = /path/to/real-helper
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"mycorp.example/keep-me"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// http.<url>.extraHeader documents the identical reset-on-empty behavior
+// (git-config(1): "an empty value will reset the extra headers to the
+// empty list") — verified live with a local HTTP server standing in for
+// the remote: a real `git ls-remote` sent no custom header at all once a
+// second, empty `extraheader =` line followed a first real one in the
+// same [http "..."] section.
+func TestPrivatePrefixesFromGitConfigExtraHeaderResetAfterSet(t *testing.T) {
+	src := `[http "https://github.mycorp.example/"]
+	extraheader = AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2V0b2tlbg==
+	extraheader =
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (a later empty extraheader line resets an earlier non-empty one), got %v", got)
+	}
+}
+
 // Both signals can coexist and are independently detected.
 func TestPrivatePrefixesFromGitConfigInsteadOfAndCredentialHelperBoth(t *testing.T) {
 	src := `[url "git@github.com:myorg/"]
@@ -525,6 +580,42 @@ func TestPrivatePrefixesFromEnvIgnoresKnownPublicHost(t *testing.T) {
 	}
 	if got := privatePrefixesFromEnv(func(k string) string { return env[k] }); got != nil {
 		t.Errorf("got %v, want nil", got)
+	}
+}
+
+// TestPrivatePrefixesFromEnvCredentialHelperResetAfterSet mirrors
+// TestPrivatePrefixesFromGitConfigCredentialHelperResetAfterSet for the
+// GIT_CONFIG_COUNT/KEY/VALUE env-var form: verified live that these
+// entries are processed with real git's identical sequential
+// reset-or-append list semantics (a credential.<url>.helper set via index
+// 0 and reset to "" via index 1 leaves `git credential fill` invoking no
+// helper at all, same as the equivalent two-line config-file form).
+func TestPrivatePrefixesFromEnvCredentialHelperResetAfterSet(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "2",
+		"GIT_CONFIG_KEY_0":   "credential.https://mycorp.example.helper",
+		"GIT_CONFIG_VALUE_0": "/path/to/real-helper",
+		"GIT_CONFIG_KEY_1":   "credential.https://mycorp.example.helper",
+		"GIT_CONFIG_VALUE_1": "",
+	}
+	if got := privatePrefixesFromEnv(func(k string) string { return env[k] }); got != nil {
+		t.Errorf("got %v, want nil (a later empty helper value resets an earlier non-empty one)", got)
+	}
+}
+
+// TestPrivatePrefixesFromEnvExtraHeaderResetAfterSet mirrors
+// TestPrivatePrefixesFromGitConfigExtraHeaderResetAfterSet for the env-var
+// form.
+func TestPrivatePrefixesFromEnvExtraHeaderResetAfterSet(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "2",
+		"GIT_CONFIG_KEY_0":   "http.https://github.mycorp.example/.extraheader",
+		"GIT_CONFIG_VALUE_0": "AUTHORIZATION: basic eC1hY2Nlc3MtdG9rZW46Z2hzX2Zha2V0b2tlbg==",
+		"GIT_CONFIG_KEY_1":   "http.https://github.mycorp.example/.extraheader",
+		"GIT_CONFIG_VALUE_1": "",
+	}
+	if got := privatePrefixesFromEnv(func(k string) string { return env[k] }); got != nil {
+		t.Errorf("got %v, want nil (a later empty extraheader value resets an earlier non-empty one)", got)
 	}
 }
 

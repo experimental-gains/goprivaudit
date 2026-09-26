@@ -70,6 +70,28 @@ var protocolSectionRe = regexp.MustCompile(`(?i)^\[protocol(?:\s+"([^"]*)")?\]$`
 // even worse false-positive flood than the bare-host case it's modeled
 // on.
 //
+// But an empty "helper" line doesn't just fail to configure anything — per
+// gitcredentials(7): "If credential.helper is configured to the empty
+// string, this resets the helper list to empty (so you may override a
+// helper set by a lower-priority config file...)". That reset applies
+// regardless of which side of a non-empty helper line for the *same*
+// URL context it appears on: `gh auth setup-git`'s empty-then-real order
+// leaves the real helper active (already handled above), but a
+// real-then-empty order — e.g. a generated dotfile that later disables a
+// helper it had itself just configured for one host — leaves NO helper
+// active for that context at all. Verified live: with
+// `[credential "https://x"] helper = /path/to/real-helper` followed by a
+// second `helper =` line in the same section, `git credential fill`
+// never invokes real-helper at all (confirmed via a logging stand-in
+// script) and fails outright with "could not read Username ... No such
+// device or address" — so a naive "any non-empty helper line for this URL
+// is a signal" check (this function's pre-fix behavior) reports a
+// SUMDB LEAK for a module that, per real git, has no credential helper
+// authenticating it whatsoever: a false positive on a config this tool
+// exists to read faithfully, not just glance at. Tracked per URL context
+// via credSlots below so the *last* helper line for a given URL wins,
+// matching real git's sequential reset-or-append list semantics exactly.
+//
 // A third, independent signal: a non-empty "extraheader" in a
 // URL-scoped [http "..."] section (git-config(1): `http.<url>.extraHeader`
 // is a real per-URL config key, section form `[http "https://x/"]
@@ -95,8 +117,64 @@ var protocolSectionRe = regexp.MustCompile(`(?i)^\[protocol(?:\s+"([^"]*)")?\]$`
 // job-scoped token — a genuine private-auth signal that was completely
 // invisible before this fix, since no [http ...] section was parsed at
 // all.
+//
+// git-config(1) documents the exact same reset-on-empty behavior for
+// `http.<url>.extraHeader` as for credential.helper above ("an empty
+// value will reset the extra headers to the empty list") — confirmed live
+// with a local HTTP server standing in for the remote: a real `git
+// ls-remote` sent no X-marker header at all once a second, empty
+// `extraheader =` line followed a first real one in the same [http "..."]
+// section, even though the pre-fix code (which only ever checked
+// value != "") would still have reported that host as a sumdb-leak
+// signal. Handled the same way, via httpSlots.
+// prefixSlot is one candidate private-auth-signal prefix collected while
+// scanning a git config source (a file or the GIT_CONFIG_COUNT env-var
+// form), tracked as a pointer so a later reset (see setSignalSlot) can
+// flip it back off without disturbing the position it was first recorded
+// at — matching real git's own file-order-sequential list semantics for
+// credential.helper / http.extraHeader (see privatePrefixesFromGitConfig's
+// doc comment) while still emitting prefixes in a stable, predictable
+// order (first-occurrence position) for everything that stays active.
+type prefixSlot struct {
+	value  string
+	active bool
+}
+
+// setSignalSlot records or resets a multi-valued, reset-on-empty git
+// config signal (credential.helper or http.extraHeader) for one URL
+// context: an empty value resets the existing slot for that URL to
+// inactive if one exists (a no-op if none does — resetting a signal that
+// was never set is harmless, same as real git resetting an inherited
+// helper that happens not to exist), and a non-empty value activates the
+// existing slot for that URL if one exists or creates and records a new
+// one (appended to *slots, so it's emitted in first-occurrence order) —
+// unless the URL normalizes to a known public host, in which case no slot
+// is ever created for it at all, same as every other signal source in
+// this file.
+func setSignalSlot(slots *[]*prefixSlot, bySectionURL map[string]*prefixSlot, sectionURL, value string) {
+	if value == "" {
+		if s, ok := bySectionURL[sectionURL]; ok {
+			s.active = false
+		}
+		return
+	}
+	if s, ok := bySectionURL[sectionURL]; ok {
+		s.active = true
+		return
+	}
+	p := normalizeToModulePrefix(sectionURL)
+	if p == "" || isKnownPublicHost(p) {
+		return
+	}
+	s := &prefixSlot{value: p, active: true}
+	*slots = append(*slots, s)
+	bySectionURL[sectionURL] = s
+}
+
 func privatePrefixesFromGitConfig(data []byte) []string {
-	var prefixes []string
+	var slots []*prefixSlot
+	credSlots := map[string]*prefixSlot{}
+	httpSlots := map[string]*prefixSlot{}
 	section := "" // "", "url", "credential", "http"
 	sectionURL := ""
 	for _, raw := range splitLogicalLines(data) {
@@ -129,16 +207,19 @@ func privatePrefixesFromGitConfig(data []byte) []string {
 		switch {
 		case section == "url" && key == "insteadof":
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-				prefixes = append(prefixes, p)
+				slots = append(slots, &prefixSlot{value: p, active: true})
 			}
-		case section == "credential" && key == "helper" && value != "":
-			if p := normalizeToModulePrefix(sectionURL); p != "" && !isKnownPublicHost(p) {
-				prefixes = append(prefixes, p)
-			}
-		case section == "http" && key == "extraheader" && value != "":
-			if p := normalizeToModulePrefix(sectionURL); p != "" && !isKnownPublicHost(p) {
-				prefixes = append(prefixes, p)
-			}
+		case section == "credential" && key == "helper":
+			setSignalSlot(&slots, credSlots, sectionURL, value)
+		case section == "http" && key == "extraheader":
+			setSignalSlot(&slots, httpSlots, sectionURL, value)
+		}
+	}
+
+	var prefixes []string
+	for _, s := range slots {
+		if s.active {
+			prefixes = append(prefixes, s.value)
 		}
 	}
 	return prefixes
@@ -170,7 +251,9 @@ func privatePrefixesFromEnv(getenv func(string) string) []string {
 		// replicate git's own error-exit behavior).
 		return nil
 	}
-	var prefixes []string
+	var slots []*prefixSlot
+	credSlots := map[string]*prefixSlot{}
+	httpSlots := map[string]*prefixSlot{}
 	for i := 0; i < count; i++ {
 		key := getenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
 		value := getenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
@@ -183,16 +266,25 @@ func privatePrefixesFromEnv(getenv func(string) string) []string {
 		switch {
 		case section == "url" && name == "insteadof":
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-				prefixes = append(prefixes, p)
+				slots = append(slots, &prefixSlot{value: p, active: true})
 			}
-		case section == "credential" && name == "helper" && value != "":
-			if p := normalizeToModulePrefix(subsection); p != "" && !isKnownPublicHost(p) {
-				prefixes = append(prefixes, p)
-			}
-		case section == "http" && name == "extraheader" && value != "":
-			if p := normalizeToModulePrefix(subsection); p != "" && !isKnownPublicHost(p) {
-				prefixes = append(prefixes, p)
-			}
+		case section == "credential" && name == "helper":
+			// Same real-git reset-on-empty list semantics as the config-file
+			// form (see privatePrefixesFromGitConfig's doc comment) — verified
+			// live that GIT_CONFIG_COUNT/KEY/VALUE entries are processed with
+			// the identical sequential reset-or-append behavior: a
+			// credential.<url>.helper set via index 0 and then reset to "" via
+			// index 1 leaves `git credential fill` invoking no helper at all,
+			// the same as the equivalent two-line config-file form.
+			setSignalSlot(&slots, credSlots, subsection, value)
+		case section == "http" && name == "extraheader":
+			setSignalSlot(&slots, httpSlots, subsection, value)
+		}
+	}
+	var prefixes []string
+	for _, s := range slots {
+		if s.active {
+			prefixes = append(prefixes, s.value)
 		}
 	}
 	return prefixes
