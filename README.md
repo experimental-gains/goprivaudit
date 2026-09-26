@@ -120,7 +120,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.38
+- uses: experimental-gains/goprivaudit@v0.1.39
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -140,7 +140,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.38
+    rev: v0.1.39
     hooks:
       - id: goprivaudit
 ```
@@ -172,10 +172,17 @@ Three independent signals, any one is enough to flag a module.
 **Git config: insteadOf.** It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
 files the real `git config` global tier reads — `$XDG_CONFIG_HOME/git/config`
 (or `~/.config/git/config` when that's unset) and `~/.gitconfig`, both of
-which apply together, not one-or-the-other — plus the module's
-`.git/config`. If `GIT_CONFIG_GLOBAL` is set it's honored the way real git
-honors it too: that file replaces the whole global tier above, not an
-addition to it. It also reads the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
+which apply together, not one-or-the-other — plus the module's local
+config. That local file is resolved the way real git resolves it, not
+assumed to always be a plain `.git/config`: inside a `git worktree add`
+checkout, `.git` is a file naming a separate per-worktree `$GIT_DIR` that
+in turn points at the shared config the main checkout also uses (that's
+what a real `go get` run from the worktree actually authenticates with);
+inside a submodule checkout, `.git` is also a file, but the `$GIT_DIR` it
+names owns its own config directly. Both shapes are followed correctly,
+so a rewrite that's only visible through one of them isn't missed. If
+`GIT_CONFIG_GLOBAL` is set it's honored the way real git honors it too:
+that file replaces the whole global tier above, not an addition to it. It also reads the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
 `GIT_CONFIG_VALUE_<n>` environment variables (git-config(1)'s file-free way
 to inject config — common in scripted/CI setups that deliberately avoid
 writing credentials to disk), which a real `git` subprocess — including the

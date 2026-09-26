@@ -584,6 +584,82 @@ func resolveIncludePath(value, configFileDir string) string {
 	return filepath.Join(configFileDir, value)
 }
 
+// resolveGitDir resolves moduleDir's real $GIT_DIR and the "common dir"
+// tier that actually owns the shared config file — the same distinction
+// git itself makes (gitrepository-layout(5), "Multiple working trees").
+//
+// For an ordinary repository, moduleDir/.git is a directory and IS its own
+// common dir: gitDir == commonDir == moduleDir/.git, matching every
+// assumption this file made before this fix.
+//
+// For a linked worktree (`git worktree add`), moduleDir/.git is instead a
+// *file* containing a "gitdir: <path>" line naming the worktree's own,
+// separate $GIT_DIR (e.g. "<main-repo>/.git/worktrees/<name>" — verified
+// live via `git rev-parse --absolute-git-dir` inside a real linked
+// worktree). That directory in turn contains a "commondir" file naming the
+// shared common dir (almost always "<main-repo>/.git" itself) that git
+// actually reads "config" from — worktrees share one repo-level config by
+// default. Treating moduleDir/.git as a plain directory in this case (the
+// pre-fix assumption) meant `gitConfigCandidates` looked for a
+// "config" file that doesn't exist under a nonexistent moduleDir/.git/
+// directory at all, silently finding none of the local insteadOf/
+// credential-helper/extraHeader signals `git`/`go` actually apply when run
+// from that worktree — a real false negative confirmed live: an insteadOf
+// rewrite set in the main checkout's local config was correctly flagged as
+// a sumdb leak when audited from the main checkout, but silently missed
+// ("no issues found") when the exact same module was audited from a
+// linked worktree of that same repository, even though `go get` run from
+// that worktree uses the identical shared config and leaks the identical
+// module path to the checksum database.
+//
+// A submodule's .git is also a file with a "gitdir:" line (naming a
+// directory relocated under the superproject's .git/modules/<name>), but
+// that directory has no "commondir" file — it IS its own common dir,
+// unlike a linked worktree's. Verified live for both shapes; the algorithm
+// below handles both with the same commondir-file check, defaulting
+// commonDir to gitDir itself when no commondir file is present.
+func resolveGitDir(moduleDir string) (gitDir, commonDir string, ok bool) {
+	p := filepath.Join(moduleDir, ".git")
+	info, err := os.Stat(p)
+	if err != nil {
+		return "", "", false
+	}
+	if info.IsDir() {
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return "", "", false
+		}
+		return abs, abs, true
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		return "", "", false
+	}
+	rest, found := strings.CutPrefix(strings.TrimSpace(string(data)), "gitdir:")
+	if !found {
+		return "", "", false
+	}
+	rest = strings.TrimSpace(rest)
+	if !filepath.IsAbs(rest) {
+		rest = filepath.Join(moduleDir, rest)
+	}
+	gitDir, err = filepath.Abs(rest)
+	if err != nil {
+		return "", "", false
+	}
+	commonDir = gitDir
+	if cd, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+		cdPath := strings.TrimSpace(string(cd))
+		if !filepath.IsAbs(cdPath) {
+			cdPath = filepath.Join(gitDir, cdPath)
+		}
+		if abs, err := filepath.Abs(cdPath); err == nil {
+			commonDir = abs
+		}
+	}
+	return gitDir, commonDir, true
+}
+
 // includeIfMatches reports whether an [includeIf "cond"] condition applies
 // when git is run inside moduleDir. Only the "gitdir:"/"gitdir/i:" forms are
 // supported (by far the most common use of includeIf — scoping a different
@@ -624,11 +700,18 @@ func includeIfMatches(cond, moduleDir string) bool {
 		return false
 	}
 
-	target, err := filepath.Abs(moduleDir)
-	if err != nil {
-		return false
+	gitDir, _, ok2 := resolveGitDir(moduleDir)
+	if !ok2 {
+		// No resolvable .git at all (e.g. moduleDir isn't a repo yet, or a
+		// permission error mid-audit) — fall back to the old plain-directory
+		// assumption rather than failing the match outright.
+		abs, err := filepath.Abs(moduleDir)
+		if err != nil {
+			return false
+		}
+		gitDir = filepath.Join(abs, ".git")
 	}
-	target = filepath.ToSlash(filepath.Join(target, ".git"))
+	target := filepath.ToSlash(gitDir)
 	pattern = expandGitdirPattern(pattern)
 	if caseInsensitive {
 		pattern = strings.ToLower(pattern)

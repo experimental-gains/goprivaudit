@@ -847,6 +847,91 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunFindsLeakInLinkedWorktree reproduces the exact on-disk shape a
+// real `git worktree add` creates (verified live; see resolveGitDir's doc
+// comment in gitconfig.go): the worktree's own moduleDir/.git is a *file*,
+// not a directory, naming a separate worktree-specific $GIT_DIR under the
+// main checkout's .git/worktrees/<name>, which in turn has a "commondir"
+// file naming the shared common dir (the main checkout's .git) that git
+// actually reads "config" from — worktrees don't get their own config by
+// default. Before the resolveGitDir fix, gitConfigCandidates only ever
+// looked for moduleDir/.git/config; since moduleDir/.git is a file here,
+// that path doesn't exist, so a real insteadOf rewrite in the shared
+// config — the exact rewrite `go get` run from this worktree actually
+// uses — was silently invisible, reporting "no issues found" instead of
+// the real SUMDB LEAK a normal (non-worktree) checkout of the identical
+// repository correctly flags.
+func TestRunFindsLeakInLinkedWorktree(t *testing.T) {
+	mainRepo := t.TempDir()
+	writeFile(t, mainRepo, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	worktree := t.TempDir()
+	worktreeGitDir := filepath.Join(mainRepo, ".git", "worktrees", "wt")
+	writeFile(t, worktreeGitDir, "commondir", "../..\n")
+	writeFile(t, worktree, ".git", "gitdir: "+worktreeGitDir+"\n")
+
+	gomod := writeFile(t, worktree, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakInSubmoduleCheckout covers the sibling real-world shape:
+// a real `git submodule add` also gives the submodule's working directory
+// a .git *file* rather than a directory (verified live), but unlike a
+// linked worktree's, the gitdir it names (relocated under the
+// superproject's .git/modules/<name>) has no "commondir" file at all — it
+// owns its own config directly. resolveGitDir has to get both shapes
+// right from the same commondir-file check; this pins the no-commondir
+// branch specifically so a fix aimed only at the worktree case above can't
+// silently regress it.
+func TestRunFindsLeakInSubmoduleCheckout(t *testing.T) {
+	submoduleGitDir := t.TempDir()
+	writeFile(t, submoduleGitDir, "config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	submoduleWorkdir := t.TempDir()
+	writeFile(t, submoduleWorkdir, ".git", "gitdir: "+submoduleGitDir+"\n")
+
+	gomod := writeFile(t, submoduleWorkdir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
 func TestRunClean(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app

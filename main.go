@@ -405,7 +405,22 @@ func gitConfigCandidates(moduleDir string) []string {
 			out = append(out, filepath.Join(home, ".gitconfig"))
 		}
 	}
-	out = append(out, filepath.Join(moduleDir, ".git", "config"))
+	// The local tier's file lives at the repo's "common dir", not always at
+	// moduleDir/.git/config directly: a linked worktree's moduleDir/.git is
+	// a file naming a separate per-worktree $GIT_DIR that itself points at
+	// a shared common dir (almost always the main checkout's .git) via a
+	// "commondir" file — git reads the shared config from there, since
+	// config isn't a per-worktree file by default. A submodule's
+	// moduleDir/.git is also a file, naming its own relocated $GIT_DIR
+	// under the superproject's .git/modules/<name>, which owns its config
+	// directly (see resolveGitDir). Falls back to the plain
+	// moduleDir/.git/config guess (harmless if it doesn't exist) when
+	// resolution fails outright, e.g. moduleDir isn't a git repo at all.
+	if _, commonDir, ok := resolveGitDir(moduleDir); ok {
+		out = append(out, filepath.Join(commonDir, "config"))
+	} else {
+		out = append(out, filepath.Join(moduleDir, ".git", "config"))
+	}
 	return out
 }
 

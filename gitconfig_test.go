@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -427,6 +428,39 @@ func TestIncludeIfMatchesActionsCheckoutGitdirPattern(t *testing.T) {
 	other := t.TempDir()
 	if includeIfMatches(cond, other) {
 		t.Errorf("includeIfMatches(%q, %q) = true, want false (different module dir must not match)", cond, other)
+	}
+}
+
+// TestIncludeIfMatchesLinkedWorktreeGitdir pins that a "gitdir:" pattern
+// naming a linked worktree's own real $GIT_DIR (e.g. the literal
+// "<main-repo>/.git/worktrees/<name>" actions/checkout-style pattern, but
+// pointed at a worktree instead of a plain checkout) matches against that
+// real path, not against worktreeDir/.git — which for a worktree is a
+// *file*, not the directory the pre-fix code assumed. See resolveGitDir's
+// doc comment for how this was confirmed live against real
+// `git worktree add`.
+func TestIncludeIfMatchesLinkedWorktreeGitdir(t *testing.T) {
+	mainRepo := t.TempDir()
+	worktree := t.TempDir()
+	worktreeGitDir := filepath.Join(mainRepo, ".git", "worktrees", "wt")
+	if err := os.MkdirAll(worktreeGitDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeGitDir, "commondir"), []byte("../..\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: "+worktreeGitDir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cond := "gitdir:" + filepath.ToSlash(worktreeGitDir)
+	if !includeIfMatches(cond, worktree) {
+		t.Errorf("includeIfMatches(%q, %q) = false, want true (pattern names the worktree's real $GIT_DIR)", cond, worktree)
+	}
+
+	staleCond := "gitdir:" + filepath.ToSlash(filepath.Join(worktree, ".git"))
+	if includeIfMatches(staleCond, worktree) {
+		t.Errorf("includeIfMatches(%q, %q) = true, want false (worktree/.git is a file, not the real $GIT_DIR, and must not match)", staleCond, worktree)
 	}
 }
 
