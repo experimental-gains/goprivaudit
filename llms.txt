@@ -20,4 +20,4 @@ checked is local (go.mod, git config, netrc, `go env`).
 - [pkg.go.dev](https://pkg.go.dev/github.com/experimental-gains/goprivaudit): generated Go API docs
 
 ## Repo
-- [Source](https://github.com/experimental-gains/goprivaudit): MIT-licensed, currently at v0.1.43
+- [Source](https://github.com/experimental-gains/goprivaudit): MIT-licensed, currently at v0.1.44
