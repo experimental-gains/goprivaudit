@@ -567,7 +567,14 @@ func parseIncludes(data []byte) []includeDirective {
 // anything else is relative to the directory containing the config file
 // that referenced it.
 func resolveIncludePath(value, configFileDir string) string {
-	value = strings.Trim(value, `"`)
+	// value arrives already unquoted/unescaped — every caller passes an
+	// includeDirective.path sourced from splitKV, which now resolves git's
+	// value quoting itself (see unquoteConfigValue). This used to do its
+	// own blunt strings.Trim(value, `"`) here, the only quote-handling
+	// this file had before unquoteConfigValue existed — redundant now, and
+	// actively wrong for the rare case of a real path whose unescaped form
+	// itself starts or ends with a literal '"' (Trim would incorrectly eat
+	// it a second time).
 	if value == "" {
 		return ""
 	}
@@ -985,8 +992,85 @@ func splitKV(line string) (key, value string, ok bool) {
 		return "", "", false
 	}
 	key = strings.ToLower(strings.TrimSpace(line[:i]))
-	value = strings.TrimSpace(line[i+1:])
+	value = unquoteConfigValue(strings.TrimSpace(line[i+1:]))
 	return key, value, true
+}
+
+// unquoteConfigValue resolves a git config value's quoting/escaping, per
+// git-config(1) ("Syntax"): a value may be entirely or partially wrapped in
+// double quotes, an unescaped '"' toggles the quoted region on/off with the
+// quote character itself dropped from the result either way, and a
+// backslash escapes the character following it — '\"' and '\\' produce a
+// literal '"'/'\\', '\n'/'\t'/'\b' produce newline/tab/backspace, and any
+// other escaped character (real git treats this as a syntax error and
+// refuses to read the file at all — this tool fails open instead, keeping
+// the literal unescaped character, matching its existing convention
+// elsewhere of not replicating git's own hard-error behavior) is kept as
+// its literal, unescaped self. Verified live against real `git config
+// --file`: `ab"cd ef"gh` (bare quote-toggling, no escapes) reads back as
+// `abcd efgh`, and `"a\"b\\c"` reads back as `a"b\c`.
+//
+// Before this function existed, splitKV returned every value completely
+// raw, quote characters and backslash escapes both intact — resolveIncludePath
+// was the only caller that ever stripped anything (a blunt
+// strings.Trim(value, `"`), which only handles a value quoted start-to-end
+// with no internal escapes). Every other splitKV consumer — insteadOf,
+// credential.helper, http.extraHeader, protocol.allow — read the value
+// completely unprocessed. That's not just a cosmetic gap: confirmed live
+// against a real, widely-forked public dotfiles repo
+// (github.com/mathiasbynens/dotfiles, whose .gitconfig writes
+// `insteadOf = "gh:"` purely as a stylistic quoting habit, not because the
+// value needs escaping) that real git strips the quotes and applies the
+// rewrite regardless of whether the quoted content contains anything that
+// actually required quoting. Reproduced the exploitable shape directly:
+// `[url "git@github.com:myorg/"] insteadOf = "https://github.com/myorg/"`
+// — GIT_TRACE confirms a real `git ls-remote`/`go get` against
+// https://github.com/myorg/foo genuinely rewrites to the ssh transport
+// (a "Host key verification failed" error proves the ssh subprocess really
+// launched, not a parse no-op) — while pre-fix goprivaudit reported "no
+// issues found" for the identical private-auth signal an unquoted
+// `insteadOf = https://github.com/myorg/` line already correctly flagged
+// as SUMDB LEAK. A prior pass (run #154) considered quote-handling here
+// and concluded a '"' character was structurally unreachable in this
+// file's own values because a bare git remote URL can never legally
+// contain one — true for the raw URL bytes, but it conflated that with
+// whether the *config line* can be written wrapped in quotes, which git
+// allows unconditionally regardless of the wrapped content. As a side
+// effect, this also fixes setSignalSlot's reset-on-empty detection for a
+// value written as an explicit quoted empty string (`helper = ""`, a valid
+// alternate spelling of `helper =` per the same quoting rules) — pre-fix,
+// `value == ""` compared against the two-character literal `""` and never
+// matched, so a real credential.helper/http.extraHeader reset written this
+// way was silently ignored.
+func unquoteConfigValue(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '\\' && i+1 < len(s):
+			i++
+			switch s[i] {
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case 'b':
+				b.WriteByte('\b')
+			default:
+				b.WriteByte(s[i])
+			}
+		case c == '"':
+			// Drop the quote character; a quoted region contributes its
+			// characters identically to an unquoted one once escapes are
+			// resolved, so no separate "in quotes" state is needed here
+			// (unlike stripLineComment/splitLogicalLines, which track it
+			// for comment/continuation detection on the surrounding line,
+			// not for value extraction).
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // normalizeToModulePrefix converts a git remote URL form (https://,

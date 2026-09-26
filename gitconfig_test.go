@@ -723,3 +723,70 @@ func TestPrivatePrefixesFromConfigFileIncludeCycleTerminates(t *testing.T) {
 		t.Errorf("got %v, want nil", got)
 	}
 }
+
+// TestUnquoteConfigValue exercises git-config(1)'s value quoting/escaping
+// grammar directly — see unquoteConfigValue's doc comment for the live
+// verification against real `git config --file` this mirrors (bare
+// quote-toggling and \"/\\ escapes both confirmed there).
+func TestUnquoteConfigValue(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{`https://github.com/myorg/`, `https://github.com/myorg/`},
+		{`"https://github.com/myorg/"`, `https://github.com/myorg/`},
+		{`"gh:"`, `gh:`},
+		{`ab"cd ef"gh`, `abcd efgh`},
+		{`a\"b\\c`, `a"b\c`},
+		{`"a\"b\\c"`, `a"b\c`},
+		{`"line1\nline2\ttabbed"`, "line1\nline2\ttabbed"},
+		{``, ``},
+		{`""`, ``},
+	}
+	for _, c := range cases {
+		if got := unquoteConfigValue(c.in); got != c.want {
+			t.Errorf("unquoteConfigValue(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigQuotedInsteadOfValue reproduces, at the
+// privatePrefixesFromGitConfig level, the real false negative confirmed
+// live against github.com/mathiasbynens/dotfiles (a widely-forked public
+// dotfiles repo whose .gitconfig quotes an insteadOf value purely as a
+// style choice, not because the value needs escaping) and against a
+// synthetic exploit-shaped version of the same pattern — see
+// unquoteConfigValue's doc comment for the full GIT_TRACE-verified rewrite
+// confirmation. Before unquoteConfigValue existed, splitKV left the
+// wrapping quotes in value, so normalizeToModulePrefix's scheme-prefix
+// check (HasPrefix(url, "https://")) never matched a value starting with
+// '"' and this private-auth signal was silently dropped.
+func TestPrivatePrefixesFromGitConfigQuotedInsteadOfValue(t *testing.T) {
+	src := `[url "git@github.com:myorg/"]
+	insteadOf = "https://github.com/myorg/"
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigQuotedEmptyResetsCredentialHelper is the
+// quoted counterpart to TestPrivatePrefixesFromGitConfigCredentialHelperResetAfterSet:
+// git-config(1) allows an empty value to be spelled `helper = ""`
+// (a fully-quoted empty string) as well as the bare `helper =`, and real
+// git treats both identically as a reset — confirmed live with a logging
+// credential-helper stand-in: `git credential fill` invoked no helper at
+// all once a real helper = line was followed by helper = "" in the same
+// section, the identical result as the unquoted reset form. Before
+// unquoteConfigValue existed, splitKV's raw value for a quoted empty
+// string was the two-character literal `""`, not Go's empty string, so
+// setSignalSlot's `value == ""` reset check never matched it and the
+// helper stayed wrongly recorded as active.
+func TestPrivatePrefixesFromGitConfigQuotedEmptyResetsCredentialHelper(t *testing.T) {
+	src := `[credential "https://mycorp.example"]
+	helper = /path/to/real-helper
+	helper = ""
+`
+	if got := privatePrefixesFromGitConfig([]byte(src)); got != nil {
+		t.Errorf("expected nil (a later quoted-empty helper value resets an earlier non-empty one), got %v", got)
+	}
+}
