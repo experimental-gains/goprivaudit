@@ -893,6 +893,88 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunFindsLeakInWorktreeConfig reproduces git-worktree(1)'s documented
+// per-worktree config mechanism: with "extensions.worktreeConfig" enabled
+// in the shared config, `git config --worktree ...` writes to a fourth
+// config file at the *worktree's own* $GIT_DIR/config.worktree, not the
+// shared commonDir/config the plain linked-worktree test above already
+// covers — verified live (see gitConfigCandidates' doc comment) that a
+// real `git ls-remote` run from this worktree honors an insteadOf rewrite
+// kept only there. Before this fix, gitConfigCandidates never looked at
+// config.worktree at all, so this exact real, git-documented setup left a
+// genuine SUMDB LEAK reported as "no issues found".
+func TestRunFindsLeakInWorktreeConfig(t *testing.T) {
+	mainRepo := t.TempDir()
+	writeFile(t, mainRepo, ".git/config", `[extensions]
+	worktreeConfig = true
+`)
+
+	worktree := t.TempDir()
+	worktreeGitDir := filepath.Join(mainRepo, ".git", "worktrees", "wt")
+	writeFile(t, worktreeGitDir, "commondir", "../..\n")
+	writeFile(t, worktreeGitDir, "config.worktree", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, worktree, ".git", "gitdir: "+worktreeGitDir+"\n")
+
+	gomod := writeFile(t, worktree, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunIgnoresConfigWorktreeWhenExtensionDisabled pins the other half of
+// the same fix: a config.worktree file left on disk (e.g. from a since-
+// disabled extensions.worktreeConfig — git never deletes it automatically)
+// must NOT be read when the shared config no longer turns the extension
+// on, matching real git's own behavior of ignoring that file entirely in
+// that case. Without this guard, unconditionally reading config.worktree
+// once discovered would flag a rewrite real git itself no longer applies.
+func TestRunIgnoresConfigWorktreeWhenExtensionDisabled(t *testing.T) {
+	mainRepo := t.TempDir()
+	writeFile(t, mainRepo, ".git/config", "") // extensions.worktreeConfig never set
+
+	worktree := t.TempDir()
+	worktreeGitDir := filepath.Join(mainRepo, ".git", "worktrees", "wt")
+	writeFile(t, worktreeGitDir, "commondir", "../..\n")
+	writeFile(t, worktreeGitDir, "config.worktree", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, worktree, ".git", "gitdir: "+worktreeGitDir+"\n")
+
+	gomod := writeFile(t, worktree, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (extension off, config.worktree must be ignored); stdout=%s", code, stdout)
+	}
+}
+
 // TestRunFindsLeakInSubmoduleCheckout covers the sibling real-world shape:
 // a real `git submodule add` also gives the submodule's working directory
 // a .git *file* rather than a directory (verified live), but unlike a

@@ -416,8 +416,32 @@ func gitConfigCandidates(moduleDir string) []string {
 	// directly (see resolveGitDir). Falls back to the plain
 	// moduleDir/.git/config guess (harmless if it doesn't exist) when
 	// resolution fails outright, e.g. moduleDir isn't a git repo at all.
-	if _, commonDir, ok := resolveGitDir(moduleDir); ok {
+	if gitDir, commonDir, ok := resolveGitDir(moduleDir); ok {
 		out = append(out, filepath.Join(commonDir, "config"))
+		// git-config(1): once "extensions.worktreeConfig" is turned on
+		// (git-worktree(1)'s own documented mechanism for a per-worktree
+		// credential/insteadOf setup — e.g. isolating a private-registry
+		// auth setup to just one worktree building against a different
+		// private branch/fork), a fourth config file — $GIT_DIR/
+		// config.worktree, at the *current* worktree's own $GIT_DIR, not
+		// the shared common dir the local tier above just read — is read
+		// after the local tier and can carry the exact same
+		// insteadOf/credential.helper/http.extraHeader signals. Verified
+		// live: with extensions.worktreeConfig enabled, `git config
+		// --worktree url.<ssh>.insteadOf <https>` run in a linked
+		// worktree makes a real `git ls-remote` there rewrite to ssh,
+		// while the *other* worktree (sharing the same commonDir/config,
+		// but with its own isolated config.worktree) still fetches over
+		// plain, unrewritten HTTPS — a real signal this tool would
+		// otherwise miss entirely for any repo using this mechanism,
+		// since $GIT_DIR/config.worktree lives outside every tier this
+		// function previously read as a source at all. The flag itself
+		// can be set anywhere in the chain built so far (most commonly,
+		// but not exclusively, the local config file), so worktreeConfigEnabled
+		// checks the whole of out, not just the entry just appended.
+		if worktreeConfigEnabled(out, moduleDir) {
+			out = append(out, filepath.Join(gitDir, "config.worktree"))
+		}
 	} else {
 		out = append(out, filepath.Join(moduleDir, ".git", "config"))
 	}

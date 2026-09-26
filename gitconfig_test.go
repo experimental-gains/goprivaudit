@@ -873,3 +873,68 @@ func TestPrivatePrefixesFromGitConfigQuotedEmptyResetsCredentialHelper(t *testin
 		t.Errorf("expected nil (a later quoted-empty helper value resets an earlier non-empty one), got %v", got)
 	}
 }
+
+func TestWorktreeConfigValueFromGitConfig(t *testing.T) {
+	cases := []struct {
+		name      string
+		src       string
+		wantValue string
+		wantOK    bool
+	}{
+		{"absent", "[core]\n\teditor = vim\n", "", false},
+		{"explicit true", "[extensions]\n\tworktreeConfig = true\n", "true", true},
+		// Bare key with no "=" at all is git's documented implicit-true
+		// spelling (verified live: `git config --bool` prints "true" for
+		// it) — splitKV alone would silently drop this line since it
+		// requires an "=".
+		{"bare key", "[extensions]\n\tworktreeConfig\n", "true", true},
+		// Case-insensitive section AND key name, like every other section
+		// this tool reads.
+		{"case insensitive", "[EXTENSIONS]\n\tWorktreeConfig = TRUE\n", "TRUE", true},
+		// Explicit empty value is a documented FALSE spelling, distinct
+		// from the key being absent (wantOK must still be true here).
+		{"explicit empty", "[extensions]\n\tworktreeConfig =\n", "", true},
+		// Last assignment in the file wins, same as every other scalar
+		// key elsewhere in this file.
+		{"last wins", "[extensions]\n\tworktreeConfig = true\n\tworktreeConfig = false\n", "false", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			value, ok := worktreeConfigValueFromGitConfig([]byte(c.src))
+			if value != c.wantValue || ok != c.wantOK {
+				t.Errorf("got (%q, %v), want (%q, %v)", value, ok, c.wantValue, c.wantOK)
+			}
+		})
+	}
+}
+
+func TestGitConfigBoolTrue(t *testing.T) {
+	trueCases := []string{"true", "True", "TRUE", "yes", "on", "1"}
+	for _, v := range trueCases {
+		if !gitConfigBoolTrue(v) {
+			t.Errorf("gitConfigBoolTrue(%q) = false, want true", v)
+		}
+	}
+	falseCases := []string{"false", "no", "off", "0", "", "  ", "garbage"}
+	for _, v := range falseCases {
+		if gitConfigBoolTrue(v) {
+			t.Errorf("gitConfigBoolTrue(%q) = true, want false", v)
+		}
+	}
+}
+
+// TestWorktreeConfigValueFromConfigFileOwnFileOverridesInclude pins the
+// same "a file's own settings take precedence over its includes'"
+// precedence protocolAllowFromConfigFile already applies, for this new
+// scalar: an included file enabling the extension shouldn't survive a
+// later explicit disable in the including file itself.
+func TestWorktreeConfigValueFromConfigFileOwnFileOverridesInclude(t *testing.T) {
+	dir := t.TempDir()
+	incPath := writeFile(t, dir, "included", "[extensions]\n\tworktreeConfig = true\n")
+	mainPath := writeFile(t, dir, "main", "[include]\n\tpath = "+incPath+"\n[extensions]\n\tworktreeConfig = false\n")
+
+	value, ok := worktreeConfigValueFromConfigFile(mainPath, dir, map[string]bool{})
+	if !ok || gitConfigBoolTrue(value) {
+		t.Errorf("got (%q, %v), want a false-resolving value with ok=true", value, ok)
+	}
+}

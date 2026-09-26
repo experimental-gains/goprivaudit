@@ -181,6 +181,12 @@ what a real `go get` run from the worktree actually authenticates with);
 inside a submodule checkout, `.git` is also a file, but the `$GIT_DIR` it
 names owns its own config directly. Both shapes are followed correctly,
 so a rewrite that's only visible through one of them isn't missed. If
+`extensions.worktreeConfig` is turned on (`git-worktree(1)`'s own
+per-worktree config mechanism, e.g. to isolate a private-registry setup
+to one worktree building against a different private branch or fork), the
+worktree's own `$GIT_DIR/config.worktree` — a separate file from the
+shared config above, only ever consulted by git once the extension is
+on — is read too, so a rewrite kept there isn't missed either. If
 `GIT_CONFIG_GLOBAL` is set it's honored the way real git honors it too:
 that file replaces the whole global tier above, not an addition to it. It also reads the `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_<n>`/
 `GIT_CONFIG_VALUE_<n>` environment variables (git-config(1)'s file-free way

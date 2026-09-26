@@ -16,6 +16,7 @@ var httpSectionRe = regexp.MustCompile(`(?i)^\[http\s+"([^"]*)"\]$`)
 var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
 var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 var protocolSectionRe = regexp.MustCompile(`(?i)^\[protocol(?:\s+"([^"]*)")?\]$`)
+var extensionsSectionRe = regexp.MustCompile(`(?i)^\[extensions\]$`)
 
 // privatePrefixesFromGitConfig scans a gitconfig file's contents for three
 // independent private-auth signals:
@@ -513,6 +514,120 @@ func gitProtocolAllowed(scheme string, fileAllow map[string]string, getenv func(
 
 func policyAllows(policy string) bool {
 	return !strings.EqualFold(strings.TrimSpace(policy), "never")
+}
+
+// worktreeConfigValueFromGitConfig scans a gitconfig file's contents for the
+// last "extensions.worktreeConfig" assignment, per git's own last-value-wins
+// scalar precedence within a single file. A bare "worktreeConfig" line (no
+// "=" at all) is git's documented implicit-true spelling — verified live
+// against real git ("git config --bool extensions.worktreeConfig" prints
+// "true" for a bare key) — and is handled separately here since splitKV
+// requires an "=" and would otherwise silently drop the line entirely. An
+// explicit "worktreeConfig =" (empty value) is different from the key being
+// absent: per git-config(1) the empty string is one of the documented FALSE
+// spellings, not "unset" — also verified live — so ok=true/value="" here,
+// letting the caller count it as a real (disabling) assignment rather than
+// falling through to an earlier, less-specific tier's value.
+func worktreeConfigValueFromGitConfig(data []byte) (value string, ok bool) {
+	inExtensions := false
+	for _, raw := range splitLogicalLines(data) {
+		line := strings.TrimSpace(stripLineComment(raw))
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "[") {
+			inExtensions = extensionsSectionRe.MatchString(line)
+			continue
+		}
+		if !inExtensions {
+			continue
+		}
+		if strings.EqualFold(line, "worktreeconfig") {
+			value, ok = "true", true
+			continue
+		}
+		key, v, kvOK := splitKV(line)
+		if !kvOK || key != "worktreeconfig" {
+			continue
+		}
+		value, ok = v, true
+	}
+	return value, ok
+}
+
+// worktreeConfigValueFromConfigFile is worktreeConfigValueFromGitConfig's
+// [include]/[includeIf]-following counterpart, mirroring
+// protocolAllowFromConfigFile's structure: includes are resolved first (in
+// file order), then this file's own "extensions.worktreeConfig" (if any)
+// overrides whatever they found, matching git's own "a file's own settings
+// take precedence over its includes'" precedence.
+func worktreeConfigValueFromConfigFile(configPath, moduleDir string, visited map[string]bool) (value string, ok bool) {
+	abs, err := filepath.Abs(configPath)
+	if err != nil {
+		return "", false
+	}
+	if visited[abs] {
+		return "", false
+	}
+	visited[abs] = true
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", false
+	}
+
+	dir := filepath.Dir(configPath)
+	for _, inc := range parseIncludes(data) {
+		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir) {
+			continue
+		}
+		if p := resolveIncludePath(inc.path, dir); p != "" {
+			if v, incOK := worktreeConfigValueFromConfigFile(p, moduleDir, visited); incOK {
+				value, ok = v, true
+			}
+		}
+	}
+	if v, fOK := worktreeConfigValueFromGitConfig(data); fOK {
+		value, ok = v, true
+	}
+	return value, ok
+}
+
+// worktreeConfigEnabled reports whether "extensions.worktreeConfig" resolves
+// true across configPaths (checked in order — the same system/global/local
+// precedence gitConfigCandidates itself builds, later tiers overriding
+// earlier ones for this single-valued boolean, matching real git). Needed
+// before a $GIT_DIR/config.worktree file (see gitConfigCandidates) can be
+// added as a source: per git-config(1), that per-worktree file is only
+// consulted by git at all once this extension is on, and reading it
+// unconditionally would treat a stale config.worktree left over from a
+// disabled extension (git never deletes it automatically) as live when real
+// git no longer looks at it.
+func worktreeConfigEnabled(configPaths []string, moduleDir string) bool {
+	visited := map[string]bool{}
+	enabled := false
+	for _, p := range configPaths {
+		if v, ok := worktreeConfigValueFromConfigFile(p, moduleDir, visited); ok {
+			enabled = gitConfigBoolTrue(v)
+		}
+	}
+	return enabled
+}
+
+// gitConfigBoolTrue reports whether a raw git config scalar value spells
+// boolean true, per git-config(1)'s documented case-insensitive true
+// spellings (yes/on/true/1); everything else — including the empty string
+// and any of the documented false spellings (no/off/false/0) — is false. A
+// bare key with no "=" never reaches this function as its literal text:
+// worktreeConfigValueFromGitConfig already turns it into the value "true"
+// before returning.
+func gitConfigBoolTrue(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "yes", "on", "true", "1":
+		return true
+	default:
+		return false
+	}
 }
 
 // includeDirective is a raw [include]/[includeIf "..."] path entry found
