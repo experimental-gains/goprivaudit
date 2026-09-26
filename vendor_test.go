@@ -22,6 +22,14 @@ func TestExplicitModFlag(t *testing.T) {
 		// Repeated flag: last one wins, matching how GOFLAGS values get
 		// prepended to a real argv and re-parsed by the flag package.
 		{"-mod=mod -mod=vendor", "vendor", true},
+		// A whole flag wrapped in quotes (real go's documented way to carry
+		// an embedded space, `go help environment`) must still be recognized
+		// — see quotedFields' doc comment for the live-verified false
+		// "vendor mode active" this produced pre-fix.
+		{`"-mod=mod"`, "mod", true},
+		{`'-mod=vendor'`, "vendor", true},
+		{`"-tags=a b" -mod=vendor`, "vendor", true},
+		{`-mod=mod "-tags=a b"`, "mod", true},
 	}
 	for _, c := range cases {
 		value, ok := explicitModFlag(c.goflags)
@@ -135,5 +143,48 @@ func TestVendorModeActive(t *testing.T) {
 	// wins over any auto-default in either direction).
 	if !vendorModeActive("-mod=vendor", "1.24.4", vendorTxt, filepath.Join(dir, "go.work")) {
 		t.Error("vendorModeActive should be true: explicit -mod=vendor overrides workspace suppression too")
+	}
+
+	// A quoted "-mod=mod" (real go's documented way to write a GOFLAGS
+	// entry, and a realistic defensive-quoting habit even without an
+	// embedded space) must still override the auto-vendor default, exactly
+	// like its unquoted form above. Pre-fix, explicitModFlag's
+	// strings.Fields split left the surrounding quotes on the token,
+	// so this was never recognized as a "-mod=" flag at all, and
+	// vendorModeActive fell through to the auto-default (true, since
+	// vendor/modules.txt exists and go >= 1.14) — silently claiming vendor
+	// mode was active, and skipping the audit, while the real go command
+	// (verified live, see quotedFields' doc comment) actually reaches the
+	// network for this exact GOFLAGS value.
+	if vendorModeActive(`"-mod=mod"`, "1.24.4", vendorTxt, "") {
+		t.Error("vendorModeActive should be false: quoted \"-mod=mod\" overrides the vendor auto-default same as unquoted -mod=mod")
+	}
+}
+
+func TestQuotedFields(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"-mod=vendor", []string{"-mod=vendor"}},
+		{"-race -mod=vendor -v", []string{"-race", "-mod=vendor", "-v"}},
+		{`"-mod=mod"`, []string{"-mod=mod"}},
+		{`'-mod=vendor'`, []string{"-mod=vendor"}},
+		{`"-tags=a b" -mod=vendor`, []string{"-tags=a b", "-mod=vendor"}},
+		{`"unterminated`, nil}, // real go Fatals here; best-effort empty
+	}
+	for _, c := range cases {
+		got := quotedFields(c.in)
+		if len(got) != len(c.want) {
+			t.Errorf("quotedFields(%q) = %#v, want %#v", c.in, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("quotedFields(%q) = %#v, want %#v", c.in, got, c.want)
+				break
+			}
+		}
 	}
 }
