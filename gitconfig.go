@@ -917,7 +917,7 @@ func normalizeToModulePrefix(url string) string {
 			if i := strings.Index(url, "@"); i >= 0 {
 				url = url[i+1:] // drop ssh://user@ auth prefix
 			}
-			return finishPrefix(url)
+			return finishPrefix(stripHostPort(url))
 		}
 	}
 	// git@host:path shorthand
@@ -929,6 +929,55 @@ func normalizeToModulePrefix(url string) string {
 		return finishPrefix(rest)
 	}
 	return ""
+}
+
+// stripHostPort removes a ":<port>" suffix from the host segment (the part
+// before the first "/") of a "host[:port][/path]" string, mirroring how a
+// real module path is written: golang.org/x/mod/module.CheckPath rejects
+// ':' anywhere in a module path, so no go.mod ever declares one with a
+// port, regardless of what port the real server behind it needs.
+//
+// This matters most for setSignalSlot's [credential "..."]/[http "..."]
+// section URLs, which name the exact URL git will actually fetch — and
+// that real URL legitimately carries a port whenever the module is only
+// reachable that way: a self-hosted GHES/GitLab instance fronted by a
+// non-default HTTPS port is a real, common enterprise setup, and
+// `actions/checkout` (see this function's own doc comment above) writes
+// its extraHeader scoped to exactly `github.server_url`, port included
+// when the runner's server_url has one. Verified live with real git: a
+// `[credential "https://git.internal.corp:8443"] helper = ...` entry only
+// answers `git credential fill` for `host=git.internal.corp:8443` — the
+// identical query with the port dropped fails outright ("could not read
+// Username") — so this credential authenticates a real fetch to that
+// exact host:port, while the go.mod module path for it is inevitably the
+// port-less "git.internal.corp/org/repo". Before this fix,
+// normalizeToModulePrefix left the port embedded (returning
+// "git.internal.corp:8443"), a prefix no real module path can ever
+// contain a colon to match — silently blinding this tool to exactly the
+// self-hosted-behind-a-custom-port setups its credential/extraHeader
+// checks exist to catch. (The analogous insteadOf case is already safe
+// without this fix: `[url "ssh://host:2222/"] insteadOf = <old-url>`
+// derives the prefix from the port-less <old-url> side, never the
+// rewritten one — but stripHostPort is a no-op there too, so applying it
+// uniformly costs nothing and closes the gap if some future call site
+// ever normalizes the rewritten side instead.) A "[" prefix (a bracketed
+// IPv6 literal, e.g. "[::1]:2222") is left untouched: not a valid module
+// path host either way, and rare enough here that guessing at bracket
+// stripping isn't worth the risk of mishandling it.
+func stripHostPort(hostAndPath string) string {
+	host, rest := hostAndPath, ""
+	if i := strings.Index(hostAndPath, "/"); i >= 0 {
+		host, rest = hostAndPath[:i], hostAndPath[i:]
+	}
+	if strings.HasPrefix(host, "[") {
+		return hostAndPath
+	}
+	if i := strings.LastIndex(host, ":"); i >= 0 {
+		if _, err := strconv.Atoi(host[i+1:]); err == nil {
+			host = host[:i]
+		}
+	}
+	return host + rest
 }
 
 func finishPrefix(s string) string {

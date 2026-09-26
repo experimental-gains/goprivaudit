@@ -288,6 +288,35 @@ func TestPrivatePrefixesFromGitConfigInsteadOfAndCredentialHelperBoth(t *testing
 	}
 }
 
+// TestPrivatePrefixesFromGitConfig_PortScopedCredential reproduces the real,
+// live-verified setup for a self-hosted git server (e.g. GHES/GitLab)
+// fronted by a non-default HTTPS port: a [credential "..."] context scoped
+// to that exact host:port authenticates the real fetch (confirmed live —
+// see stripHostPort's doc comment — a `git credential fill` query for the
+// same host without the port fails outright), while the go.mod module path
+// for it is inevitably port-less, since golang.org/x/mod/module.CheckPath
+// rejects ':' in a module path. Before stripHostPort existed, the derived
+// prefix was "git.internal.corp:8443" and this module never leaked its way
+// into audit's SumdbLeaks at all — a real, non-redundant miss, since
+// (unlike a ssh insteadOf's port, which lives only on the rewritten side
+// never used for prefix derivation) nothing else in this file derives a
+// port-less signal for a bare credential/extraHeader-only setup.
+func TestPrivatePrefixesFromGitConfig_PortScopedCredential(t *testing.T) {
+	src := `[credential "https://git.internal.corp:8443"]
+	helper = store
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"git.internal.corp"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+
+	r := audit([]string{"git.internal.corp/org/repo"}, got, nil)
+	if !reflect.DeepEqual(r.SumdbLeaks, []string{"git.internal.corp/org/repo"}) {
+		t.Errorf("audit SumdbLeaks = %v, want a flagged leak on git.internal.corp/org/repo", r.SumdbLeaks)
+	}
+}
+
 func TestNormalizeToModulePrefix(t *testing.T) {
 	cases := map[string]string{
 		"https://github.com/myorg/":     "github.com/myorg",
@@ -309,6 +338,16 @@ func TestNormalizeToModulePrefix(t *testing.T) {
 		"https://@example.com/org": "example.com/org", // scheme case, "@" at index 0
 		"@example.com:org":         "example.com/org", // shorthand case, "@" at index 0
 		"git@:org":                 "/org",            // shorthand case, ":" at index 0 (empty host)
+
+		// A self-hosted git server reached over a non-standard SSH port
+		// (see stripHostPort's doc comment): the port is a transport
+		// detail, never part of the module path a real go.mod declares.
+		"ssh://git@example.com:2222/org/repo.git": "example.com/org/repo",
+		"ssh://git@example.com:2222/":             "example.com",
+		"https://example.com:8443/org/repo":       "example.com/org/repo",
+		// A bracketed IPv6 host is left untouched rather than mishandled:
+		// not a valid module path host either way.
+		"ssh://git@[::1]:2222/org": "[::1]:2222/org",
 	}
 	for in, want := range cases {
 		if got := normalizeToModulePrefix(in); got != want {
