@@ -44,7 +44,11 @@
 // Both are also skipped when GOFLAGS itself is malformed in a way the real
 // go command's own validation rejects outright (see goflagsMalformed) —
 // every module-aware go subcommand Fatals before resolving anything in
-// that case, so no sumdb query can happen either.
+// that case, so no sumdb query can happen either. Both are also skipped
+// when the go.mod being audited itself contains a bare "/*" outside a
+// quoted string (see goModHasBlockComment) — go.mod's grammar only allows
+// "//" comments, and every module-aware go subcommand Fatals parsing the
+// file itself in that case, before resolving anything.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -241,6 +245,14 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	var r Report
 	switch {
+	case goModHasBlockComment(data):
+		// A go.mod containing a bare "/*" outside a quoted string, anywhere
+		// in the file, makes every module-aware go subcommand Fatal while
+		// parsing go.mod itself — "mod files must use // comments (not /*
+		// */ comments)" — before it resolves a single module (see
+		// goModHasBlockComment). Same "cannot leak" reasoning as
+		// goflagsBad/gosumdb==off/vendorActive below, just reached because
+		// the go.mod never finishes parsing at all.
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own $GOFLAGS validation
 		// rejects outright (see goflagsMalformed) makes every module-aware

@@ -196,6 +196,74 @@ func effectiveToolModules(tools []string, requires []requireEntry) []string {
 // corrupting the parsed path and, via addReplace's "../" prefix check
 // on the now-mangled string, misclassifying a purely local replace as a
 // network-fetched module to check against GOPRIVATE instead.
+// goModHasBlockComment reports whether data contains a "/*" outside any
+// quoted string, on some line, before that line's own "//" comment marker
+// (if any) — the exact trigger golang.org/x/mod/modfile's real lexer uses to
+// Fatal every module-aware go subcommand with "mod files must use // comments
+// (not /* */ comments)", verified live: `go build`/`go mod download`/etc. all
+// refuse to even parse a go.mod containing a bare `/*` outside a quoted
+// string, anywhere in the file — including on a line of its own, unrelated
+// to any require/replace directive, e.g. a leftover Go-style block comment a
+// human or a generator mistakenly wrote (go.mod's grammar is Go-ish enough to
+// invite exactly that mistake, but explicitly disallows it). No matching
+// "*/" is required for the Fatal to trigger — the lexer errors the instant it
+// sees the two-character "/*" sequence, whatever follows.
+//
+// This matters here for the same reason goflagsMalformed and vendorModeActive
+// do (see main.go's doc comment): a go.mod real go refuses to parse at all
+// can never resolve a single module, so no sumdb query for anything in it can
+// ever happen — reporting a SUMDB LEAK finding for a require/tool directive
+// that's technically still there in the raw bytes, when the one thing that
+// would ever query the checksum database for it never runs, is an actively
+// wrong claim, not just a missed check. Confirmed live end-to-end against the
+// actual goprivaudit binary: a go.mod with a real, otherwise-uncovered
+// private-auth-signaled require plus an unrelated stray `/* ... */` line
+// elsewhere in the file was reported "SUMDB LEAK" pre-fix, while `go build`
+// on the identical file Fatals immediately with "errors parsing go.mod:
+// go.mod:N: mod files must use // comments (not /* */ comments)" and never
+// gets far enough to query anything.
+//
+// A "/*" that appears inside a quoted string (e.g. a replace target's local
+// path containing a literal "/*", `"../weird/*/dir"`) is not a lexer error —
+// verified live, that go.mod parses and builds fine — so, like stripComment,
+// quoted and backtick-quoted spans are skipped rather than scanned. go.mod
+// strings can never contain a literal newline (the real lexer Fatals on one
+// too), so scanning line-by-line, independently per line, matches the real
+// lexer's behavior exactly without needing to track quote state across
+// lines.
+func goModHasBlockComment(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		for i := 0; i < len(line); i++ {
+			switch line[i] {
+			case '"':
+				i++
+				for i < len(line) && line[i] != '"' {
+					if line[i] == '\\' && i+1 < len(line) {
+						i++
+					}
+					i++
+				}
+			case '`':
+				i++
+				for i < len(line) && line[i] != '`' {
+					i++
+				}
+			case '/':
+				if i+1 >= len(line) {
+					continue
+				}
+				switch line[i+1] {
+				case '/':
+					i = len(line)
+				case '*':
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func stripComment(line string) string {
 	for i := 0; i < len(line); i++ {
 		switch c := line[i]; c {

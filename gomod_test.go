@@ -257,6 +257,37 @@ func TestParseReplacesQuotedLocalPathWithEscapedQuoteAndComment(t *testing.T) {
 	}
 }
 
+// TestGoModHasBlockComment covers goModHasBlockComment's live-verified
+// trigger condition: a bare "/*" outside any quoted string, on any line of
+// the file, is exactly what makes golang.org/x/mod/modfile's real lexer
+// Fatal every module-aware go subcommand — confirmed against real `go
+// build` (see TestRunBlockCommentGoModNoLeak in main_test.go for the
+// end-to-end regression). A "/*" appearing inside a double- or
+// backtick-quoted string (a legal go.mod string value, e.g. a local replace
+// path) is not a lexer error at all — verified live that the equivalent
+// go.mod parses and builds fine — so it must not be flagged either.
+func TestGoModHasBlockComment(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no comment at all", "module example.com/foo\n\ngo 1.24\n", false},
+		{"ordinary line comment", "module example.com/foo\n\n// just a line comment\n", false},
+		{"stray block comment on its own line", "module example.com/foo\n\n/* oops */\n", true},
+		{"block comment marker with no closing */", "module example.com/foo\n\n/* oops\n", true},
+		{"block comment attached to a directive, no space", "module example.com/foo\n\nrequire/*x*/ example.com/bar v1.0.0\n", true},
+		{"slash-star inside a double-quoted replace target", "module example.com/foo\n\nreplace example.com/bar => \"../weird/*/dir\"\n", false},
+		{"slash-star inside a backtick-quoted replace target", "module example.com/foo\n\nreplace example.com/bar => `../weird/*/dir`\n", false},
+		{"line comment starting before an unrelated slash-star later in the line", "module example.com/foo\n\n// see /* this */ for context\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasBlockComment([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasBlockComment(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`
