@@ -10,13 +10,86 @@ import (
 	"strings"
 )
 
-var urlSectionRe = regexp.MustCompile(`(?i)^\[url\s+"([^"]*)"\]$`)
-var credentialSectionRe = regexp.MustCompile(`(?i)^\[credential\s+"([^"]*)"\]$`)
-var httpSectionRe = regexp.MustCompile(`(?i)^\[http\s+"([^"]*)"\]$`)
 var includeSectionRe = regexp.MustCompile(`(?i)^\[include\]$`)
-var includeIfSectionRe = regexp.MustCompile(`(?i)^\[includeif\s+"([^"]*)"\]$`)
 var protocolSectionRe = regexp.MustCompile(`(?i)^\[protocol(?:\s+"([^"]*)")?\]$`)
 var extensionsSectionRe = regexp.MustCompile(`(?i)^\[extensions\]$`)
+
+// parseQuotedSection reports whether line is a "[<keyword> "<subsection>"]"
+// section header for the given keyword (matched case-insensitively, per
+// git's own section-name case rule — see
+// TestPrivatePrefixesFromGitConfigCaseInsensitiveSection), and if so returns
+// the subsection name with git-config(1)'s subsection-escaping rules already
+// resolved: an unescaped '"' ends the subsection, '\"' contributes a literal
+// '"', '\\' contributes a literal '\', and any other backslash-escaped
+// character contributes just that character with the backslash dropped —
+// per git-config(1) ("Doublequote \" and backslash can be included by
+// escaping them as \" and \\, respectively. Backslashes preceding other
+// characters are dropped when reading; for example, \t is read as t and \0
+// is read as 0.") this is NOT the same \n/\t/\b control-code mapping
+// unquoteConfigValue applies to ordinary values — subsection-name escaping
+// only ever drops the backslash, verified live: `git config --file` with a
+// literal `\t`/`\n` inside a subsection name resolves it to the bare
+// letters "t"/"n", not control bytes (a real `[url
+// "git@example.com:foo\tbar\\baz\n/"]` resolves, per `git config --list`,
+// to the literal subsection `git@example.com:footbar\bazn/`).
+//
+// At least one space or tab must separate the keyword from the opening
+// quote, and nothing but the closing "]" may follow the closing quote — both
+// verified live: `[url"x"]` (no separator) and `[url "x"  ]` (trailing space
+// before "]") are both real git syntax errors ("fatal: bad config line"),
+// so treating either as a non-match (ok=false) here, same as an
+// unrecognized section entirely, costs nothing.
+//
+// This replaces this file's former per-keyword
+// `regexp.MustCompile`(?i)^\[kw\s+"([^"]*)"\]$`) vars, which had no escape
+// awareness at all: a subsection containing an escaped '"' or '\' — e.g.
+// `[credential "https://x\"y"]`, a real, git-config(1)-documented header
+// form (verified live: real git resolves its subsection to the literal
+// `https://x"y` and scopes `credential.helper`/`http.extraHeader` to it
+// exactly like an unescaped URL) — made the old `[^"]*` capture stop at the
+// escaped quote's own '"' byte, leaving unmatched trailing text before the
+// line's real closing `"]` and failing the whole-line regex match entirely.
+// That silently discarded the ENTIRE section (every insteadOf/
+// credential.helper/http.extraHeader/includeIf-path key inside it) as
+// unrecognized syntax — a real false negative on this tool's core signal,
+// the same failure class cd2f62e (v0.1.41) already fixed for VALUE-side
+// quoting (unquoteConfigValue) but never ported to the section-header side.
+func parseQuotedSection(line, keyword string) (subsection string, ok bool) {
+	if len(line) == 0 || line[0] != '[' {
+		return "", false
+	}
+	rest := line[1:]
+	if len(rest) < len(keyword) || !strings.EqualFold(rest[:len(keyword)], keyword) {
+		return "", false
+	}
+	rest = rest[len(keyword):]
+	i := 0
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == '\t') {
+		i++
+	}
+	if i == 0 || i == len(rest) || rest[i] != '"' {
+		return "", false
+	}
+	i++
+	var b strings.Builder
+	for i < len(rest) {
+		c := rest[i]
+		if c == '\\' && i+1 < len(rest) {
+			b.WriteByte(rest[i+1])
+			i += 2
+			continue
+		}
+		if c == '"' {
+			if rest[i+1:] != "]" {
+				return "", false
+			}
+			return b.String(), true
+		}
+		b.WriteByte(c)
+		i++
+	}
+	return "", false // no closing quote found on this line
+}
 
 // privatePrefixesFromGitConfig scans a gitconfig file's contents for three
 // independent private-auth signals:
@@ -226,21 +299,20 @@ func scanConfigSignals(data []byte, slots *[]*prefixSlot, credSlots, httpSlots m
 		}
 		if strings.HasPrefix(line, "[") {
 			switch {
-			case urlSectionRe.MatchString(line):
-				section = "url"
-			case credentialSectionRe.MatchString(line):
-				section = "credential"
-				sectionURL = credentialSectionRe.FindStringSubmatch(line)[1]
-			case httpSectionRe.MatchString(line):
-				section = "http"
-				sectionURL = httpSectionRe.FindStringSubmatch(line)[1]
 			case includeSectionRe.MatchString(line):
 				section, cond = "include", ""
-			case includeIfSectionRe.MatchString(line):
-				section = "includeif"
-				cond = includeIfSectionRe.FindStringSubmatch(line)[1]
 			default:
-				section = ""
+				if _, ok := parseQuotedSection(line, "url"); ok {
+					section = "url"
+				} else if sub, ok := parseQuotedSection(line, "credential"); ok {
+					section, sectionURL = "credential", sub
+				} else if sub, ok := parseQuotedSection(line, "http"); ok {
+					section, sectionURL = "http", sub
+				} else if sub, ok := parseQuotedSection(line, "includeif"); ok {
+					section, cond = "includeif", sub
+				} else {
+					section = ""
+				}
 			}
 			continue
 		}
@@ -473,9 +545,9 @@ func insteadOfSchemes(data []byte) map[string][]string {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			if urlSectionRe.MatchString(line) {
+			if sub, ok := parseQuotedSection(line, "url"); ok {
 				inURL = true
-				sectionURL = urlSectionRe.FindStringSubmatch(line)[1]
+				sectionURL = sub
 			} else {
 				inURL = false
 			}
@@ -747,11 +819,12 @@ func parseIncludes(data []byte) []includeDirective {
 			switch {
 			case includeSectionRe.MatchString(line):
 				section, cond = "include", ""
-			case includeIfSectionRe.MatchString(line):
-				m := includeIfSectionRe.FindStringSubmatch(line)
-				section, cond = "includeif", m[1]
 			default:
-				section = ""
+				if sub, ok := parseQuotedSection(line, "includeif"); ok {
+					section, cond = "includeif", sub
+				} else {
+					section = ""
+				}
 			}
 			continue
 		}

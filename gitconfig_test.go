@@ -49,6 +49,39 @@ func TestPrivatePrefixesFromGitConfigCaseInsensitiveSection(t *testing.T) {
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigCredentialSectionEscapedQuote is a
+// unit-level pin on parseQuotedSection's escape handling at the
+// [credential "..."] section level (see
+// TestPrivatePrefixesFromConfigFileIncludeIfGitdirEscapedQuote below for the
+// end-to-end, unambiguously real-world-reachable case this fix's main
+// motivation rests on — a filesystem path, unlike a URL, can genuinely
+// contain a raw '"' byte on a real system). git-config(1)'s "Syntax"
+// section states subsection names "can contain any characters except
+// newline and the null byte. Doublequote \" and backslash can be included
+// by escaping them as \" and \\, respectively" — the same escaping rule
+// cd2f62e (v0.1.41) already ported to VALUE-side quoting
+// (unquoteConfigValue) but never ported to the section-header side.
+// Verified live: `git config --file` with exactly `[credential
+// "https://git.corp.example/team\"x\"/"]` resolves its subsection to the
+// literal `https://git.corp.example/team"x"/` (confirmed via `git config
+// --list`), and a real `git credential fill` against that exact host+path
+// invokes the configured helper. Before this fix, the section-header
+// regexes' bare `[^"]*` capture stopped at the escaped quote's own '"'
+// byte, leaving unmatched trailing text before the line's real closing `"]`
+// and failing the whole-line match — silently dropping the ENTIRE
+// [credential "..."] section (and the helper's signal in it) as
+// unrecognized syntax.
+func TestPrivatePrefixesFromGitConfigCredentialSectionEscapedQuote(t *testing.T) {
+	src := `[credential "https://git.corp.example/team\"x\"/"]
+	helper = /path/to/real-helper
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{`git.corp.example/team"x"`}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 // TestPrivatePrefixesFromGitConfigIgnoresPushInsteadOf covers a common
 // personal/CI git config pattern: fetch anonymously over public HTTPS,
 // but push over authenticated SSH, scoped to a specific org (not just a
@@ -648,6 +681,51 @@ func TestPrivatePrefixesFromConfigFileFollowsInclude(t *testing.T) {
 	path = ./included.gitconfig
 `)
 	got := privatePrefixesFromConfigFile(filepath.Join(dir, "config"), dir, map[string]bool{})
+	want := []string{"github.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromConfigFileIncludeIfGitdirEscapedQuote is the
+// end-to-end, concretely-real-world-reachable case behind this fix: an
+// includeIf "gitdir:..." condition whose pattern needs to match a real
+// $GIT_DIR path containing a literal '"' byte. Unlike the [url "..."]
+// subsection case a prior pass (see run #154 in STRATEGY_ARCHIVE.md)
+// deliberately left unfixed — reasoned there to be unreachable because a
+// valid git remote URL can never contain a raw '"' — a gitdir pattern's
+// data is an ordinary filesystem path, and a real Unix directory name CAN
+// legally contain a double quote (unusual, but not invalid: unlike '/' and
+// NUL, '"' has no special meaning to the filesystem). git-config(1)
+// requires the exact same \"/\\ escaping for ANY subsection value
+// regardless of what kind of string it holds, so this is the same
+// underlying parser gap, just in the one context where the "no realistic
+// input can trigger it" argument doesn't hold.
+//
+// Verified live end-to-end against the real, built goprivaudit binary
+// before writing this test (not just reasoned about): a repository at a
+// path containing a literal '"' segment, with a real global gitconfig
+// reading `[includeIf "gitdir:<path-with-escaped-quote>/**"] path = ...`
+// pointing at a file with a credential.helper for an otherwise-uncovered
+// module's host, made the pre-fix binary print "goprivaudit: no issues
+// found" and the fixed binary correctly print "SUMDB LEAK: ..." for the
+// identical go.mod/GOPRIVATE setup — confirming this isn't just a unit-level
+// regex nuance but a real false negative on the tool's core signal.
+func TestPrivatePrefixesFromConfigFileIncludeIfGitdirEscapedQuote(t *testing.T) {
+	dir := t.TempDir()
+	quotedRepo := filepath.Join(dir, `team"x"`, "repo")
+	if err := os.MkdirAll(filepath.Join(quotedRepo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	includedPath := writeFile(t, dir, "included.gitconfig", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	escapedPattern := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(quotedRepo) + "/**"
+	globalPath := writeFile(t, dir, "global.gitconfig",
+		`[includeIf "gitdir:`+escapedPattern+`"]`+"\n\tpath = "+includedPath+"\n")
+
+	got := privatePrefixesFromConfigFile(globalPath, quotedRepo, map[string]bool{})
 	want := []string{"github.com/myorg"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)

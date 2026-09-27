@@ -194,7 +194,7 @@ func extractRawInsteadOfValue(data []byte) (string, bool) {
 			continue
 		}
 		if strings.HasPrefix(line, "[") {
-			inURLSection = urlSectionRe.MatchString(line)
+			_, inURLSection = parseQuotedSection(line, "url")
 			continue
 		}
 		if !inURLSection {
