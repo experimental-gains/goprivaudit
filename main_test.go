@@ -635,6 +635,49 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunUnknownGoflagsFlagNameNoLeak is the regression test for a real
+// false positive found by testing against real go, one level past
+// TestRunMalformedGoflagsNoLeak: GOFLAGS="-notarealflag=vendor" has a
+// perfectly valid shape ("-name=value") — goflagsMalformed's static check
+// waves it through — but "notarealflag" isn't a real flag on any go
+// subcommand at all, a very plausible typo of "-mod=vendor". Verified
+// live: cmd/go/internal/base.InitGOFLAGS Fatals with `go: parsing
+// $GOFLAGS: unknown flag -notarealflag` for exactly this value, on `go
+// build`/`go list -m all`/`go mod download` alike, before resolving a
+// single module — so no sumdb query for anything can ever happen. Pre-fix
+// (before goflagsRejectedByGo existed), goflagsBad was only
+// goflagsMalformed's shape check, which this value passes, so the audit
+// ran normally and reported a SUMDB LEAK for a query that can never
+// actually happen.
+func TestRunUnknownGoflagsFlagNameNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "-notarealflag=vendor",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when GOFLAGS carries an unknown flag name (go itself would Fatal before any query), got: %s", stdout)
+	}
+}
+
 // TestRunBlockCommentGoModNoLeak is the direct regression test for
 // goModHasBlockComment (see gomod.go): a go.mod containing a stray "/* ... */"
 // line anywhere — unrelated to the require directive itself — makes every
@@ -958,6 +1001,31 @@ func TestGoEnvUsesGivenDir(t *testing.T) {
 	unrelated := t.TempDir()
 	if got := goEnv(unrelated, "GOWORK"); got != "" {
 		t.Errorf("goEnv(%q, \"GOWORK\") = %q, want \"\" (no go.work in this tree)", unrelated, got)
+	}
+}
+
+// TestGoflagsRejectedByGo directly unit-tests goflagsRejectedByGo against
+// the real go toolchain, covering all three of its outcomes: an empty
+// goflags is never even probed (short-circuited, since it's the common
+// case and can't possibly be rejected); a shape-valid but unregistered
+// flag name is rejected (the real bug this function exists to catch — see
+// TestRunUnknownGoflagsFlagNameNoLeak); and an ordinary, real flag value
+// is not rejected at all, confirming the live probe doesn't just always
+// return true.
+func TestGoflagsRejectedByGo(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/probe\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := goflagsRejectedByGo(dir, ""); got {
+		t.Errorf("goflagsRejectedByGo(%q, \"\") = true, want false (empty GOFLAGS is never rejected)", dir)
+	}
+	if got := goflagsRejectedByGo(dir, "-notarealflag=vendor"); !got {
+		t.Errorf(`goflagsRejectedByGo(%q, "-notarealflag=vendor") = false, want true (real go Fatals with "unknown flag")`, dir)
+	}
+	if got := goflagsRejectedByGo(dir, "-mod=mod"); got {
+		t.Errorf(`goflagsRejectedByGo(%q, "-mod=mod") = true, want false (a real, registered flag)`, dir)
 	}
 }
 

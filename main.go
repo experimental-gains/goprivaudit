@@ -41,10 +41,14 @@
 // That vendor auto-default does not apply inside an active go.work
 // workspace, so it's only honored when GOWORK is unset/"off" (or an
 // explicit -mod=vendor override is present, which applies either way).
-// Both are also skipped when GOFLAGS itself is malformed in a way the real
-// go command's own validation rejects outright (see goflagsMalformed) —
-// every module-aware go subcommand Fatals before resolving anything in
-// that case, so no sumdb query can happen either. Both are also skipped
+// Both are also skipped when GOFLAGS itself is rejected outright by the
+// real go command's own validation — either a malformed shape
+// (goflagsMalformed) or a shape-valid entry whose flag name isn't
+// registered by any go subcommand at all (goflagsRejectedByGo, asked of a
+// real `go list -m` since the exact registered-flag set isn't something
+// this tool can enumerate itself) — every module-aware go subcommand
+// Fatals before resolving anything in either case, so no sumdb query can
+// happen either. Both are also skipped
 // when the go.mod being audited itself contains a bare "/*" outside a
 // quoted string (see goModHasBlockComment) — go.mod's grammar only allows
 // "//" comments, and every module-aware go subcommand Fatals parsing the
@@ -230,7 +234,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
-	goflagsBad := goflagsMalformed(goflags)
+	goflagsBad := goflagsMalformed(goflags) || goflagsRejectedByGo(moduleDir, goflags)
 
 	// GOPROXY is still read here purely so the long-documented -proxy flag
 	// keeps parsing for any existing caller that passes it explicitly; its
@@ -255,12 +259,15 @@ func run(args []string, stdout, stderr *os.File) int {
 		// the go.mod never finishes parsing at all.
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own $GOFLAGS validation
-		// rejects outright (see goflagsMalformed) makes every module-aware
-		// go subcommand — build, list, get, mod download, mod tidy, test,
-		// everything except `go env`/`go bug` — Fatal immediately with "go:
-		// parsing $GOFLAGS: non-flag ..." before it ever resolves a single
-		// module, let alone queries a checksum database. Same "cannot leak"
-		// reasoning as GOSUMDB=off and vendor mode below, just reached
+		// rejects outright — either a malformed shape (goflagsMalformed) or
+		// a shape-valid but unregistered flag name (goflagsRejectedByGo) —
+		// makes every module-aware go subcommand — build, list, get, mod
+		// download, mod tidy, test, everything except `go env`/`go bug` —
+		// Fatal immediately with "go: parsing $GOFLAGS: non-flag ..." or
+		// "go: parsing $GOFLAGS: unknown flag ..." before it ever resolves a
+		// single module, let alone queries a checksum database. Same
+		// "cannot leak" reasoning as GOSUMDB=off and vendor mode below, just
+		// reached
 		// because the build never gets past parsing its own flags.
 	case gosumdb == "off":
 		// GOSUMDB=off disables the checksum database entirely, for every
@@ -513,6 +520,53 @@ func goEnv(dir, name string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
+}
+
+// goflagsRejectedByGo asks a real go subcommand whether it rejects goflags
+// outright for a reason goflagsMalformed's static shape check can't see:
+// cmd/go/internal/base.InitGOFLAGS doesn't stop at the shape check (every
+// token looks like "-x"/"-x=value") — after that, it also Fatals with `go:
+// parsing $GOFLAGS: unknown flag -x` the moment a shape-valid entry's flag
+// name isn't registered by ANY go subcommand at all (hasFlag walks the
+// whole command tree: build, get, list, mod, test, everything). Verified
+// live: GOFLAGS="-notarealflag=vendor" (shape-valid — goflagsMalformed
+// waves it through — and a very plausible typo of "-mod=vendor", the same
+// mistake class run #439's "-mod mod" fix already covers one shape of)
+// makes a real `go build`/`go list -m all`/`go mod download` Fatal
+// immediately with exactly that "unknown flag" message, before resolving a
+// single module — yet pre-fix goprivaudit still ran its own audit and
+// reported a SUMDB LEAK for a checksum-database query that can never
+// actually happen, the same "active wrong claim" failure class as every
+// other goflagsBad/vendorActive/GOSUMDB=off skip in this file.
+//
+// This tool can't replicate hasFlag's check statically without importing
+// cmd/go's own internal packages (not importable from outside the go
+// toolchain, and the exact registered-flag set shifts across go versions
+// anyway) — so instead of guessing, it asks the real `go` binary on PATH
+// directly: `go list -m`, bare, with no module pattern, only ever reports
+// the current directory's own main module straight off go.mod (`go help
+// list`) — it never resolves a require, so it never contacts GOPROXY or
+// GOSUMDB and returns instantly even with GOPROXY pointed at an
+// unreachable address (verified live), while still running through the
+// exact same InitGOFLAGS validation every other module-aware subcommand
+// does, since that check happens before any subcommand-specific work at
+// all. A failure for any other reason (a broken go.mod, `go` missing from
+// PATH, a permission error) doesn't carry the "parsing $GOFLAGS:" prefix
+// and is treated as "not a GOFLAGS rejection" — fail open, same convention
+// goEnv/gitVar already use elsewhere in this file. Skipped entirely when
+// goflags is empty (the common case — no GOFLAGS set at all), so an
+// ordinary run doesn't pay for an extra subprocess it can't possibly need.
+func goflagsRejectedByGo(dir, goflags string) bool {
+	if goflags == "" {
+		return false
+	}
+	cmd := exec.Command("go", "list", "-m")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), "GOFLAGS="+goflags)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	return strings.Contains(stderr.String(), "parsing $GOFLAGS:")
 }
 
 // gitVar shells out to `git var <name>`, the same "ask the real tool
