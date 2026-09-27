@@ -172,7 +172,10 @@ experimental-gains/claude-plugins`, same install command with `copilot`).
 
 Three independent signals, any one is enough to flag a module.
 
-**Git config: insteadOf.** It looks for git `insteadOf`/`pushInsteadOf` rewrites in the same config
+**Git config: insteadOf.** It looks for git `insteadOf` rewrites (not
+`pushInsteadOf` — that only rewrites push URLs, never the fetch/clone path
+`go get` actually uses, so it's deliberately not treated as a signal; see
+`schemeOf`'s neighboring doc comment in `gitconfig.go`) in the same config
 files the real `git config` global tier reads — `$XDG_CONFIG_HOME/git/config`
 (or `~/.config/git/config` when that's unset) and `~/.gitconfig`, both of
 which apply together, not one-or-the-other — plus the module's local

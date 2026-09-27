@@ -507,6 +507,55 @@ func TestIncludeIfMatchesLinkedWorktreeGitdir(t *testing.T) {
 	}
 }
 
+// TestIncludeIfMatchesGitdirSymlinkedAncestor pins git-config(1)'s
+// documented dual-form gitdir matching rule ("Both the symlink & realpath
+// versions of paths will be matched outside of $GIT_DIR. E.g. if ~/git is
+// a symlink to /mnt/storage/git, both gitdir:~/git and
+// gitdir:/mnt/storage/git will match."). Verified live: with a real
+// symlinked ancestor directory and a real repo underneath it, `git config
+// --get-regexp` (invoked from the symlinked path) resolves an
+// `[includeIf "gitdir:<realpath>/**"]` entry written using the fully
+// resolved (symlink-free) path — not just the literal, as-given symlinked
+// path already covered by every other includeIf test in this file. Before
+// this fix, includeIfMatchesGitdir only ever tried the literal path
+// (resolveGitDir's return value, computed via filepath.Abs, which never
+// resolves symlinks), so a module checked out under a symlinked ancestor
+// directory — a real, mainstream setup: macOS's /tmp is a symlink to
+// /private/tmp, NixOS profiles and Nix-managed dev shells are pervasively
+// symlink-based, and a Docker bind mount or a monorepo's symlink-farmed
+// package layout are both common too — silently missed a real
+// credential-helper/insteadOf/extraHeader signal gated by a realpath-based
+// includeIf pattern, exactly the false-negative failure class this
+// practice looks for.
+func TestIncludeIfMatchesGitdirSymlinkedAncestor(t *testing.T) {
+	real := t.TempDir()
+	parent := t.TempDir()
+	symlinked := filepath.Join(parent, "symlinked")
+	if err := os.Symlink(real, symlinked); err != nil {
+		t.Skipf("symlinks not supported on this filesystem: %v", err)
+	}
+	moduleDir := filepath.Join(symlinked, "myrepo")
+	if err := os.MkdirAll(filepath.Join(moduleDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	realPattern := "gitdir:" + filepath.ToSlash(real) + "/**"
+	if !includeIfMatches(realPattern, moduleDir, "") {
+		t.Errorf("includeIfMatches(%q, %q) = false, want true (real git also matches the realpath-resolved form of a gitdir path reached through a symlinked ancestor)", realPattern, moduleDir)
+	}
+
+	literalPattern := "gitdir:" + filepath.ToSlash(symlinked) + "/**"
+	if !includeIfMatches(literalPattern, moduleDir, "") {
+		t.Errorf("includeIfMatches(%q, %q) = false, want true (the literal, as-given symlinked form must still match, same as before this fix)", literalPattern, moduleDir)
+	}
+
+	other := t.TempDir()
+	unrelatedPattern := "gitdir:" + filepath.ToSlash(other) + "/**"
+	if includeIfMatches(unrelatedPattern, moduleDir, "") {
+		t.Errorf("includeIfMatches(%q, %q) = true, want false (an unrelated realpath must not match)", unrelatedPattern, moduleDir)
+	}
+}
+
 // writeHEAD writes a gitDir/HEAD file, either a symbolic ref to branch (if
 // branch != "") or a detached-HEAD-style raw commit SHA (if branch == "").
 func writeHEAD(t *testing.T, gitDir, branch string) {

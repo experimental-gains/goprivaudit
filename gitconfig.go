@@ -941,13 +941,48 @@ func includeIfMatchesGitdir(caseInsensitive bool, pattern, moduleDir, configFile
 		}
 		gitDir = filepath.Join(abs, ".git")
 	}
-	target := filepath.ToSlash(gitDir)
 	pattern = expandGitdirPattern(pattern, configFileDir)
 	if caseInsensitive {
 		pattern = strings.ToLower(pattern)
-		target = strings.ToLower(target)
 	}
-	return matchGitdirGlob(pattern, target)
+	for _, candidate := range gitdirMatchCandidates(gitDir) {
+		target := filepath.ToSlash(candidate)
+		if caseInsensitive {
+			target = strings.ToLower(target)
+		}
+		if matchGitdirGlob(pattern, target) {
+			return true
+		}
+	}
+	return false
+}
+
+// gitdirMatchCandidates returns the path form(s) a "gitdir:"/"gitdir/i:"
+// includeIf pattern is matched against for a resolved $GIT_DIR: the literal
+// path as discovered (gitDir, exactly as resolveGitDir/filepath.Abs
+// returned it, with any symlinks in its ancestor directories left
+// unresolved) and, in addition, that same path fully resolved through its
+// symlinks — per git-config(1)'s own documented rule: "Both the symlink &
+// realpath versions of paths will be matched outside of $GIT_DIR. E.g. if
+// ~/git is a symlink to /mnt/storage/git, both gitdir:~/git and
+// gitdir:/mnt/storage/git will match." Verified live (see
+// TestIncludeIfMatchesGitdirSymlinkedAncestor's doc comment): a real
+// includeIf entry written using the realpath-resolved form of a repo
+// reached through a symlinked ancestor directory (e.g. macOS's /tmp ->
+// /private/tmp, a Nix-managed profile, or a monorepo's symlink-farmed
+// package layout) is honored by real git even when invoked via the
+// symlinked path, but was invisible to this tool before this fix, which
+// only ever tried the one literal path form. filepath.EvalSymlinks failing
+// (gitDir doesn't exist, a permission error, or it genuinely has no
+// symlink components so the resolved form is identical) just means no
+// second candidate is added — the existing literal-path match still
+// applies unchanged, so this only ever adds a match, never removes one.
+func gitdirMatchCandidates(gitDir string) []string {
+	candidates := []string{gitDir}
+	if resolved, err := filepath.EvalSymlinks(gitDir); err == nil && resolved != gitDir {
+		candidates = append(candidates, resolved)
+	}
+	return candidates
 }
 
 // includeIfMatchesOnbranch implements the "onbranch:"/"onbranch/i:"
