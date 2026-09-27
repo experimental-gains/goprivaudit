@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"reflect"
 	"strings"
@@ -19,6 +20,15 @@ func TestSchemeOf(t *testing.T) {
 		{"ext::sh -c 'git-upload-pack %S /repo'", "ext"},
 		{"git@github.com:myorg/", "ssh"}, // go.dev FAQ's documented SCP-like form
 		{"user@host.example.com:path/to/repo.git", "ssh"},
+		// SCP-like shorthand with no "user@" at all (e.g. an SSH config Host
+		// alias that already carries the username) is still ssh per real
+		// git's url_is_local_not_ssh (colon before any slash, no "@" check
+		// at all) — verified live against real git in
+		// TestSchemeOfScpShorthandWithoutUserAgainstRealGit. This file's
+		// pre-fix schemeOf required a leading "user@" and misclassified
+		// this as "file".
+		{"host.xz:path/to/repo", "ssh"},
+		{"internal-git:myorg/private.git", "ssh"},
 		{"/srv/git/mirror.git", "file"},
 		{"../local/mirror.git", "file"},
 		{"", ""},
@@ -246,6 +256,54 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunStillFlagsLeakForScpShorthandWithoutUserWhenFileProtocolBlocked is a
+// regression test for the schemeOf false negative fixed above: an insteadOf
+// target written as the SCP-like shorthand with no "user@" prefix (e.g. an
+// SSH config Host alias that already carries the username — a real,
+// documented git-clone(1) form, not a contrived one) must still be
+// classified as ssh, not "file". Before the fix, schemeOf misread this
+// exact config as the "file" transport, and a real-world, unrelated
+// hardening setting like `protocol.file.allow = never` (a long-recommended
+// git security default — see CVE-2017-1000117 and git's own 2.38+ default
+// tightening of file/ext protocol.allow) then made
+// suppressProtocolBlockedInsteadOf wrongly treat this genuine,
+// ssh-authenticated, uncovered-by-GOPRIVATE fetch as blocked, silently
+// dropping a real SUMDB LEAK down to "no issues found" — confirmed live
+// end-to-end against the actual goprivaudit binary (see this fix's commit
+// message for the full transcript). `protocol.file.allow=never` has no
+// effect on the real ssh fetch this config performs (verified live: the
+// same setting DOES block a genuine bare local-path insteadOf target, see
+// TestRunSuppressesLeakWhenProtocolAllowConfigBlocksTheInsteadOfTarget's
+// sibling scenario), so the leak must survive.
+func TestRunStillFlagsLeakForScpShorthandWithoutUserWhenFileProtocolBlocked(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.corp.example.com/org/private-lib v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "internal-git:"]
+	insteadOf = https://git.corp.example.com/
+
+[protocol "file"]
+	allow = never
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.corp.example.com/org/private-lib") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
 // TestGitProtocolAllowedAgainstRealGit is an oracle-diff test against the
 // real `git` binary: for a representative scheme/policy combination, does
 // a real `git ls-remote` actually fail with "fatal: transport '<scheme>'
@@ -305,5 +363,43 @@ func TestGitProtocolAllowedAgainstRealGit(t *testing.T) {
 				t.Errorf("real git blocked=%v, gitProtocolAllowed says blocked=%v (git output: %s)", blockedByGit, blockedByModel, out)
 			}
 		})
+	}
+}
+
+// TestSchemeOfScpShorthandWithoutUserAgainstRealGit is an oracle-diff test
+// against real git for schemeOf itself (not just gitProtocolAllowed): does a
+// real `git ls-remote` on an SCP-like target with no "user@" prefix actually
+// route over ssh, or does it treat the target as a local filesystem path (as
+// this file's pre-fix schemeOf assumed)? Distinguishes the two by pointing
+// GIT_SSH_COMMAND at a stand-in script that records its own invocation to a
+// marker file before failing — if git never launches an ssh child process at
+// all (the "file" transport reads straight off disk with no subprocess),
+// the marker is never written. Verified live (see this fix's commit
+// message) with the real ssh binary and GIT_TRACE too; this test only needs
+// GIT_SSH_COMMAND, so it has no dependency on an ssh binary being installed
+// or on real network access.
+func TestSchemeOfScpShorthandWithoutUserAgainstRealGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	dir := t.TempDir()
+	marker := dir + "/ssh-invoked"
+	script := dir + "/fake-ssh.sh"
+	if err := os.WriteFile(script, []byte("#!/bin/sh\ntouch \""+marker+"\"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	url := "host.xz:path/to/repo"
+	if got := schemeOf(url); got != "ssh" {
+		t.Fatalf("schemeOf(%q) = %q, want %q", url, got, "ssh")
+	}
+
+	cmd := exec.Command("git", "ls-remote", url)
+	cmd.Env = append(cmd.Environ(), "GIT_SSH_COMMAND="+script)
+	_ = cmd.Run()
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Errorf("real git never invoked the ssh command for %q — it did not route over ssh as schemeOf claims (marker missing: %v)", url, err)
 	}
 }

@@ -381,15 +381,17 @@ func splitConfigKey(key string) (section, subsection, name string, ok bool) {
 // every form git-config(1)/gitremote-helpers(7) document: an explicit
 // "<scheme>://" prefix; the "ext::<command>" form (git treats "ext" as its
 // own scheme despite the missing "//" — see protocol.allow's docs); the
-// "user@host:path" SCP-like shorthand, which git resolves to the ssh
-// transport with no explicit scheme at all and is the *exact* form go.dev's
-// own FAQ recommends for insteadOf (`[url "git@github.com:"] insteadOf =
-// https://github.com/`, already this file's primary documented example);
-// and a bare filesystem path (absolute or relative, no "@"/"://" at all),
-// which git treats as the "file" transport. Returns "" when the form can't
-// be determined with confidence, so callers fail open (treat the transport
-// as allowed, i.e. don't suppress a signal) rather than risk misreading a
-// real one as protocol-blocked.
+// "[user@]host.xz:path" SCP-like shorthand, which git resolves to the ssh
+// transport with no explicit scheme at all and is the form go.dev's own FAQ
+// recommends for insteadOf (`[url "git@github.com:"] insteadOf =
+// https://github.com/`, already this file's primary documented example) —
+// though, per git's own disambiguation rule (see below), the leading
+// "user@" is only ever a stylistic convention, never load-bearing; and a
+// bare filesystem path (absolute or relative, no "://" at all), which git
+// treats as the "file" transport. Returns "" when the form can't be
+// determined with confidence, so callers fail open (treat the transport as
+// allowed, i.e. don't suppress a signal) rather than risk misreading a real
+// one as protocol-blocked.
 func schemeOf(url string) string {
 	url = strings.TrimSpace(url)
 	if url == "" {
@@ -413,16 +415,40 @@ func schemeOf(url string) string {
 		}
 		return scheme
 	}
-	// SCP-like shorthand: [user@]host.xz:path/to/repo (git-clone(1)). Only
-	// recognized with a leading "user@" host, matching how git itself
-	// disambiguates this from a Windows-style absolute path ("C:\...") or a
-	// bare relative path containing a colon.
-	if at := strings.Index(url, "@"); at >= 0 {
-		rest := url[at+1:]
-		if colon := strings.Index(rest, ":"); colon >= 0 {
-			if slash := strings.Index(rest, "/"); slash < 0 || colon < slash {
-				return "ssh"
-			}
+	// No "scheme://" prefix: disambiguate the SCP-like shorthand
+	// ([user@]host.xz:path/to/repo) from a bare local filesystem path the
+	// same way real git does — url.c's url_is_local_not_ssh, verbatim
+	// modulo the Windows drive-letter carve-out (irrelevant here: like
+	// isDirectoryPath's own Windows note, a config containing one never
+	// parses at all on the Linux-only host this tool runs on). That rule
+	// keys entirely off whether a ':' appears before the first '/', with
+	// no role for "@" at all: a colon-before-slash (or no colon at all)
+	// means "file", anything else means "ssh". This file's pre-fix version
+	// instead required an explicit "user@" prefix before ever considering
+	// "ssh" — plausible-looking (go.dev's own FAQ snippet always includes
+	// one) but wrong: verified live that a real `git ls-remote
+	// host.xz:path/to/repo`, with NO "user@" at all (a real, documented
+	// git-clone(1) form — e.g. a hand-configured SSH config Host alias
+	// that already carries the username, a common way to avoid
+	// hardcoding it in .gitconfig), genuinely launches an ssh subprocess
+	// targeting "host.xz" (confirmed via GIT_TRACE and a GIT_SSH_COMMAND
+	// logging stand-in), not a local file-transport no-op. Pre-fix,
+	// schemeOf misread that exact config as "file" — and with a real,
+	// mainstream hardening setting like `protocol.file.allow = never` (a
+	// long-recommended git security default, unrelated to ssh) in effect,
+	// suppressProtocolBlockedInsteadOf then treated the genuine,
+	// ssh-authenticated, uncovered-by-GOPRIVATE fetch as "blocked, cannot
+	// leak" and silently dropped a real SUMDB LEAK finding down to "no
+	// issues found" — confirmed live end-to-end against the actual
+	// goprivaudit binary — even though `protocol.file.allow=never` has no
+	// effect whatsoever on the real ssh fetch this config performs
+	// (separately confirmed live: the same never-allow setting DOES block
+	// a genuine bare local-path remote, "fatal: transport 'file' not
+	// allowed", proving the setting itself works exactly as documented —
+	// just not against this URL).
+	if colon := strings.Index(url, ":"); colon >= 0 {
+		if slash := strings.Index(url, "/"); slash < 0 || colon < slash {
+			return "ssh"
 		}
 	}
 	return "file"
