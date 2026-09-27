@@ -789,6 +789,30 @@ func TestMatchGitdirGlobExactNoWildcard(t *testing.T) {
 	}
 }
 
+// TestMatchGitdirGlobBangNegation pins that a "[!...]" bracket-class
+// negation in an includeIf gitdir pattern segment is honored the way real
+// git's wildmatch() honors it (POSIX fnmatch-style "!" negation), not
+// silently treated as an ordinary literal-character class the way Go's
+// path.Match treats "!" on its own (verified live: `git config --file`
+// resolves `includeIf "gitdir:**/proj[!0-9]/**"` for a directory named
+// "projA", and separately, real git does NOT treat "[^0-9]" as negation —
+// so translating "^" instead of "!" would not be a usable workaround for a
+// real gitconfig either). See gitBangToCaret's doc comment for the
+// path.Match divergence this covers.
+func TestMatchGitdirGlobBangNegation(t *testing.T) {
+	if !matchGitdirGlob("**/proj[!0-9]/**", "home/projA/repo") {
+		t.Error(`matchGitdirGlob("**/proj[!0-9]/**", "home/projA/repo") = false, want true ("!" negation: "projA" has no digit where the class is)`)
+	}
+	if matchGitdirGlob("**/proj[!0-9]/**", "home/proj1/repo") {
+		t.Error(`matchGitdirGlob("**/proj[!0-9]/**", "home/proj1/repo") = true, want false ("proj1" has a digit where the negated class forbids one)`)
+	}
+	// "[^...]" is an ordinary (non-negated) class to real git, containing a
+	// literal "^" plus the listed characters — it must stay untranslated.
+	if matchGitdirGlob("**/proj[^0-9]/**", "home/projA2/repo") {
+		t.Error(`matchGitdirGlob("**/proj[^0-9]/**", "home/projA2/repo") = true, want false (real git does not treat "[^...]" as negation)`)
+	}
+}
+
 // TestPrivatePrefixesFromGitConfigInlineComments covers a hand-edited
 // dotfile pattern: inline comments on both a section header and a value
 // line, both of which `git config --get` still parses correctly (verified

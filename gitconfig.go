@@ -1212,12 +1212,51 @@ func globMatchSegs(pSegs, tSegs []string) bool {
 		if len(tSegs) == 0 {
 			return false
 		}
-		if ok, err := path.Match(pSegs[0], tSegs[0]); err != nil || !ok {
+		if ok, err := path.Match(gitBangToCaret(pSegs[0]), tSegs[0]); err != nil || !ok {
 			return false
 		}
 		pSegs, tSegs = pSegs[1:], tSegs[1:]
 	}
 	return len(tSegs) == 0
+}
+
+// gitBangToCaret rewrites a "[!..." bracket-class negation at the start of
+// any "[...]" character class in a single gitdir glob path segment to
+// path.Match's own "[^..." negation spelling. Real git's includeIf gitdir
+// matcher is wildmatch(), which follows the POSIX fnmatch() convention of
+// "!" (not "^") for bracket-class negation — confirmed live: with a config
+// `includeIf "gitdir:**/proj[!0-9]/**"`, `git config --file` (run from
+// inside a directory named e.g. "projA") resolves the included file's
+// settings, i.e. real git treats "[!0-9]" as "not a digit" and matches
+// "projA". Go's path.Match (which globMatchSegs otherwise delegates
+// straight to for one path segment at a time — see matchGitdirGlob) only
+// recognizes "^" for that same negation, per its own doc comment; it treats
+// a leading "!" inside a bracket expression as an ordinary literal member
+// of the class instead (verified live: path.Match("proj[!0-9]", "projA")
+// returns false, not an error — it silently means something different).
+// Before this fix, that meant any real includeIf gitdir pattern written
+// with POSIX "!" negation - the only form real git accepts as negation at
+// all, since real git was separately confirmed live to NOT treat "[^...]"
+// as negation, so that isn't a workaround a real gitconfig could use
+// instead - was silently never matched by this tool regardless of the
+// audited repo's actual path, a false negative that could hide a real
+// credential-helper/insteadOf/extraHeader signal an includeIf block
+// legitimately applies to the repo being audited.
+func gitBangToCaret(pattern string) string {
+	if !strings.Contains(pattern, "[!") {
+		return pattern
+	}
+	var b strings.Builder
+	b.Grow(len(pattern))
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		b.WriteByte(c)
+		if c == '[' && i+1 < len(pattern) && pattern[i+1] == '!' {
+			b.WriteByte('^')
+			i++
+		}
+	}
+	return b.String()
 }
 
 // privatePrefixesFromConfigFile reads the git config file at path and

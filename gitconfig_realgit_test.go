@@ -182,6 +182,71 @@ func TestIncludeIfGitdirRelativePatternAgainstRealGit(t *testing.T) {
 	}
 }
 
+// TestIncludeIfGitdirBangNegationAgainstRealGit is an oracle-diff test for
+// a "[!...]" bracket-class negation inside an includeIf gitdir pattern
+// against the real `git` binary — the same style of comparison
+// TestIncludeIfGitdirRelativePatternAgainstRealGit uses for the "./..."
+// relative form, but targeting gitBangToCaret's fix instead: real git's
+// wildmatch() (unlike Go's path.Match, which globMatchSegs otherwise
+// delegates straight to) treats a leading "!" right after "[" in a bracket
+// expression as negation, the POSIX fnmatch() convention. A directory
+// whose matching path segment has no digit where the class sits should
+// match a real `includeIf "gitdir:**/proj[!0-9]/**"`, and one that does
+// have a digit there should not — both confirmed against real git config
+// resolution below, not asserted from spec text alone.
+func TestIncludeIfGitdirBangNegationAgainstRealGit(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+
+	home := t.TempDir()
+	includedFile := filepath.Join(home, "gitconfig-included")
+	if err := os.WriteFile(includedFile, []byte("[credential \"https://marker.example\"]\n\thelper = /bin/true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	globalFile := filepath.Join(home, "gitconfig-global")
+	cond := `gitdir:**/proj[!0-9]/**`
+	if err := os.WriteFile(globalFile, []byte("[includeIf \""+cond+"\"]\n\tpath = "+includedFile+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		relDir string
+		want   bool
+	}{
+		{"projA/repo", true},  // no digit where the class sits: negation lets it through
+		{"proj1/repo", false}, // a digit where the class sits: negation excludes it
+	}
+
+	for _, c := range cases {
+		dir := filepath.Join(home, filepath.FromSlash(c.relDir))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		initCmd := exec.Command("git", "init", "-q")
+		initCmd.Dir = dir
+		initCmd.Env = append(os.Environ(), "GIT_CONFIG_NOSYSTEM=1", "HOME="+home)
+		if out, err := initCmd.CombinedOutput(); err != nil {
+			t.Fatalf("git init in %q: %v: %s", dir, err, out)
+		}
+
+		cmd := exec.Command("git", "config", "--get-all", "credential.https://marker.example.helper")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL="+globalFile, "GIT_CONFIG_NOSYSTEM=1", "HOME="+home)
+		out, err := cmd.Output()
+		realGitMatches := err == nil && strings.TrimSpace(string(out)) == "/bin/true"
+
+		if realGitMatches != c.want {
+			t.Fatalf("test setup check failed for %q: real git resolved the marker helper = %v, want %v (fix the fixture, not the assertion below)", c.relDir, realGitMatches, c.want)
+		}
+
+		got := includeIfMatches(cond, dir, filepath.Dir(globalFile))
+		if got != realGitMatches {
+			t.Errorf("%q: includeIfMatches(%q) = %v, want %v (real git: %v)", c.relDir, cond, got, realGitMatches, realGitMatches)
+		}
+	}
+}
+
 // extractRawInsteadOfValue mirrors privatePrefixesFromGitConfig's scan loop
 // up to (not including) normalizeToModulePrefix/isKnownPublicHost, so the
 // oracle-diff test above compares the raw joined-and-comment-stripped value
