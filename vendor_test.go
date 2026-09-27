@@ -39,6 +39,47 @@ func TestExplicitModFlag(t *testing.T) {
 	}
 }
 
+func TestGoflagsMalformed(t *testing.T) {
+	cases := []struct {
+		goflags string
+		want    bool
+	}{
+		{"", false},
+		{"-mod=vendor", false},
+		{"-race -mod=vendor -v", false},
+		{`"-mod=mod"`, false},
+		{`'-mod=vendor'`, false},
+		// The exact live-verified divergence: a space-separated "-mod
+		// vendor" splits into two GOFLAGS entries, "-mod" and "vendor" —
+		// the second doesn't start with "-" at all, which real go's
+		// InitGOFLAGS Fatals on immediately for every module-aware
+		// subcommand (`go: parsing $GOFLAGS: non-flag "vendor"`), unlike a
+		// real argv where "-mod vendor" is a valid two-token flag/value
+		// pair. GOFLAGS entries are never re-paired with a following token
+		// the way a real command line is.
+		{"-mod vendor", true},
+		{"-mod mod", true},
+		{"-race -mod mod", true},
+		// A bare word with no leading dash at all is invalid on its own.
+		{"vendor", true},
+		// Real go's own carve-outs for a bare/doubled/equals-only dash.
+		{"-", true},
+		{"--", true},
+		{"---mod=vendor", true},
+		{"-=vendor", true},
+		{"--=vendor", true},
+		// A flag with no value at all is still shaped like a flag (no
+		// following bare-word token to trip the check).
+		{"-mod", false},
+		{"-mod=", false},
+	}
+	for _, c := range cases {
+		if got := goflagsMalformed(c.goflags); got != c.want {
+			t.Errorf("goflagsMalformed(%q) = %v, want %v", c.goflags, got, c.want)
+		}
+	}
+}
+
 func TestGoVersionAtLeast(t *testing.T) {
 	cases := []struct {
 		version string

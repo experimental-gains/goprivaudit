@@ -151,6 +151,62 @@ func quotedFields(s string) []string {
 	return f
 }
 
+// goflagsMalformed reports whether goflags contains an entry the real go
+// command's own $GOFLAGS validation rejects outright, mirroring
+// cmd/go/internal/base.InitGOFLAGS's shape check field-for-field: every
+// token must itself look like a flag ("-x", "--x", "-x=value", or
+// "--x=value"); anything else — a bare word, a lone "-"/"--"/"---", or an
+// "="-only token like "-=" / "--=" — is invalid on its own, since GOFLAGS
+// entries are never re-paired with a following token the way a real argv's
+// "-flag value" form is.
+//
+// This matters because InitGOFLAGS calls Fatalf("go: parsing $GOFLAGS:
+// non-flag %q", f) the instant it finds one, for every go subcommand except
+// `go env`/`go bug` (which deliberately swallow the error so a user
+// debugging their environment can still see it) — verified live: a
+// perfectly natural-looking mistake, GOFLAGS="-mod mod" (copying the
+// command-line spacing of `go build -mod mod`, which is a two-token argv
+// pair there but a single self-contained GOFLAGS entry here — GOFLAGS
+// entries are never re-paired with a following token), makes `go build`,
+// `go list -m all`, and `go mod download` all fail immediately with `go:
+// parsing $GOFLAGS: non-flag "mod"` (confirmed both with and without a
+// reachable network), while the identical `GOFLAGS="-mod=mod"` (the "="
+// form) works exactly as documented. Before this function existed,
+// explicitModFlag simply didn't recognize "-mod"/"mod" as a "-mod="
+// prefix match, so vendorModeActive silently fell through to the
+// auto-vendor default — reporting whatever that default happened to
+// compute (vendor mode active, or not) as if the build would actually run,
+// when in fact `go` dies before ever resolving a single module, so no
+// sumdb query can happen either way. Confirmed live end-to-end against the
+// actual goprivaudit binary: with no vendor/ directory present (so the
+// auto-default is false) and a real insteadOf-based private-auth signal
+// uncovered by GOPRIVATE, goprivaudit reported "SUMDB LEAK" for exactly
+// this GOFLAGS value — a false positive for a checksum-database query that
+// structurally cannot happen, since the real go command never gets past
+// parsing its own flags.
+//
+// Deliberately scoped to exactly InitGOFLAGS's shape check, not
+// SetFromGOFLAGS's separate "flag needs an argument" check: a bare "-mod"
+// with no "=value" at all is shaped like a valid flag (so InitGOFLAGS lets
+// it through) but SetFromGOFLAGS still fails a real `go list`/`go build`
+// outright once it tries to apply it (verified live: exit status 2, "flag
+// needs an argument: -mod"). That's a real divergence too, but a much
+// narrower typo (omitting "=value" entirely, not just writing it with a
+// space) than the "-mod mod" shape this function targets, and detecting it
+// generically would require knowing which of every go subcommand's flags
+// are boolean vs. value-taking — out of scope here.
+func goflagsMalformed(goflags string) bool {
+	for _, f := range quotedFields(goflags) {
+		switch {
+		case !strings.HasPrefix(f, "-"),
+			f == "-", f == "--", strings.HasPrefix(f, "---"),
+			strings.HasPrefix(f, "-="), strings.HasPrefix(f, "--="):
+			return true
+		}
+	}
+	return false
+}
+
 // goVersionAtLeast reports whether a go.mod "go" directive's version string
 // (e.g. "1.24.4" or "1.14") is at least major.minor. Returns false for an
 // empty or unparsable version (a go.mod missing its `go` directive predates

@@ -41,6 +41,10 @@
 // That vendor auto-default does not apply inside an active go.work
 // workspace, so it's only honored when GOWORK is unset/"off" (or an
 // explicit -mod=vendor override is present, which applies either way).
+// Both are also skipped when GOFLAGS itself is malformed in a way the real
+// go command's own validation rejects outright (see goflagsMalformed) —
+// every module-aware go subcommand Fatals before resolving anything in
+// that case, so no sumdb query can happen either.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -222,6 +226,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
+	goflagsBad := goflagsMalformed(goflags)
 
 	// GOPROXY is still read here purely so the long-documented -proxy flag
 	// keeps parsing for any existing caller that passes it explicitly; its
@@ -236,6 +241,15 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	var r Report
 	switch {
+	case goflagsBad:
+		// A GOFLAGS entry the real go command's own $GOFLAGS validation
+		// rejects outright (see goflagsMalformed) makes every module-aware
+		// go subcommand — build, list, get, mod download, mod tidy, test,
+		// everything except `go env`/`go bug` — Fatal immediately with "go:
+		// parsing $GOFLAGS: non-flag ..." before it ever resolves a single
+		// module, let alone queries a checksum database. Same "cannot leak"
+		// reasoning as GOSUMDB=off and vendor mode below, just reached
+		// because the build never gets past parsing its own flags.
 	case gosumdb == "off":
 		// GOSUMDB=off disables the checksum database entirely, for every
 		// module — per `go help module-auth`, no sumdb query is ever made

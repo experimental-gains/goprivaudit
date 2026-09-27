@@ -592,6 +592,49 @@ github.com/myorg/internal-tool
 	}
 }
 
+// TestRunMalformedGoflagsNoLeak is the regression test for a real false
+// positive found by testing against real go: GOFLAGS="-mod mod" (the
+// command-line spacing of `go build -mod mod`, a natural mistake since
+// GOFLAGS entries are never re-paired with a following token the way a
+// real argv is) makes real go's own $GOFLAGS validation split it into two
+// entries, "-mod" and "mod" — the second doesn't start with "-" at all, so
+// `go build`/`go list -m all`/`go mod download` all Fatal immediately with
+// `go: parsing $GOFLAGS: non-flag "mod"` (verified live), before ever
+// resolving a module or querying a checksum database. Pre-fix,
+// explicitModFlag didn't recognize either token as a "-mod=" override, so
+// vendorModeActive fell through to the auto-default — here, with no
+// vendor/ directory present, that default is false, so the audit ran
+// normally and reported a SUMDB LEAK for a query that can never actually
+// happen, since the real go command dies before getting anywhere near it.
+func TestRunMalformedGoflagsNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "-mod mod",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when GOFLAGS is malformed (go itself would Fatal before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active
