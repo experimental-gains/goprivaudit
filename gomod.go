@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -58,19 +59,33 @@ func parseRequires(data []byte) []requireEntry {
 
 // parseRequireLine parses a single require-block entry (or the inline form
 // of a single-line require directive): "<path> <version>", version taken
-// as the second whitespace-delimited field. Module paths never contain
-// spaces (module.CheckPath forbids it), so — unlike a replace target,
-// which can be an arbitrary local filesystem path — a require path never
-// needs quoting in a real go.mod, and a plain field split is enough to
-// separate it from its version.
+// as the second whitespace-delimited field.
+//
+// A require path never *needs* quoting in a real go.mod (module paths
+// can't contain spaces — module.CheckPath forbids it), but go.mod's real
+// lexer (golang.org/x/mod/modfile) still allows one to be written as a
+// double- or backtick-quoted Go string literal purely as a styling choice
+// — the same optional-quoting allowance firstField already documents and
+// handles for a replace target/tool path. A plain strings.Fields (this
+// function's pre-fix form) doesn't unquote at all, so a quoted path
+// (needlessly quoted or not) was kept with its literal quote characters
+// intact — e.g. `require "github.com/org/repo" v1.0.0` parsed to
+// requireEntry{path: `"github.com/org/repo"`}, not
+// requireEntry{path: "github.com/org/repo"}. Confirmed live: `go mod edit
+// -fmt`/`go build` both normalize that exact line straight to the
+// unquoted form, resolving the real module — while goprivaudit's mangled,
+// quote-still-attached path can never match a real private-auth-signal
+// prefix or GOPRIVATE/GONOSUMDB pattern for the module's real host,
+// silently dropping a real require entry out of the audit entirely (a
+// missed SUMDB LEAK, not just a cosmetic parse difference).
 func parseRequireLine(s string) (requireEntry, bool) {
-	fields := strings.Fields(s)
-	if len(fields) == 0 {
+	path, rest := firstFieldAndRest(s)
+	if path == "" {
 		return requireEntry{}, false
 	}
-	e := requireEntry{path: fields[0]}
-	if len(fields) > 1 {
-		e.version = fields[1]
+	e := requireEntry{path: path}
+	if v := firstField(rest); v != "" {
+		e.version = v
 	}
 	return e, true
 }
@@ -299,46 +314,91 @@ func stripComment(line string) string {
 // A naive whitespace split truncates that at the space and leaves a stray
 // quote character, so a quoted token is unquoted first.
 func firstField(s string) string {
+	field, _ := firstFieldAndRest(s)
+	return field
+}
+
+// firstFieldAndRest is firstField's rest-preserving form: it also returns
+// whatever of s came after the first field (with the field's own leading
+// whitespace already trimmed off the front of s, but not off the returned
+// rest), so a caller that needs a second field — parseRequireLine's
+// version, addReplace's old-path version — can keep scanning from exactly
+// where the first field ended, whether or not that field was quoted. This
+// matters because a quoted field's length in s is not the same as its
+// unquoted value's length (an escape like \x2e collapses four source bytes
+// into one decoded byte, and even an unescaped quoted token like
+// `"foo"` is two bytes longer than its value `foo`) — cutting rest at
+// len(field) instead of at the real end-of-token position would silently
+// re-scan part of the quoted token itself as if it were the next field.
+func firstFieldAndRest(s string) (field, rest string) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return ""
+		return "", ""
 	}
 	if s[0] == '"' || s[0] == '`' {
-		if tok, ok := leadingQuotedString(s); ok {
-			return tok
+		if tok, consumed, ok := leadingQuotedString(s); ok {
+			return tok, s[consumed:]
 		}
 	}
 	fields := strings.Fields(s)
 	if len(fields) == 0 {
-		return ""
+		return "", ""
 	}
-	return fields[0]
+	return fields[0], s[len(fields[0]):]
 }
 
 // leadingQuotedString parses a double- or backtick-quoted Go string literal
-// at the start of s and returns its unquoted value. Double-quoted strings
-// honor backslash escapes (e.g. \" \\); backtick-quoted raw strings don't.
-func leadingQuotedString(s string) (string, bool) {
+// at the start of s and returns its unquoted value plus the number of bytes
+// of s it consumed (including both quote characters). Backtick-quoted raw
+// strings carry their content verbatim, no escapes at all.
+//
+// Double-quoted strings go through strconv.Unquote — the same function
+// golang.org/x/mod/modfile's own parseString (rule.go) uses for this —
+// rather than a hand-rolled "copy the byte after a backslash literally"
+// unescaper (this function's pre-fix shape). That naive approach is only
+// correct for the two escapes whose decoded byte equals the character
+// following the backslash (\\ and \"); every other Go string escape
+// decodes to something else entirely — \t is a tab (0x09), not the letter
+// 't'; \xHH/\uHHHH/\UHHHHHHHH and octal \NNN decode a hex/unicode/
+// octal-coded byte or rune, not a copy of their own digits. Confirmed
+// live: a go.mod with `require "github\x2ecom/pkg/errors" v0.9.1` (a
+// real, existing dependency, its module path's literal "." hex-escaped
+// for no reason other than an AI-generated or hand-written go.mod's
+// unusual styling) is accepted by `go build`/`go mod edit -fmt`, both of
+// which rewrite it straight to the plain, unquoted `require
+// github.com/pkg/errors v0.9.1` — confirming the real go toolchain
+// decodes \x2e as "." and resolves the intended, real module, while this
+// function's pre-fix byte-literal unescaper turned the same token into
+// "githubx2ecom/pkg/errors" (the 'x' kept literally, "2e" copied as plain
+// digits) — a path that can never match the module's real private-auth
+// signal or GOPRIVATE/GONOSUMDB coverage, silently dropping a real
+// require entry out of the audit. The token-boundary scan (skip one byte
+// after any backslash, stop at an unescaped quote) already finds the same
+// closing-quote position real go's lexer does regardless of which
+// multi-byte escape appears, so only the decoded value needed fixing, not
+// the boundary search.
+func leadingQuotedString(s string) (value string, consumed int, ok bool) {
 	if s[0] == '`' {
 		if i := strings.IndexByte(s[1:], '`'); i >= 0 {
-			return s[1 : i+1], true
+			return s[1 : i+1], i + 2, true
 		}
-		return "", false
+		return "", 0, false
 	}
-	var b strings.Builder
 	for i := 1; i < len(s); i++ {
 		c := s[i]
 		if c == '\\' && i+1 < len(s) {
-			b.WriteByte(s[i+1])
 			i++
 			continue
 		}
 		if c == '"' {
-			return b.String(), true
+			v, err := strconv.Unquote(s[:i+1])
+			if err != nil {
+				return "", 0, false
+			}
+			return v, i + 1, true
 		}
-		b.WriteByte(c)
 	}
-	return "", false
+	return "", 0, false
 }
 
 // cutKeyword strips a go.mod block keyword (e.g. "require", "replace") from
@@ -430,15 +490,16 @@ func addReplace(out map[string][]replaceEntry, entry string) {
 	if !ok {
 		return
 	}
-	lhsFields := strings.Fields(strings.TrimSpace(lhs))
-	if len(lhsFields) == 0 {
-		return
-	}
-	oldPath := lhsFields[0]
-	oldVersion := ""
-	if len(lhsFields) > 1 {
-		oldVersion = lhsFields[1]
-	}
+	// The LHS's old path can be quoted too — `replace "example.com/foo"
+	// v1.0.0 => ../local` is real, `go build`/`go mod edit -fmt`-accepted
+	// syntax that normalizes to the unquoted form — so it goes through
+	// firstFieldAndRest the same as newPath below, not a raw
+	// strings.Fields split (this function's pre-fix form), which kept a
+	// quoted oldPath's literal quote characters and made it key this
+	// replace under a path resolveEffectiveModules' require-path lookup
+	// can never match.
+	oldPath, lhsRest := firstFieldAndRest(strings.TrimSpace(lhs))
+	oldVersion := firstField(lhsRest)
 	newPath := firstField(strings.TrimSpace(rhs))
 	if oldPath == "" || newPath == "" {
 		return

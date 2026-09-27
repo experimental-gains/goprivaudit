@@ -84,11 +84,54 @@ func TestParseRequiresCommentOnlyLineIgnored(t *testing.T) {
 	}
 }
 
+// TestParseRequiresQuotedPath is the regression case for a real bug:
+// parseRequireLine used to split a require line with strings.Fields
+// directly, never unquoting anything, even though go.mod's real lexer
+// (golang.org/x/mod/modfile) allows a require path to be written as a
+// double-quoted Go string literal purely as a styling choice — no space
+// or other reason to quote it required. Confirmed live: `go build`/`go
+// mod edit -fmt` both normalize `require "github.com/org/repo" v1.0.0`
+// straight to the unquoted `require github.com/org/repo v1.0.0`,
+// resolving the real module. Before this fix, parseRequireLine kept the
+// literal quote characters in the path
+// (`"github.com/org/repo"`, not `github.com/org/repo`), so it could never
+// match that module's real private-auth signal or GOPRIVATE/GONOSUMDB
+// coverage — silently dropping a real require entry (and any SUMDB LEAK
+// on it) out of the audit entirely.
+func TestParseRequiresQuotedPath(t *testing.T) {
+	got := parseRequires([]byte("module example.com/foo\n\nrequire \"github.com/org/repo\" v1.0.0\n"))
+	want := []requireEntry{{path: "github.com/org/repo", version: "v1.0.0"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestParseRequiresQuotedPathWithHexEscape covers the same gap as
+// TestParseRequiresQuotedPath one level deeper: even once a require path
+// goes through unquoting at all, it must decode real Go string-literal
+// escapes, not just copy the byte after a backslash literally. Confirmed
+// live: a go.mod with `require "github\x2ecom/pkg/errors" v0.9.1` (an
+// unusual but real, valid quoting of a completely ordinary dependency) is
+// accepted by `go build`/`go mod edit -fmt`, both of which normalize it
+// to the plain `require github.com/pkg/errors v0.9.1` — real go decodes
+// \x2e as the single byte ".". Before this fix, leadingQuotedString's
+// byte-literal unescaper decoded the same token to
+// "githubx2ecom/pkg/errors" (keeping 'x' and the literal digits "2e"), a
+// path that can never match the module's real private-auth signal or
+// GOPRIVATE/GONOSUMDB coverage.
+func TestParseRequiresQuotedPathWithHexEscape(t *testing.T) {
+	got := parseRequires([]byte(`module example.com/foo` + "\n\n" + `require "github\x2ecom/pkg/errors" v0.9.1` + "\n"))
+	want := []requireEntry{{path: "github.com/pkg/errors", version: "v0.9.1"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 // TestLeadingQuotedStringEmptyBacktick covers a degenerate but valid
 // backtick-quoted empty string (two backticks in a row) -- the closing
 // backtick is the very next byte after the opening one.
 func TestLeadingQuotedStringEmptyBacktick(t *testing.T) {
-	got, ok := leadingQuotedString("``")
+	got, _, ok := leadingQuotedString("``")
 	if !ok || got != "" {
 		t.Errorf("leadingQuotedString(\"``\") = %q, %v; want \"\", true", got, ok)
 	}
@@ -98,7 +141,7 @@ func TestLeadingQuotedStringEmptyBacktick(t *testing.T) {
 // string with no closing quote at all — must fail cleanly (ok=false), not
 // index past the end of the string.
 func TestLeadingQuotedStringUnterminatedDoubleQuote(t *testing.T) {
-	got, ok := leadingQuotedString(`"unterminated`)
+	got, _, ok := leadingQuotedString(`"unterminated`)
 	if ok {
 		t.Errorf("leadingQuotedString(%q) = %q, true; want ok=false", `"unterminated`, got)
 	}
@@ -108,7 +151,7 @@ func TestLeadingQuotedStringUnterminatedDoubleQuote(t *testing.T) {
 // double-quoted string whose last byte is a lone, unescaped backslash (no
 // character left to escape) — must not index past the end of the string.
 func TestLeadingQuotedStringTrailingBackslashUnterminated(t *testing.T) {
-	got, ok := leadingQuotedString(`"abc\`)
+	got, _, ok := leadingQuotedString(`"abc\`)
 	if ok {
 		t.Errorf("leadingQuotedString(%q) = %q, true; want ok=false", `"abc\`, got)
 	}
@@ -251,6 +294,29 @@ func TestParseReplacesQuotedLocalPathWithEscapedQuoteAndComment(t *testing.T) {
 	got := parseReplaces([]byte(src))
 	want := map[string][]replaceEntry{
 		"example.com/bar": {{target: replaceTarget{path: `../a"b`, isLocal: true}}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestParseReplacesQuotedOldPath is the regression case for addReplace's
+// half of the same quoted-path gap TestParseRequiresQuotedPath covers for
+// require: the LHS "old path" of a replace directive can be quoted too —
+// confirmed live, `go build`/`go mod edit -fmt` both normalize `replace
+// "example.com/foo" v1.0.0 => ../local` straight to the unquoted `replace
+// example.com/foo v1.0.0 => ../local`. Before this fix, addReplace's raw
+// strings.Fields split on the LHS kept the literal quote characters in
+// oldPath (`"example.com/foo"`, not `example.com/foo`), so
+// resolveEffectiveModules' require-path lookup into this map could never
+// find the replace for the module's real path, silently leaving the
+// original (would-be-replaced) path checked against GOPRIVATE/GONOSUMDB
+// in its place instead.
+func TestParseReplacesQuotedOldPath(t *testing.T) {
+	src := "module example.com/foo\n\nreplace \"example.com/foo\" v1.0.0 => ../local\n"
+	got := parseReplaces([]byte(src))
+	want := map[string][]replaceEntry{
+		"example.com/foo": {{oldVersion: "v1.0.0", target: replaceTarget{path: "../local", isLocal: true}}},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
