@@ -678,6 +678,54 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunGoflagsMissingArgNoLeak is the regression test for a real false
+// positive found by testing against real go, distinct from both
+// TestRunMalformedGoflagsNoLeak (a non-flag-shaped token) and
+// TestRunUnknownGoflagsFlagNameNoLeak (an unregistered flag name):
+// GOFLAGS="-mod" (bare, missing "=value" entirely) is shaped exactly like
+// a valid boolean flag, so InitGOFLAGS's shape check (goflagsMalformed)
+// waves it through, and "mod" is a real, registered flag, so InitGOFLAGS's
+// registered-flag check (goflagsRejectedByGo's original "parsing $GOFLAGS:"
+// substring match) didn't catch it either. But -mod isn't boolean — it
+// takes a value — so cmd/go/internal/base.SetFromGOFLAGS Fatals once it
+// actually tries to apply the flag, printing "go: flag needs an argument:
+// -mod (from $GOFLAGS)" (verified live: `GOFLAGS=-mod go build`/`go list
+// -m` both exit 2 immediately with exactly that message, before resolving
+// a single module or contacting GOPROXY/GOSUMDB). Pre-fix,
+// goflagsRejectedByGo only matched the literal "parsing $GOFLAGS:" prefix
+// InitGOFLAGS uses, missed this SetFromGOFLAGS-stage message entirely, and
+// so returned false — the audit ran normally and reported a SUMDB LEAK for
+// a checksum-database query that can never actually happen, since the real
+// go command dies before getting anywhere near it.
+func TestRunGoflagsMissingArgNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "-mod",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when GOFLAGS carries a registered flag missing its required value (go itself would Fatal before any query), got: %s", stdout)
+	}
+}
+
 // TestRunBlockCommentGoModNoLeak is the direct regression test for
 // goModHasBlockComment (see gomod.go): a go.mod containing a stray "/* ... */"
 // line anywhere — unrelated to the require directive itself — makes every
@@ -1005,13 +1053,16 @@ func TestGoEnvUsesGivenDir(t *testing.T) {
 }
 
 // TestGoflagsRejectedByGo directly unit-tests goflagsRejectedByGo against
-// the real go toolchain, covering all three of its outcomes: an empty
+// the real go toolchain, covering all four of its outcomes: an empty
 // goflags is never even probed (short-circuited, since it's the common
 // case and can't possibly be rejected); a shape-valid but unregistered
 // flag name is rejected (the real bug this function exists to catch — see
-// TestRunUnknownGoflagsFlagNameNoLeak); and an ordinary, real flag value
-// is not rejected at all, confirming the live probe doesn't just always
-// return true.
+// TestRunUnknownGoflagsFlagNameNoLeak); a shape-valid, registered flag
+// missing its required "=value" is also rejected (a distinct real go
+// validation stage, SetFromGOFLAGS rather than InitGOFLAGS — see
+// TestRunGoflagsMissingArgNoLeak); and an ordinary, real flag value is not
+// rejected at all, confirming the live probe doesn't just always return
+// true.
 func TestGoflagsRejectedByGo(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/probe\n\ngo 1.24\n"), 0o644); err != nil {
@@ -1023,6 +1074,9 @@ func TestGoflagsRejectedByGo(t *testing.T) {
 	}
 	if got := goflagsRejectedByGo(dir, "-notarealflag=vendor"); !got {
 		t.Errorf(`goflagsRejectedByGo(%q, "-notarealflag=vendor") = false, want true (real go Fatals with "unknown flag")`, dir)
+	}
+	if got := goflagsRejectedByGo(dir, "-mod"); !got {
+		t.Errorf(`goflagsRejectedByGo(%q, "-mod") = false, want true (real go Fatals with "flag needs an argument")`, dir)
 	}
 	if got := goflagsRejectedByGo(dir, "-mod=mod"); got {
 		t.Errorf(`goflagsRejectedByGo(%q, "-mod=mod") = true, want false (a real, registered flag)`, dir)

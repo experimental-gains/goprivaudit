@@ -548,14 +548,46 @@ func goEnv(dir, name string) string {
 // list`) — it never resolves a require, so it never contacts GOPROXY or
 // GOSUMDB and returns instantly even with GOPROXY pointed at an
 // unreachable address (verified live), while still running through the
-// exact same InitGOFLAGS validation every other module-aware subcommand
-// does, since that check happens before any subcommand-specific work at
-// all. A failure for any other reason (a broken go.mod, `go` missing from
-// PATH, a permission error) doesn't carry the "parsing $GOFLAGS:" prefix
-// and is treated as "not a GOFLAGS rejection" — fail open, same convention
-// goEnv/gitVar already use elsewhere in this file. Skipped entirely when
-// goflags is empty (the common case — no GOFLAGS set at all), so an
-// ordinary run doesn't pay for an extra subprocess it can't possibly need.
+// exact same InitGOFLAGS/SetFromGOFLAGS validation every other
+// module-aware subcommand does, since that check happens before any
+// subcommand-specific work at all. A failure for any other reason (a
+// broken go.mod, `go` missing from PATH, a permission error) doesn't
+// mention GOFLAGS at all and is treated as "not a GOFLAGS rejection" —
+// fail open, same convention goEnv/gitVar already use elsewhere in this
+// file. Skipped entirely when goflags is empty (the common case — no
+// GOFLAGS set at all), so an ordinary run doesn't pay for an extra
+// subprocess it can't possibly need.
+//
+// The check below matches on "$GOFLAGS"/"%GOFLAGS%" appearing anywhere in
+// stderr, not just the "parsing $GOFLAGS:" prefix InitGOFLAGS itself uses
+// (that narrower check is this function's own pre-fix form) — because
+// InitGOFLAGS's shape/registered-flag check isn't the only real go
+// validation a shape-valid, registered flag can fail. Per
+// cmd/go/internal/base.SetFromGOFLAGS (go/src/cmd/go/internal/base/
+// goflags.go), a GOFLAGS entry that names a real, registered,
+// non-boolean flag but omits its "=value" entirely — e.g. GOFLAGS="-mod"
+// (bare, missing the "=vendor"/"=mod"/"=readonly" a real command-line
+// "-mod value" pair would supply, since GOFLAGS entries are never
+// re-paired with a following token) — passes InitGOFLAGS's shape check
+// clean (it looks exactly like a valid "-x" boolean flag) and so was never
+// flagged by goflagsMalformed either, whose own doc comment calls this
+// exact gap out as "out of scope" for a *static* check. But
+// SetFromGOFLAGS Fatals it anyway once it tries to apply the flag,
+// printing "go: flag needs an argument: -mod (from $GOFLAGS)" (verified
+// live: `GOFLAGS=-mod go build`/`go list -m` both exit 2 immediately with
+// that exact message, before resolving a single module) — a message this
+// function's pre-fix "parsing $GOFLAGS:" substring check didn't catch, so
+// goflagsRejectedByGo silently returned false, vendorModeActive fell
+// through to whatever the vendor auto-default computed, and the tool ran
+// its own audit for a query the real go command can never make — a false
+// SUMDB LEAK for a checksum-database query that structurally cannot
+// happen, the exact "active wrong claim" failure class this function
+// exists to close. Every real SetFromGOFLAGS rejection (missing argument,
+// invalid value, invalid boolean value/flag) shares the same "(from
+// $GOFLAGS)"/"(from %GOFLAGS%)" suffix (see the `where` variable in
+// goflags.go), so matching on the bare env-var name/token — rather than
+// InitGOFLAGS's one specific "parsing $GOFLAGS:" prefix — catches both
+// validation stages asking the real go binary was already meant to cover.
 func goflagsRejectedByGo(dir, goflags string) bool {
 	if goflags == "" {
 		return false
@@ -566,7 +598,8 @@ func goflagsRejectedByGo(dir, goflags string) bool {
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	_ = cmd.Run()
-	return strings.Contains(stderr.String(), "parsing $GOFLAGS:")
+	out := stderr.String()
+	return strings.Contains(out, "$GOFLAGS") || strings.Contains(out, "%GOFLAGS%")
 }
 
 // gitVar shells out to `git var <name>`, the same "ask the real tool
