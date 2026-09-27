@@ -31,20 +31,23 @@ disables the checksum database entirely, for every module, so neither
 finding can apply — there's no sumdb query happening for anything to leak
 from or over-trust.
 
-Both checks are also skipped when `GOPROXY`'s effective first chain entry
-(comma-separated "try next on not-found", or pipe-separated "try next on
-any error" — same precedence `goproxycheck` already applies) is the
-literal keyword `off`. That disables all module-proxy-protocol network
-access, sumdb lookups included, before a lookup could ever be sent.
-Verified live with a local logging HTTP server standing in for `GOSUMDB`'s
-URL: with a normal, reachable `GOPROXY`, a real `go get` sent a genuine
-`/lookup/<module>@<version>` request to it; with `GOPROXY=off` and the
-identical `GOSUMDB` target, `go get` failed immediately with "module
-lookup disabled by GOPROXY=off" and the logging server received no
-request at all. A later `off` in the chain that isn't the first entry
-doesn't count — the real go command only reaches it if every earlier
-entry fails first, so a chain like `https://proxy.golang.org,off` is not
-treated as blocked.
+`GOPROXY=off` (or any GOPROXY chain shape) is deliberately **not** treated
+as a reason to skip either check, even though it might look like the same
+"cannot leak" case as `GOSUMDB=off`/vendor mode above. Verified live: with
+`GOPROXY=off`, `GOSUMDB` left at its default, and a required module's exact
+pinned version already sitting in the local module cache (an entirely
+ordinary state — e.g. a shared `$GOMODCACHE` warmed by an earlier, online
+CI stage) but not yet recorded in `go.sum`, a real `GOFLAGS=-mod=mod go
+build` still sent a genuine `/lookup/<module>@<version>` request straight to
+`GOSUMDB`'s configured URL — bypassing `GOPROXY` entirely, since `go`'s
+sumdb client falls back to a *direct* connection the moment every proxy in
+the chain reports "off"/"direct". `GOPROXY=off` only prevents the leak when
+the module isn't in the local cache at all yet, and this tool has no way to
+know the cache state — so treating it as a blanket "cannot leak" guarantee
+(an earlier release did) is unsafe precisely for the mainstream reason
+anyone sets `GOPROXY=off` in the first place: a network-locked-down build
+stage relying on an earlier online stage having already populated the
+cache.
 
 Both checks are also skipped when the module resolves its dependencies from
 a committed `vendor/` directory instead of the network — either because

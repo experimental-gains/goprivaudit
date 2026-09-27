@@ -34,16 +34,42 @@
 // Both checks are skipped when GOSUMDB=off: that setting disables the
 // checksum database entirely, for every module, so neither an uncovered
 // private module nor an overly broad GOPRIVATE/GONOSUMDB pattern can leak
-// or over-trust anything — there's no sumdb query happening at all. Both are
-// also skipped when GOPROXY's effective first chain entry is "off" (see
-// goproxyEffectivelyOff): that disables all module-proxy-protocol network
-// access, sumdb lookups included, before a query could ever be sent. Both
+// or over-trust anything — there's no sumdb query happening at all. Both
 // are also skipped when the module resolves dependencies from a committed
 // vendor/ directory instead of the network (see vendorModeActive): that
 // build path never contacts sum.golang.org either, for the same reason.
 // That vendor auto-default does not apply inside an active go.work
 // workspace, so it's only honored when GOWORK is unset/"off" (or an
 // explicit -mod=vendor override is present, which applies either way).
+//
+// GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
+// skip, even though an earlier version of this tool treated it exactly
+// like GOSUMDB=off/vendor mode above. Verified live (2026-09): with
+// GOPROXY=off, GOSUMDB left at its default, and a required module's exact
+// pinned version already sitting in the local module cache (a completely
+// ordinary state — e.g. a shared $GOMODCACHE warmed by an earlier, online
+// CI stage, or by building an unrelated module first) but not yet
+// recorded in go.sum, a real `GOFLAGS=-mod=mod go build` still sent a
+// genuine `/lookup/<module>@<version>` request straight to GOSUMDB's
+// configured URL — bypassing GOPROXY entirely, since the sumdb client
+// falls back to a *direct* connection the moment every proxy in the chain
+// reports "off"/"direct"/not-found, per cmd/go/internal/modfetch/
+// sumdb.go's dbClient.initBase. GOPROXY=off only prevents the leak in the
+// narrower case this was originally tested against: the module isn't yet
+// in the local cache at all, so the fetch itself fails before any hash is
+// ever computed to look up. Since this tool has no visibility into
+// $GOMODCACHE's contents (a purely local, transient, machine-specific
+// state it was never meant to inspect), it can't tell those two cases
+// apart — and unlike GOSUMDB=off/vendor mode, which are unconditional
+// regardless of cache state, GOPROXY=off is not a reliable "cannot leak"
+// guarantee. Silently reporting "no issues found" on the strength of a
+// guess would be exactly backwards for a module already sitting in a
+// pre-warmed cache — the mainstream reason anyone sets GOPROXY=off in the
+// first place (a hermetic/network-locked-down build stage that relies on
+// an earlier online stage having already populated the cache) — so this
+// tool now always runs the audit regardless of GOPROXY, the same
+// fail-open-on-a-guess convention gitProtocolAllowed and schemeOf already
+// use elsewhere in this codebase.
 package main
 
 import (
@@ -197,11 +223,16 @@ func run(args []string, stdout, stderr *os.File) int {
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
 
+	// GOPROXY is still read here purely so the long-documented -proxy flag
+	// keeps parsing for any existing caller that passes it explicitly; its
+	// value no longer changes the audit result — see this package's own
+	// doc comment for why GOPROXY=off is not a reliable "cannot leak"
+	// guarantee the way GOSUMDB=off and vendor mode (below) are.
 	goproxy := *proxyOverride
 	if !proxySet {
 		goproxy = goEnv(moduleDir, "GOPROXY")
 	}
-	proxyOff := goproxyEffectivelyOff(goproxy)
+	_ = goproxy
 
 	var r Report
 	switch {
@@ -214,26 +245,6 @@ func run(args []string, stdout, stderr *os.File) int {
 		// cannot happen (verified live: with GOSUMDB=off, a private module
 		// uncovered by GOPRIVATE/GONOSUMDB is not a leak, since `go` never
 		// contacts sum.golang.org for it or anything else).
-	case proxyOff:
-		// GOPROXY's effective first entry (comma/pipe-separated chain,
-		// same precedence goproxycheck's own localGoproxyOff uses) being
-		// "off" disables ALL module-proxy-protocol network access,
-		// including sumdb lookups — not just GOPROXY=off on its own, but
-		// any chain whose first reachable entry is the literal "off"
-		// keyword. Verified live with a local logging HTTP server standing
-		// in for GOSUMDB's URL: with a real, reachable GOPROXY, `go get`
-		// sent a real `/lookup/<module>@<version>` request to it (the
-		// exact leak this tool warns about); with GOPROXY=off and the
-		// identical GOSUMDB target, `go get` failed immediately with
-		// "module lookup disabled by GOPROXY=off" and the logging server
-		// received no request at all — no lookup ever happens, so no leak
-		// can happen, the same "cannot leak" reasoning as GOSUMDB=off and
-		// vendor mode above, just reached via a config surface this tool
-		// didn't check before. (A module already recorded in go.sum can
-		// still build successfully under GOPROXY=off from the local module
-		// cache without any network call at all, regardless of this flag —
-		// same general caveat that already applies to every finding this
-		// tool reports.)
 	case vendorActive:
 		// A vendor-mode build (see vendorModeActive) never contacts the
 		// module proxy or sum.golang.org either — same "cannot leak"
@@ -462,43 +473,6 @@ func gitConfigCandidates(moduleDir string) []string {
 		out = append(out, filepath.Join(moduleDir, ".git", "config"))
 	}
 	return out
-}
-
-// goproxyEffectivelyOff reports whether a GOPROXY value's first
-// comma-separated ("try next on not-found") or pipe-separated ("try next
-// on any error") chain entry is the literal keyword "off" — the same
-// precedence `cmd/go` itself applies (a later "off" in the chain is never
-// reached unless every earlier entry fails first, so only the *first*
-// entry being "off" makes the whole fetch structurally impossible up
-// front). Mirrors goproxycheck's own localGoproxyOff/firstGoproxyEntry,
-// which this project's companion tool already verified live against the
-// real go command.
-//
-// Empty entries (a leading/interior/trailing comma or pipe, e.g. from
-// `GOPROXY="$UNSET_VAR,off"`) don't count as an entry at all — verified
-// live against real `go`: `GOPROXY=",off"` disables lookups exactly like
-// `GOPROXY=off` does (cmd/go's own proxyList walk skips blank entries, see
-// goproxycheck's parseGoproxyChain, which already gets this right). The
-// naive "trim once, split on the first separator" version below used to
-// treat the first entry as the empty string and never reach "off" at all,
-// so a stray leading comma made this tool misreport a real, structurally
-// impossible SUMDB leak.
-func goproxyEffectivelyOff(goproxy string) bool {
-	rest := goproxy
-	for rest != "" {
-		var entry string
-		if i := strings.IndexAny(rest, ",|"); i >= 0 {
-			entry, rest = rest[:i], rest[i+1:]
-		} else {
-			entry, rest = rest, ""
-		}
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		return entry == "off"
-	}
-	return false
 }
 
 // goEnv runs `go env <name>` with cmd.Dir set to dir, so directory-dependent
