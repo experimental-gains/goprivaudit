@@ -117,11 +117,34 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 			want: []string{"git.privatecorp.internal"},
 		},
 		{
-			name: "default token stops processing",
+			// Regression test for the bug fixed here: a "default" entry's
+			// own login/password are a real, host-independent private-auth
+			// signal (real curl sends them to ANY host with no matching
+			// "machine" line — see privatePrefixesFromNetrc's and
+			// netrcDefaultMachine's doc comments for the live
+			// verification), modeled as the "*" sentinel so it flows
+			// through the same GOPRIVATE-style prefix-matching every other
+			// signal in this file already uses. Everything on or after the
+			// "machine after.internal" line is still correctly discarded,
+			// matching both the netrc format's own "default must be last"
+			// rule and real curl's behavior once a default entry's fields
+			// are already fully populated (see the "machine"/inDefault
+			// case's own doc comment).
+			name: "default token's own credentials are a signal, but nothing after it is",
 			data: "machine before.internal\nlogin x\npassword y\n" +
 				"default\nlogin anon\npassword anon\n" +
 				"machine after.internal\nlogin x\npassword y\n",
+			want: []string{"before.internal", "*"},
+		},
+		{
+			name: "bare default with no credentials at all is not a signal",
+			data: "machine before.internal\nlogin x\npassword y\n" + "default\n",
 			want: []string{"before.internal"},
+		},
+		{
+			name: "default with no preceding machine entry is still a signal",
+			data: "default\nlogin anon\npassword anon\n",
+			want: []string{"*"},
 		},
 	}
 	for _, tt := range tests {
@@ -190,6 +213,40 @@ require git.privatecorp.internal/team/widgets v1.2.3
 		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
 	}
 	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaNetrcDefaultEntry is the end-to-end regression test for
+// netrcDefaultMachine: a netrc "default" entry, with no "machine" line
+// naming the required module's host at all, still authenticates a real git
+// subprocess fetch to that host — verified live (see
+// netrcDefaultMachine's doc comment) with GIT_CURL_VERBOSE=1 against a real
+// git subprocess HTTP request to an arbitrary, netrc-unlisted host: the
+// default entry's credentials were sent preemptively regardless. Pre-fix,
+// privatePrefixesFromNetrc discarded a "default" entry's login/password
+// entirely (it only ever used seeing the "default" keyword as a signal to
+// stop scanning), so this exact setup — a real, live-verified sumdb-leak
+// signal covering every module host not otherwise named in ~/.netrc —
+// reported "no issues found".
+func TestRunFindsLeakViaNetrcDefaultEntry(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "default\nlogin anon\npassword anon\n")
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.otherhost.example/team/widgets v1.2.3
+`)
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.otherhost.example/team/widgets") {
 		t.Errorf("stdout missing expected leak finding: %s", stdout)
 	}
 }

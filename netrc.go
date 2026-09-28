@@ -114,12 +114,43 @@ func netrcPath() string {
 // pending entry is only finalized (commit) when it's unambiguously done:
 // right before a new "machine" token starts the next entry, or at end of
 // input/on the "default" stop condition.
+//
+// A netrc "default" entry's own login/password (see netrcDefaultMachine)
+// are, for the identical reason, also a real signal this function
+// previously discarded entirely: the pre-fix code stopped scanning the
+// instant it saw "default" and returned whatever "machine" entries had
+// already been committed, without ever reading the "default" entry's own
+// fields at all.
+
+// netrcDefaultMachine is the sentinel recorded as the "machine" of a netrc
+// `default` entry (see the "default" case below): real curl's netrc reader
+// (lib/netrc.c's parsenetrc, verified live 2026-09 against curl 8.14.1 with
+// a local Basic-Auth test server and GIT_CURL_VERBOSE=1) treats `default`
+// as a host-independent fallback — whenever the host actually being
+// fetched matches no earlier "machine" line in the file, whatever
+// login/password follow `default` are sent instead, for that request to
+// ANY host at all, not just ones named elsewhere in the file. Confirmed
+// live end-to-end with real `git`: `GIT_CURL_VERBOSE=1 git ls-remote
+// http://<arbitrary-unlisted-host>/foo.git`, with only a `default` entry
+// (no matching `machine` line) in ~/.netrc, still sent "Authorization:
+// Basic <default creds>" on the very first request, proving this applies
+// to a module host that isn't a public multi-tenant host either. Using the
+// same "*" spelling as a bare GOPRIVATE `*` glob is deliberate, not
+// cosmetic: matchesPrefixPattern already matches pattern "*" against every
+// module path's first segment (path.Match's own any-sequence wildcard), so
+// threading this sentinel through the exact same privatePrefixes ->
+// matchesAnyPattern pipeline every other signal in this file already uses
+// makes it "just work" as a signal matching literally every required
+// module, with no separate wildcard-signal plumbing needed anywhere else.
+const netrcDefaultMachine = "*"
+
 func privatePrefixesFromNetrc(data []byte) []string {
 	var prefixes []string
 	seen := map[string]bool{}
 	var machine, login, password string
 	haveMachine := false
 	inMacro := false
+	inDefault := false
 
 	commit := func() {
 		if !haveMachine || (login == "" && password == "") {
@@ -230,6 +261,23 @@ func privatePrefixesFromNetrc(data []byte) []string {
 		}
 		switch tok {
 		case "machine":
+			if inDefault {
+				// Per the netrc format's own rule ("There can be only one
+				// default token, and it must be after all machine
+				// tokens"), nothing meaningful is expected to follow a
+				// `default` entry's own login/password. Real curl agrees
+				// in the mainline shape this models (a `default` whose
+				// login+password are already both set): parsenetrc's own
+				// "machine" case inside HOSTVALID state checks `found &
+				// FOUND_PASSWORD` and stops the whole scan (`done = TRUE`)
+				// the instant another "machine" token shows up, never
+				// reading anything after it — matching the stop-here
+				// behavior this function already had pre-fix for the
+				// "default" token itself, just reached one token later
+				// now that default's own fields are read first.
+				commit()
+				return prefixes
+			}
 			commit()
 			m, _, _ := nextToken()
 			machine, login, password = m, "", ""
@@ -263,15 +311,22 @@ func privatePrefixesFromNetrc(data []byte) []string {
 			inMacro = true
 		case "default":
 			if atEOL {
-				// "There can be only one default token, and it must be
-				// after all machine tokens" — go stops processing here
-				// too, but (matching parseNetrc's own narrower trigger:
-				// an isolated trailing token, nothing queued after it on
-				// the same line) only when "default" is genuinely
-				// written the conventional way, not merely present
-				// somewhere as JUNK on an otherwise-malformed line.
+				// Matching parseNetrc's own narrower trigger for
+				// recognizing this as the real keyword (an isolated
+				// trailing token, nothing queued after it on the same
+				// line) rather than JUNK wedged into an otherwise
+				// malformed line's other fields.
+				if inDefault {
+					// A second "default" (itself invalid per the format's
+					// "only one default token" rule): stop rather than
+					// start a third pseudo-entry.
+					commit()
+					return prefixes
+				}
 				commit()
-				return prefixes
+				machine, login, password = netrcDefaultMachine, "", ""
+				haveMachine = true
+				inDefault = true
 			}
 		}
 	}

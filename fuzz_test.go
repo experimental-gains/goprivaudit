@@ -220,21 +220,22 @@ func stdlibParseNetrc(data string) []stdlibNetrcLine {
 // mechanic privatePrefixesFromNetrc's own nextToken ports (see its doc
 // comment for the live GIT_CURL_VERBOSE verification this is modeling).
 //
-// "default" is deliberately NOT ported as real curl's own single-host
-// search implements it (an unconditional, always-matching host, whose
-// early-exit-once-complete behavior is entangled with searching for one
-// target and doesn't have a well-defined generalization to "list every
-// entry" — a default entry's own completeness can make real curl stop
-// scanning before or after a later real "machine" entry depending on
-// exactly which fields it sets, per curl's source, a distinction with no
-// analogue here). Instead this uses the same deliberate, documented
-// convention privatePrefixesFromNetrc itself applies: an isolated "default"
-// — nothing else queued after it on its own physical line, the
-// conventional way it's written and the shape both curl's and cmd/go's
-// docs describe ("must be after all machine tokens") — ends scanning
-// entirely, so this oracle and the function under test share that one
-// deliberate, documented design choice by construction rather than by
-// coincidence.
+// "default" is ported as the netrcDefaultMachine ("*") sentinel
+// privatePrefixesFromNetrc itself now uses (see that const's doc comment
+// for the live GIT_CURL_VERBOSE verification that a real "default" entry's
+// login/password really do authenticate a fetch to ANY host with no
+// matching "machine" line): an isolated "default" — nothing else queued
+// after it on its own physical line, the conventional way it's written and
+// the shape both curl's and cmd/go's docs describe ("must be after all
+// machine tokens") — starts a pseudo-entry keyed on "*" the same way a
+// "machine" token starts a real one, and a subsequent "machine" token once
+// already inside that pseudo-entry ends scanning entirely (inDefault),
+// matching the mainline shape real curl itself stops at too (parsenetrc's
+// own "machine" case inside HOSTVALID stops the instant `found &
+// FOUND_PASSWORD` is already set — see netrc.go's own "machine"/inDefault
+// case for the fuller citation). This oracle and the function under test
+// share that one deliberate, documented design choice by construction
+// rather than by coincidence.
 //
 // Unlike stdlibParseNetrc above (kept for its own documentation value —
 // it's what cmd/go's GOAUTH=netrc client, a real but DIFFERENT consumer of
@@ -270,6 +271,7 @@ func curlParseNetrc(data string) []stdlibNetrcLine {
 	state := stNothing
 	keyword := kwNone
 	inMacro := false
+	inDefault := false
 	var out []stdlibNetrcLine
 	var l stdlibNetrcLine
 
@@ -279,6 +281,19 @@ func curlParseNetrc(data string) []stdlibNetrcLine {
 		}
 		l = stdlibNetrcLine{}
 		keyword = kwNone
+	}
+
+	// startDefault mirrors netrc.go's "default" case: commit whatever entry
+	// was pending, then start a new pseudo-entry keyed on the same "*"
+	// sentinel netrcDefaultMachine defines, so a following login/password
+	// (read the same way a real machine's are, via stHostValid) becomes
+	// this oracle's ground truth for privatePrefixesFromNetrc's own "*"
+	// signal.
+	startDefault := func() {
+		commit()
+		l.machine = netrcDefaultMachine
+		inDefault = true
+		state = stHostValid
 	}
 
 	// isBlank matches netrc.go's own deliberate, documented choice (see
@@ -346,8 +361,7 @@ func curlParseNetrc(data string) []stdlibNetrcLine {
 				state = stHostFound
 			case "default":
 				if atEOL {
-					commit()
-					return out
+					startDefault()
 				}
 			}
 		case stHostFound:
@@ -366,12 +380,19 @@ func curlParseNetrc(data string) []stdlibNetrcLine {
 			case tok == "password":
 				keyword = kwPassword
 			case tok == "machine":
+				if inDefault {
+					commit()
+					return out
+				}
 				commit()
 				state = stHostFound
 			case tok == "default":
 				if atEOL {
-					commit()
-					return out
+					if inDefault {
+						commit()
+						return out
+					}
+					startDefault()
 				}
 			}
 		}
