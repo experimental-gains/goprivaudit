@@ -671,3 +671,185 @@ func mergeReplaces(base, overlay map[string][]replaceEntry) map[string][]replace
 	}
 	return merged
 }
+
+// goWorkUseDirs parses a go.work file's "use" directives — both the
+// single-line "use ./dir" form and the block "use (\n\t./dir\n)" form,
+// identical shape/quoting rules to a require/tool directive line, so it
+// reuses the same stripComment/cutKeyword/firstField helpers those parsers
+// do — and returns each listed member module's directory resolved to an
+// absolute, cleaned path. Per `go help work`, a "use" path is "resolved
+// relative to the directory containing the go.work file", i.e. relative to
+// filepath.Dir(goworkAbs), not to this process's own working directory.
+// goworkAbs must already be an absolute path (moduleOutsideWorkspace's
+// only caller resolves it before calling in). A go.work that can't be read
+// yields no directories, the same "missing/unreadable go.work is like no
+// workspace" convention goWorkReplaces already uses.
+func goWorkUseDirs(goworkAbs string) []string {
+	data, err := os.ReadFile(goworkAbs)
+	if err != nil {
+		return nil
+	}
+	workDir := filepath.Dir(goworkAbs)
+	var dirs []string
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if p := firstField(trimmed); p != "" {
+				dirs = append(dirs, resolveLocalPath(workDir, p))
+			}
+			continue
+		}
+		if rest, ok := cutKeyword(trimmed, "use"); ok {
+			rest = strings.TrimSpace(rest)
+			if rest == "(" {
+				inBlock = true
+				continue
+			}
+			if p := firstField(rest); p != "" {
+				dirs = append(dirs, resolveLocalPath(workDir, p))
+			}
+		}
+	}
+	return dirs
+}
+
+// resolveLocalPath resolves a go.mod/go.work-relative local path (a
+// replace target or a "use" directory, both documented to resolve relative
+// to the file that names them, not to this process's cwd) against baseDir,
+// returning an absolute, cleaned path. An already-absolute path (a real,
+// if unusual, thing to write for either directive) is cleaned as-is,
+// mirroring filepath.Join's own documented refusal to prefix an absolute
+// second argument with the first.
+func resolveLocalPath(baseDir, path string) string {
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(filepath.Join(baseDir, path))
+}
+
+// goWorkLocalReplaceTargets collects every local-directory replace target
+// reachable from a go.work workspace without following any require chain:
+// go.work's own replace directives (resolved relative to its own
+// directory) plus each `use`d member module's own go.mod replace
+// directives (resolved relative to that member's own directory, per
+// go.mod's normal replace-path resolution rule — verified live the same
+// way isDirectoryPath's doc comment already did for a go.mod-level
+// replace). This is exactly the "...or their selected dependencies" half
+// of the real go error moduleOutsideWorkspace's doc comment quotes: a
+// directory that isn't itself `use`d can still be part of the workspace's
+// build graph if some `use`d member's go.mod replaces a require with it.
+//
+// Deliberately stops at one hop: it doesn't recurse into a replacement
+// target's own go.mod looking for a *second* local replace that reaches
+// moduleDir transitively. That chain is real but far rarer than a single
+// member replacing a public path with a local sibling (this function's
+// main target), and detecting it fully would mean re-implementing a
+// chunk of modload's own local-replace-chain resolution — out of scope
+// here the same way hasconfig: resolution was ruled out for includeIf
+// (see includeIfMatches' doc comment for that precedent). Missing this
+// deeper chain can only make moduleOutsideWorkspace over-report exclusion
+// for that one narrow shape, not under-report it elsewhere.
+func goWorkLocalReplaceTargets(goworkAbs string, useDirs []string) []string {
+	var out []string
+	collect := func(data []byte, baseDir string) {
+		for _, entries := range parseReplaces(data) {
+			for _, e := range entries {
+				if e.target.isLocal {
+					out = append(out, resolveLocalPath(baseDir, e.target.path))
+				}
+			}
+		}
+	}
+	if data, err := os.ReadFile(goworkAbs); err == nil {
+		collect(data, filepath.Dir(goworkAbs))
+	}
+	for _, d := range useDirs {
+		if data, err := os.ReadFile(filepath.Join(d, "go.mod")); err == nil {
+			collect(data, d)
+		}
+	}
+	return out
+}
+
+// moduleOutsideWorkspace reports whether, with an active go.work workspace
+// (gowork not "" or "off"), moduleDir would be excluded from every
+// standard package-pattern-based build run inside it: `go build`, `go
+// build .`, `go run .`, `go list .`/`go list ./...`, `go vet ./...`, and
+// `go test ./...` all Fatal immediately with "current directory is
+// contained in a module that is not one of the workspace modules listed
+// in go.work" (or, for a "./..." pattern specifically, "pattern ./...:
+// directory prefix . does not contain modules listed in go.work or their
+// selected dependencies") the moment moduleDir is neither `use`d directly
+// nor reachable as a local replace target — verified live (2026-09) with a
+// go.work listing only a sibling module, none of moduleDir's own
+// requires ever resolved (no git/network activity at all): `go mod tidy`
+// and bare `go mod download` both silently matched zero packages, and
+// every package-pattern command above Fataled before resolving a single
+// module. Since every one of these is the ordinary way a private-auth
+// signal left uncovered by GOPRIVATE/GONOSUMDB would actually reach
+// sum.golang.org, none of them being reachable at all means that query
+// structurally cannot happen for moduleDir's own requires in this
+// state — the same "cannot leak" reasoning run() already applies to
+// GOSUMDB=off, vendor mode, and a goflags-rejecting GOFLAGS, just reached
+// because the workspace itself refuses to consider moduleDir's go.mod at
+// all rather than because a check downstream of that was disabled.
+//
+// This is a real, easy-to-hit misconfiguration, not a contrived one: GOWORK
+// auto-discovery (see the moduleDir/goEnv comment in main.go) walks
+// upward from moduleDir through every parent directory looking for a
+// go.work file — a monorepo workspace file that simply hasn't been
+// updated with a `use ./newmodule` entry for a newly added module (or,
+// more subtly, an unrelated go.work leftover from a different project
+// sitting in a shared parent directory) silently puts every module under
+// it into exactly this state.
+//
+// Only ever narrows a false positive, never introduces a false negative:
+// a directory this reports true for has been live-confirmed to leak
+// nothing via any standard build command, and goWorkLocalReplaceTargets'
+// one-hop check (see its own doc comment for the narrow chain it doesn't
+// follow) means the one known gap in that confirmation can only make this
+// function say "excluded" too often, not too rarely.
+func moduleOutsideWorkspace(gowork, moduleDir string) bool {
+	if gowork == "" || gowork == "off" {
+		return false
+	}
+	goworkAbs, err := filepath.Abs(gowork)
+	if err != nil {
+		return false
+	}
+	useDirs := goWorkUseDirs(goworkAbs)
+	if len(useDirs) == 0 {
+		// No (parseable) "use" directive at all: this isn't the shape of
+		// workspace the live-verified rejection above was confirmed
+		// against, so fail open rather than guess, the same convention
+		// every other best-effort go.work reader in this file already
+		// follows for an unreadable/stale GOWORK.
+		return false
+	}
+	moduleAbs, err := filepath.Abs(moduleDir)
+	if err != nil {
+		return false
+	}
+	moduleAbs = filepath.Clean(moduleAbs)
+	for _, d := range useDirs {
+		if d == moduleAbs {
+			return false
+		}
+	}
+	for _, d := range goWorkLocalReplaceTargets(goworkAbs, useDirs) {
+		if d == moduleAbs {
+			return false
+		}
+	}
+	return true
+}

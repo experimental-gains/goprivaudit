@@ -252,6 +252,16 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	var r Report
 	switch {
+	case moduleOutsideWorkspace(gowork, moduleDir):
+		// An active go.work workspace that doesn't `use` moduleDir (or
+		// reach it via a member's local replace) makes every standard
+		// build/list/vet/test command Fatal before it ever resolves a
+		// single one of moduleDir's own requires — see
+		// moduleOutsideWorkspace's doc comment for the live-verified
+		// error messages and the exact commands checked. Same "cannot
+		// leak" reasoning as goflagsBad/gosumdb==off/vendorActive below,
+		// just reached because the workspace itself refuses to consider
+		// this go.mod at all.
 	case goModHasBlockComment(data):
 		// A go.mod containing a bare "/*" outside a quoted string, anywhere
 		// in the file, makes every module-aware go subcommand Fatal while

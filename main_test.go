@@ -839,7 +839,16 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 // risks sending.
 func TestRunVendorModeInsideWorkspaceStillLeaks(t *testing.T) {
 	dir := t.TempDir()
-	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+	// go.mod lives under app/, matching go.work's "use ./app" below: per
+	// `go help work`, a "use" path names a directory that must actually
+	// contain the member's go.mod (verified live: a go.work "use"ing a
+	// directory with no go.mod there makes every module-aware command
+	// Fatal immediately with "cannot load module app listed in go.work
+	// file: open app/go.mod: no such file or directory" — a go.mod
+	// sitting one level up, directly at dir, is not itself a member of
+	// this workspace at all, and moduleOutsideWorkspace (gomod.go) now
+	// correctly refuses to audit it as one).
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
 
 go 1.24.4
 
@@ -851,10 +860,10 @@ use (
 	./app
 )
 `)
-	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
 	insteadOf = https://github.com/myorg/
 `)
-	writeFile(t, dir, "vendor/modules.txt", `# github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+	writeFile(t, dir, "app/vendor/modules.txt", `# github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 ## explicit; go 1.20
 github.com/myorg/internal-tool
 `)
@@ -1434,7 +1443,12 @@ replace github.com/upstream/lib => github.com/myorg/lib-fork v1.0.0-patched
 // found" for exactly this setup.
 func TestRunFindsLeakViaGoWorkReplace(t *testing.T) {
 	dir := t.TempDir()
-	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+	// go.mod lives under app/, matching go.work's "use ./app" — see
+	// TestRunVendorModeInsideWorkspaceStillLeaks' comment for why a
+	// go.mod that doesn't actually sit at a "use"d directory isn't a
+	// member of the workspace at all (moduleOutsideWorkspace,
+	// gomod.go).
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
 
 require github.com/foo/bar v1.2.3
 `)
@@ -1446,7 +1460,7 @@ use (
 
 replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 `)
-	writeFile(t, dir, ".git/config", `[url "ssh://git@git.internal.example.com/"]
+	writeFile(t, dir, "app/.git/config", `[url "ssh://git@git.internal.example.com/"]
 	insteadOf = https://git.internal.example.com/
 `)
 	t.Setenv("HOME", t.TempDir())
@@ -1520,7 +1534,9 @@ replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 // private host.
 func TestRunGoWorkReplaceOverridesGoModReplace(t *testing.T) {
 	dir := t.TempDir()
-	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+	// go.mod lives under app/, matching go.work's "use ./app" — see
+	// TestRunVendorModeInsideWorkspaceStillLeaks' comment.
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
 
 require github.com/foo/bar v1.2.3
 
@@ -1534,7 +1550,7 @@ use (
 
 replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 `)
-	writeFile(t, dir, ".git/config", `[url "ssh://git@git.internal.example.com/"]
+	writeFile(t, dir, "app/.git/config", `[url "ssh://git@git.internal.example.com/"]
 	insteadOf = https://git.internal.example.com/
 `)
 	t.Setenv("HOME", t.TempDir())
@@ -1570,7 +1586,9 @@ replace github.com/foo/bar => git.internal.example.com/mirror/bar v0.0.0
 // carried *any* entry for it, version-specific or not.
 func TestRunGoWorkVersionSpecificReplaceLeavesUnrelatedGoModReplaceIntact(t *testing.T) {
 	dir := t.TempDir()
-	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+	// go.mod lives under app/, matching go.work's "use ./app" — see
+	// TestRunVendorModeInsideWorkspaceStillLeaks' comment.
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
 
 require github.com/foo/bar v1.2.3
 
@@ -1584,7 +1602,7 @@ use (
 
 replace github.com/foo/bar v9.9.9 => example.com/unrelated-sibling-pin v0.0.0
 `)
-	writeFile(t, dir, ".git/config", `[url "ssh://git@git.internal.example.com/"]
+	writeFile(t, dir, "app/.git/config", `[url "ssh://git@git.internal.example.com/"]
 	insteadOf = https://git.internal.example.com/
 `)
 	t.Setenv("HOME", t.TempDir())
@@ -1630,6 +1648,113 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
 		t.Errorf("stdout missing expected leak: %s", stdout)
+	}
+}
+
+// TestRunModuleOutsideWorkspaceSuppressesLeak is the direct regression test
+// for the real-world-testing pass that found this: an active go.work
+// workspace whose "use" directives don't list moduleDir at all (and don't
+// reach it via any local replace either) makes every standard build
+// command Fatal before it ever resolves moduleDir's own requires — see
+// moduleOutsideWorkspace's doc comment in gomod.go for the exact,
+// live-verified error messages ("current directory is contained in a
+// module that is not one of the workspace modules listed in go.work" /
+// "pattern ./...: directory prefix . does not contain modules listed in
+// go.work or their selected dependencies") and the live confirmation that
+// `go mod tidy`/bare `go mod download` both silently resolve zero
+// packages in this state. Before this fix, goprivaudit ignored go.work
+// membership entirely and reported "SUMDB LEAK" for a checksum-database
+// query that structurally cannot happen for this go.mod in this state —
+// an active wrong claim, the same failure class every other "cannot leak"
+// skip in run() closes. This is a realistic misconfiguration, not a
+// contrived one: GOWORK auto-discovery walks upward from moduleDir
+// through every parent directory, so any go.work anywhere above it that
+// simply hasn't been updated with a `use ./this-module` entry (a new
+// module added to a monorepo workspace, or an unrelated go.work leftover
+// from a different project in a shared parent directory) puts a module in
+// exactly this state.
+func TestRunModuleOutsideWorkspaceSuppressesLeak(t *testing.T) {
+	dir := t.TempDir()
+	// go.mod lives directly at dir, but go.work (also at dir) only "use"s
+	// a sibling "./a" — moduleDir (dir) is neither `use`d nor the target
+	// of any local replace, so it's excluded from the workspace entirely.
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, "a/go.mod", `module example.com/a
+
+go 1.24
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./a
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: moduleDir is excluded from the workspace, so no build can ever resolve its requires; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when moduleDir is outside the workspace's use list, got: %s", stdout)
+	}
+}
+
+// TestRunModuleOutsideUseListButReachableViaMemberReplaceStillLeaks checks
+// the guard against a false negative in the fix above: moduleDir isn't
+// itself `use`d, but a `use`d member's own go.mod replaces a require with
+// moduleDir's local directory — the "...or their selected dependencies"
+// half of the real go error moduleOutsideWorkspace's doc comment quotes.
+// Verified live: `go list -m all` run from moduleDir in exactly this shape
+// still resolves moduleDir's own require over the network (a real `git
+// ls-remote` attempt), unlike the plain-excluded case above where nothing
+// is ever resolved at all. moduleOutsideWorkspace must not treat this
+// moduleDir as excluded, or it would suppress a real, reachable leak.
+func TestRunModuleOutsideUseListButReachableViaMemberReplaceStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a/go.mod", `module example.com/a
+
+go 1.24
+
+require example.com/somepublicmod v1.0.0
+
+replace example.com/somepublicmod => ../b
+`)
+	gomod := writeFile(t, dir, "b/go.mod", `module example.com/b
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./a
+`)
+	writeFile(t, dir, "b/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1: b is reachable as a's local replace target, so its own requires can still leak; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak for a module reachable via a workspace member's own replace: %s", stdout)
 	}
 }
 

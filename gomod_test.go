@@ -689,3 +689,124 @@ func TestEffectiveToolModulesDeduped(t *testing.T) {
 		t.Errorf("got %v, want %v", got, want)
 	}
 }
+
+func TestGoWorkUseDirsSingleLine(t *testing.T) {
+	dir := t.TempDir()
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./a
+`)
+	got := goWorkUseDirs(gowork)
+	want := []string{filepath.Join(dir, "a")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestGoWorkUseDirsBlockForm(t *testing.T) {
+	dir := t.TempDir()
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./a
+	./b // comment
+)
+`)
+	got := goWorkUseDirs(gowork)
+	want := []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestGoWorkUseDirsMissingFile(t *testing.T) {
+	if got := goWorkUseDirs(filepath.Join(t.TempDir(), "no-such.work")); got != nil {
+		t.Errorf("expected nil for an unreadable go.work path, got %v", got)
+	}
+}
+
+func TestGoWorkUseDirsNoUseDirective(t *testing.T) {
+	dir := t.TempDir()
+	gowork := writeFile(t, dir, "go.work", "go 1.24\n")
+	if got := goWorkUseDirs(gowork); got != nil {
+		t.Errorf("expected nil when go.work has no use directive, got %v", got)
+	}
+}
+
+func TestResolveLocalPath(t *testing.T) {
+	tests := []struct {
+		baseDir, path, want string
+	}{
+		{"/ws", "./a", "/ws/a"},
+		{"/ws", "../sibling", "/sibling"},
+		{"/ws", "/abs/path", "/abs/path"},
+		{"/ws", ".", "/ws"},
+	}
+	for _, tc := range tests {
+		if got := resolveLocalPath(tc.baseDir, tc.path); got != tc.want {
+			t.Errorf("resolveLocalPath(%q, %q) = %q, want %q", tc.baseDir, tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestModuleOutsideWorkspaceNoGowork(t *testing.T) {
+	if moduleOutsideWorkspace("", "/any/dir") {
+		t.Error("expected false when gowork is empty")
+	}
+	if moduleOutsideWorkspace("off", "/any/dir") {
+		t.Error(`expected false when gowork is "off"`)
+	}
+}
+
+func TestModuleOutsideWorkspaceTrueWhenNotUsed(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a/go.mod", "module example.com/a\n\ngo 1.24\n")
+	moduleDir := writeFile(t, dir, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
+	moduleDir = filepath.Dir(moduleDir)
+	gowork := writeFile(t, dir, "go.work", "go 1.24\n\nuse ./a\n")
+	if !moduleOutsideWorkspace(gowork, moduleDir) {
+		t.Error("expected true: moduleDir is not used by the workspace and not reachable via any replace")
+	}
+}
+
+func TestModuleOutsideWorkspaceFalseWhenUsed(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := writeFile(t, dir, "a/go.mod", "module example.com/a\n\ngo 1.24\n")
+	moduleDir = filepath.Dir(moduleDir)
+	gowork := writeFile(t, dir, "go.work", "go 1.24\n\nuse ./a\n")
+	if moduleOutsideWorkspace(gowork, moduleDir) {
+		t.Error("expected false: moduleDir is directly used by the workspace")
+	}
+}
+
+func TestModuleOutsideWorkspaceFalseWhenReachableViaGoWorkReplace(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a/go.mod", "module example.com/a\n\ngo 1.24\n\nrequire example.com/pub v1.0.0\n")
+	moduleDir := writeFile(t, dir, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
+	moduleDir = filepath.Dir(moduleDir)
+	gowork := writeFile(t, dir, "go.work", "go 1.24\n\nuse ./a\n\nreplace example.com/pub => ./b\n")
+	if moduleOutsideWorkspace(gowork, moduleDir) {
+		t.Error("expected false: moduleDir is the target of go.work's own replace directive")
+	}
+}
+
+func TestModuleOutsideWorkspaceFalseWhenReachableViaMemberReplace(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a/go.mod", "module example.com/a\n\ngo 1.24\n\nrequire example.com/pub v1.0.0\n\nreplace example.com/pub => ../b\n")
+	moduleDir := writeFile(t, dir, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
+	moduleDir = filepath.Dir(moduleDir)
+	gowork := writeFile(t, dir, "go.work", "go 1.24\n\nuse ./a\n")
+	if moduleOutsideWorkspace(gowork, moduleDir) {
+		t.Error("expected false: moduleDir is the target of a's own go.mod replace directive")
+	}
+}
+
+func TestModuleOutsideWorkspaceFalseWhenNoUseDirective(t *testing.T) {
+	dir := t.TempDir()
+	moduleDir := writeFile(t, dir, "b/go.mod", "module example.com/b\n\ngo 1.24\n")
+	moduleDir = filepath.Dir(moduleDir)
+	gowork := writeFile(t, dir, "go.work", "go 1.24\n")
+	if moduleOutsideWorkspace(gowork, moduleDir) {
+		t.Error("expected false (fail open) when go.work has no parseable use directive at all")
+	}
+}
