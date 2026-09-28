@@ -182,6 +182,77 @@ func goModHasInvalidGoDirective(data []byte) bool {
 	return false
 }
 
+// goToolchainDirectiveRE mirrors golang.org/x/mod/modfile's own ToolchainRE
+// (rule.go) exactly: the shape a `toolchain` directive's argument must match
+// for the real go command's strict parser (modfile.Parse) to accept it at
+// all — either the literal "default", or anything starting with "go1"
+// followed by end-of-string or a "." (e.g. "go1.24.4", "go1.21rc1"). Unlike
+// goVersionDirectiveRE (the bare version string a `go` directive takes),
+// this is deliberately loose about what follows "go1" — real go's own
+// regex is — because the toolchain name is re-validated more strictly
+// elsewhere (gover.IsValid) once resolved; this function only needs to
+// match what makes modfile.Parse itself accept or reject the line.
+var goToolchainDirectiveRE = regexp.MustCompile(`^default$|^go1($|\.)`)
+
+// goModHasInvalidToolchainDirective reports whether data contains a
+// `toolchain` directive line the real go command's own strict go.mod parser
+// (modfile.Parse) rejects outright — either because its single argument
+// doesn't match goToolchainDirectiveRE ("invalid toolchain version '<x>':
+// must match format go1.23.0 or default"), or because the line doesn't
+// carry exactly one argument at all ("toolchain directive expects exactly
+// one argument", e.g. a bare "toolchain" line with nothing after it, or
+// "toolchain go1.24.4 extra") — the exact same argument-shape gap
+// goModHasInvalidGoDirective already closes for the sibling `go` directive,
+// confirmed to exist here too: golang.org/x/mod/modfile's add() switch
+// validates "go" and "toolchain" with the parallel len(args)!=1-then-regex
+// structure (see rule.go), so an unrecognized-verb check alone
+// (goModHasUnknownDirective, which already accepts "toolchain" as a valid
+// verb since it IS one) was never enough to catch a malformed *argument* to
+// it, exactly as an unrecognized-verb check alone wasn't enough for `go`
+// before goModHasInvalidGoDirective was added.
+//
+// This matters for the same "cannot leak" reason as every other malformed-
+// go.mod skip in this file: a go.mod real go refuses to parse at all can
+// never resolve a single module, so no sumdb query for anything in it can
+// ever happen. Confirmed live end-to-end against the actual goprivaudit
+// binary, pre-fix: a go.mod with a real, otherwise-uncovered
+// private-auth-signaled require plus a malformed "toolchain 1.24.4" line
+// (missing the "go" prefix a real toolchain name always carries) was
+// reported "SUMDB LEAK", while `go list -m all`/`go build` on the identical
+// file Fatal immediately ("go: invalid toolchain "1.24.4" in go.mod" for a
+// ToolchainRE mismatch, or "errors parsing go.mod: go.mod:N: toolchain
+// directive expects exactly one argument" for a bare/extra-argument
+// "toolchain" line — both verified live, `go version go1.26.8`) and never
+// get far enough to query anything. A missing `toolchain` directive
+// entirely is NOT one of these cases — a go.mod with no `toolchain` line at
+// all parses and resolves normally — so this only triggers when a
+// `toolchain` line is actually present and malformed.
+//
+// Uses the same fields[0]-comparison shape goModHasInvalidGoDirective uses
+// rather than cutKeyword, for the identical reason: cutKeyword requires its
+// keyword be followed by whitespace or "(", which would reject a bare
+// "toolchain" line with nothing after it at all — exactly one of the two
+// invalid shapes this function needs to catch.
+func goModHasInvalidToolchainDirective(data []byte) bool {
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if fields[0] != "toolchain" {
+			continue
+		}
+		args := fields[1:]
+		if len(args) != 1 || !goToolchainDirectiveRE.MatchString(args[0]) {
+			return true
+		}
+	}
+	return false
+}
+
 // goModValidTopLevelVerbs is the complete, fixed set of go.mod top-level
 // directive keywords golang.org/x/mod/modfile's real parser
 // ((*File).add's verb switch, rule.go) recognizes for the main module:

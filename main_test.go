@@ -858,6 +858,47 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunInvalidToolchainDirectiveGoModNoLeak is the direct regression test
+// for goModHasInvalidToolchainDirective (see gomod.go): a go.mod whose
+// `toolchain` directive argument doesn't match the real go command's strict
+// toolchain-name syntax validation makes every module-aware go subcommand
+// Fatal parsing go.mod before it resolves a single module, so the otherwise-
+// uncovered private-auth signal below can never actually leak. Verified live
+// before this fix: `go list -m all` on the equivalent file Fatals
+// immediately with `go: invalid toolchain "1.24.4" in go.mod` (the
+// "toolchain" name is missing its required "go" prefix), while this tool
+// still reported "SUMDB LEAK" for the require line it could still see below
+// the malformed directive.
+func TestRunInvalidToolchainDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+toolchain 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's toolchain directive is malformed (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunUnknownDirectiveGoModNoLeak is the direct regression test for
 // goModHasUnknownDirective (see gomod.go): a go.mod containing a top-level
 // line whose first token isn't a real go.mod directive keyword — here,

@@ -391,6 +391,41 @@ func TestGoModHasInvalidGoDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasInvalidToolchainDirective covers
+// goModHasInvalidToolchainDirective's live-verified trigger condition: a
+// `toolchain` directive line whose argument doesn't match
+// golang.org/x/mod/modfile's own strict ToolchainRE, or that doesn't carry
+// exactly one argument, is exactly what makes the real go command's strict
+// go.mod parser (modfile.Parse) Fatal every module-aware go subcommand
+// before resolving a single module — confirmed against real `go list -m
+// all` (see TestRunInvalidToolchainDirectiveGoModNoLeak in main_test.go for
+// the end-to-end regression). A go.mod with no `toolchain` directive at all
+// is NOT one of these cases — verified live, real go parses and resolves it
+// normally.
+func TestGoModHasInvalidToolchainDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no toolchain directive at all", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"plain go1.x.y toolchain", "module example.com/foo\n\ngo 1.24\n\ntoolchain go1.24.4\n", false},
+		{"go1 with no further version", "module example.com/foo\n\ngo 1.24\n\ntoolchain go1\n", false},
+		{"prerelease suffix", "module example.com/foo\n\ngo 1.24\n\ntoolchain go1.21rc1\n", false},
+		{"default keyword", "module example.com/foo\n\ngo 1.24\n\ntoolchain default\n", false},
+		{"missing go prefix", "module example.com/foo\n\ngo 1.24\n\ntoolchain 1.24.4\n", true},
+		{"bare toolchain directive, no argument", "module example.com/foo\n\ngo 1.24\n\ntoolchain\n\nrequire example.com/bar v1.0.0\n", true},
+		{"extra argument after the version", "module example.com/foo\n\ngo 1.24\n\ntoolchain go1.24.4 extra\n", true},
+		{"quoted toolchain name", "module example.com/foo\n\ngo 1.24\n\ntoolchain \"go1.24.4\"\n", true},
+		{"godebug directive is not mistaken for toolchain", "module example.com/foo\n\ngo 1.24.4\n\ngodebug (\n\ttlsmlkem=0\n)\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidToolchainDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidToolchainDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestGoModHasUnknownDirective covers goModHasUnknownDirective's
 // live-verified trigger condition: a top-level line whose first token isn't
 // one of the real parser's recognized go.mod directive keywords (module,

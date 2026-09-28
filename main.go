@@ -63,11 +63,16 @@
 // goModHasInvalidGoDirective) — an argument not shaped like a real go
 // version, or a missing/extra argument — for the identical reason: the real
 // go command's strict go.mod parser Fatals before resolving anything. Both
-// are also skipped when go.mod contains any top-level line whose first
-// token isn't one of the real parser's recognized directive keywords (see
+// are also skipped when go.mod's own `toolchain` directive line is malformed
+// (see goModHasInvalidToolchainDirective) — an argument not shaped like a
+// real toolchain name (missing the "go" prefix, or not "default"), or a
+// missing/extra argument — for the identical reason, the sibling directive
+// to `go` sharing its exact validation shape in the real parser. Both are
+// also skipped when go.mod contains any top-level line whose first token
+// isn't one of the real parser's recognized directive keywords (see
 // goModHasUnknownDirective) — a typo like "requires" instead of "require",
 // or any other unrecognized verb — for the same reason, one level more
-// general than the go-directive-specific check just above.
+// general than the go/toolchain-directive-specific checks just above.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -291,6 +296,17 @@ func run(args []string, stdout, stderr *os.File) int {
 		// single module (see goModHasInvalidGoDirective). Same "cannot leak"
 		// reasoning as goModHasBlockComment above, just reached via a
 		// different unparsable-go.mod shape.
+	case goModHasInvalidToolchainDirective(data):
+		// A go.mod whose `toolchain` directive line real go's own strict
+		// parser rejects — an argument that doesn't match modfile's
+		// ToolchainRE ("toolchain 1.24.4", missing the "go" prefix a real
+		// toolchain name always carries), or a missing/extra argument
+		// ("toolchain", "toolchain go1.24.4 extra") — makes every
+		// module-aware go subcommand Fatal parsing go.mod itself, before it
+		// resolves a single module (see goModHasInvalidToolchainDirective).
+		// Same "cannot leak" reasoning as goModHasInvalidGoDirective just
+		// above, for the sibling directive that shares its exact
+		// len(args)!=1-then-regex validation shape in the real parser.
 	case goModHasUnknownDirective(data):
 		// A go.mod containing any top-level line whose first token isn't
 		// one of the real parser's recognized directive keywords (see
