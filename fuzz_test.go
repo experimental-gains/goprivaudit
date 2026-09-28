@@ -203,6 +203,183 @@ func stdlibParseNetrc(data string) []stdlibNetrcLine {
 	return nrc
 }
 
+// curlParseNetrc is a from-scratch, independently-structured port of the
+// installed curl 8.14.1's real lib/netrc.c parsenetrc token/state machine
+// (fetched from https://github.com/curl/curl/blob/curl-8_14_1/lib/netrc.c
+// and read directly, 2026-09 — the exact version this box's curl/git ship;
+// confirmed against a newer libcurl master snapshot too, which rewrote this
+// into a lexer but preserved the same tokenization primitives), generalized
+// from "scan for one specific host, and stop the instant its credentials
+// are fully found" (all curl itself needs) to "collect every machine entry
+// in the file" (what this oracle needs) — the underlying token mechanics
+// are unchanged: blanks (space/tab only) are skipped before each token, a
+// token is any run of bytes greater than 0x20, and the scan for the next
+// token unconditionally advances exactly one byte past the one just
+// consumed, so landing that one byte on a '\n' resumes scanning at the very
+// start of the next physical line rather than stopping — the exact
+// mechanic privatePrefixesFromNetrc's own nextToken ports (see its doc
+// comment for the live GIT_CURL_VERBOSE verification this is modeling).
+//
+// "default" is deliberately NOT ported as real curl's own single-host
+// search implements it (an unconditional, always-matching host, whose
+// early-exit-once-complete behavior is entangled with searching for one
+// target and doesn't have a well-defined generalization to "list every
+// entry" — a default entry's own completeness can make real curl stop
+// scanning before or after a later real "machine" entry depending on
+// exactly which fields it sets, per curl's source, a distinction with no
+// analogue here). Instead this uses the same deliberate, documented
+// convention privatePrefixesFromNetrc itself applies: an isolated "default"
+// — nothing else queued after it on its own physical line, the
+// conventional way it's written and the shape both curl's and cmd/go's
+// docs describe ("must be after all machine tokens") — ends scanning
+// entirely, so this oracle and the function under test share that one
+// deliberate, documented design choice by construction rather than by
+// coincidence.
+//
+// Unlike stdlibParseNetrc above (kept for its own documentation value —
+// it's what cmd/go's GOAUTH=netrc client, a real but DIFFERENT consumer of
+// this same file, actually implements), this is the authoritative oracle
+// for privatePrefixesFromNetrc specifically, since that function claims to
+// model curl/git's real netrc consultation, not cmd/go's — so this fuzz
+// target checks it for an EXACT match, not just a subset. It exists
+// because an earlier draft of privatePrefixesFromNetrc's whitespace-
+// spanning rewrite (before this oracle existed) shipped with two real bugs
+// this fuzz target caught within seconds: a "macdef" line with no macro
+// name at all incorrectly swallowed the next real machine entry as
+// unscanned macro body (real curl does not: verified live, see
+// netrc.go's doc comment), and cmd/go's own line-positional token PAIRING
+// (every two tokens on a line form a key/value pair, recognized or not)
+// was mistakenly carried over into a keyword-triggered design where it
+// doesn't belong, silently swallowing a real "machine"/"login"/"password"
+// keyword as an unrecognized preceding token's discarded "value" — a
+// quirk of cmd/go's specific implementation loop that real curl's
+// parser — confirmed directly from its source, which examines and
+// dispatches on exactly one token at a time regardless of whether the
+// previous one was recognized — does not share.
+func curlParseNetrc(data string) []stdlibNetrcLine {
+	const (
+		stNothing = iota
+		stHostFound
+		stHostValid
+	)
+	const (
+		kwNone = iota
+		kwLogin
+		kwPassword
+	)
+	state := stNothing
+	keyword := kwNone
+	inMacro := false
+	var out []stdlibNetrcLine
+	var l stdlibNetrcLine
+
+	commit := func() {
+		if l.machine != "" && (l.login != "" || l.password != "") {
+			out = append(out, l)
+		}
+		l = stdlibNetrcLine{}
+		keyword = kwNone
+	}
+
+	// isBlank matches netrc.go's own deliberate, documented choice (see
+	// privatePrefixesFromNetrc's isBlank) to treat only space/tab/CR/
+	// vtab/formfeed as inter-token separators, rather than real curl's
+	// literal "any byte <= 0x20" boundary — which, for a raw low control
+	// byte (a real curl SYNTAX_ERROR case, verified against curl's own
+	// source: `if(!len) retcode=NETRC_SYNTAX_ERROR`), produces a
+	// zero-length token neither this oracle nor netrc.go has any
+	// principled use for. Since this oracle exists specifically to check
+	// privatePrefixesFromNetrc against what it claims to model, it shares
+	// that one deliberate simplification rather than chasing exact
+	// byte-for-byte curl fidelity into a corner both implementations
+	// agree isn't worth it.
+	isBlank := func(b byte) bool {
+		switch b {
+		case ' ', '\t', '\r', '\v', '\f':
+			return true
+		default:
+			return false
+		}
+	}
+
+	i, n := 0, len(data)
+	for i < n {
+		for i < n && isBlank(data[i]) {
+			i++
+		}
+		if inMacro && i < n && data[i] == '\n' {
+			inMacro = false
+		}
+		if i >= n || data[i] == '\n' {
+			nl := strings.IndexByte(data[i:], '\n')
+			if nl < 0 {
+				break
+			}
+			i += nl + 1
+			continue
+		}
+		start := i
+		for i < n && !isBlank(data[i]) && data[i] != '\n' {
+			i++
+		}
+		tok := data[start:i]
+		j := i
+		for j < n && isBlank(data[j]) {
+			j++
+		}
+		atEOL := j >= n || data[j] == '\n'
+		if i < n {
+			i++
+		}
+
+		if inMacro {
+			continue
+		}
+
+		switch state {
+		case stNothing:
+			switch tok {
+			case "macdef":
+				inMacro = true
+			case "machine":
+				commit()
+				state = stHostFound
+			case "default":
+				if atEOL {
+					commit()
+					return out
+				}
+			}
+		case stHostFound:
+			l.machine = tok
+			state = stHostValid
+		case stHostValid:
+			switch {
+			case keyword == kwLogin:
+				l.login = tok
+				keyword = kwNone
+			case keyword == kwPassword:
+				l.password = tok
+				keyword = kwNone
+			case tok == "login":
+				keyword = kwLogin
+			case tok == "password":
+				keyword = kwPassword
+			case tok == "machine":
+				commit()
+				state = stHostFound
+			case tok == "default":
+				if atEOL {
+					commit()
+					return out
+				}
+			}
+		}
+	}
+	commit()
+	return out
+}
+
 func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
 	seeds := []string{
 		"machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n",
@@ -215,6 +392,10 @@ func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
 		"machine\nlogin x\npassword y\n",
 		"macdef m\n",
 		"default\nmachine a.internal\nlogin x\npassword y\n",
+		"machine a.internal\nlogin\nbuilder\npassword\ns3cr3t\n",
+		"macdef \nmachine a.internal login x password y\n",
+		"default 0 machine a.internal login x password y\n",
+		"0 password machine a.internal login x password y\n",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -226,33 +407,24 @@ func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
 			gotSet[m] = true
 		}
 
-		// stdlibParseNetrc is cmd/go's own parseNetrc, which requires
-		// machine+login+password ALL present before using an entry (see
-		// its doc comment) — the right completeness bar for what it
-		// actually feeds, GOAUTH=netrc, but NOT for what
-		// privatePrefixesFromNetrc feeds instead (a real git-subprocess
-		// fetch's own netrc consultation, verified live to authenticate
-		// off just a login OR just a password — see
-		// privatePrefixesFromNetrc's doc comment for run #472's fix). So
-		// this is no longer an exact-match oracle: every machine
-		// stdlibParseNetrc's stricter rule finds is still required to
-		// appear in got (a subset check), which still catches a
-		// regression in every bit of tokenizing logic that IS still
-		// shared verbatim — default/macdef handling, field pairing,
-		// dedup, known-public-host filtering — without wrongly failing on
-		// the login-only/password-only cases privatePrefixesFromNetrc now
-		// deliberately reports and stdlibParseNetrc deliberately doesn't.
-		var want []string
-		seen := map[string]bool{}
-		for _, l := range stdlibParseNetrc(data) {
-			if !isKnownPublicHost(l.machine) && !seen[l.machine] {
-				seen[l.machine] = true
-				want = append(want, l.machine)
+		// curlParseNetrc is the authoritative, exact-match oracle now —
+		// see its own doc comment for why it, not stdlibParseNetrc
+		// (cmd/go's own, DIFFERENT real netrc consumer), is what
+		// privatePrefixesFromNetrc actually claims to model.
+		want := map[string]bool{}
+		for _, l := range curlParseNetrc(data) {
+			if !isKnownPublicHost(l.machine) {
+				want[l.machine] = true
 			}
 		}
-		for _, m := range want {
+		for m := range want {
 			if !gotSet[m] {
-				t.Fatalf("privatePrefixesFromNetrc(%q) = %v, missing %q found by the stricter oracle: cmd/go/internal/auth.parseNetrc", data, got, m)
+				t.Fatalf("privatePrefixesFromNetrc(%q) = %v, missing %q found by curlParseNetrc", data, got, m)
+			}
+		}
+		for m := range gotSet {
+			if !want[m] {
+				t.Fatalf("privatePrefixesFromNetrc(%q) = %v, extra %q not found by curlParseNetrc", data, got, m)
 			}
 		}
 	})

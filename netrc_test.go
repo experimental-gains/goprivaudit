@@ -93,6 +93,30 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 			want: []string{"real.internal"},
 		},
 		{
+			// Regression test: a real `~/.netrc` entry with "login"/
+			// "password" each written on their own physical line, separate
+			// from the "machine" line, is a real, live-verified signal (a
+			// real `git` subprocess HTTPS fetch authenticates off exactly
+			// this entry — see this function's doc comment for the
+			// GIT_CURL_VERBOSE trace confirming it), not just a stylistic
+			// variant of the one-line/two-line forms above. cmd/go's own
+			// per-line-paired tokenizer, which the pre-fix version of this
+			// function mirrored, treats "login" and its value as two
+			// separate, unpaired trailing tokens (one per line) and drops
+			// both silently.
+			name: "login and password values on their own physical lines still a signal",
+			data: "machine git.privatecorp.internal\nlogin\nbuilder\npassword\ns3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
+		},
+		{
+			// Regression test, same shape as above but for just the
+			// machine's own name landing on the next line after the
+			// "machine" keyword.
+			name: "machine value on its own physical line still recognized",
+			data: "machine\ngit.privatecorp.internal\nlogin builder\npassword s3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
+		},
+		{
 			name: "default token stops processing",
 			data: "machine before.internal\nlogin x\npassword y\n" +
 				"default\nlogin anon\npassword anon\n" +
@@ -194,6 +218,35 @@ func TestRunFindsLeakViaNetrcEvenWithGoauthOff(t *testing.T) {
 	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n")
 	t.Setenv("HOME", home)
 	t.Setenv("GOAUTH", "off")
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.privatecorp.internal/team/widgets v1.2.3
+`)
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaNetrcMultiLineFields is the end-to-end regression test
+// for the whitespace-spanning-tokenizer fix: a real ~/.netrc with "login"
+// and "password" each on their own physical line (a real, hand-formatted
+// netrc style covered live against `git`/`curl` in
+// privatePrefixesFromNetrc's doc comment) must still be caught as a sumdb
+// leak, the same as the one-line and two-line ("login x" on one line, then
+// "password y" on the next) forms already covered above.
+func TestRunFindsLeakViaNetrcMultiLineFields(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin\nbuilder\npassword\ns3cr3t\n")
+	t.Setenv("HOME", home)
 
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
