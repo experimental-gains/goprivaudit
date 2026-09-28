@@ -1,7 +1,6 @@
 package main
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 
@@ -222,7 +221,27 @@ func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, data string) {
 		got := privatePrefixesFromNetrc([]byte(data))
+		gotSet := map[string]bool{}
+		for _, m := range got {
+			gotSet[m] = true
+		}
 
+		// stdlibParseNetrc is cmd/go's own parseNetrc, which requires
+		// machine+login+password ALL present before using an entry (see
+		// its doc comment) — the right completeness bar for what it
+		// actually feeds, GOAUTH=netrc, but NOT for what
+		// privatePrefixesFromNetrc feeds instead (a real git-subprocess
+		// fetch's own netrc consultation, verified live to authenticate
+		// off just a login OR just a password — see
+		// privatePrefixesFromNetrc's doc comment for run #472's fix). So
+		// this is no longer an exact-match oracle: every machine
+		// stdlibParseNetrc's stricter rule finds is still required to
+		// appear in got (a subset check), which still catches a
+		// regression in every bit of tokenizing logic that IS still
+		// shared verbatim — default/macdef handling, field pairing,
+		// dedup, known-public-host filtering — without wrongly failing on
+		// the login-only/password-only cases privatePrefixesFromNetrc now
+		// deliberately reports and stdlibParseNetrc deliberately doesn't.
 		var want []string
 		seen := map[string]bool{}
 		for _, l := range stdlibParseNetrc(data) {
@@ -231,11 +250,10 @@ func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
 				want = append(want, l.machine)
 			}
 		}
-		if len(got) == 0 && len(want) == 0 {
-			return
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Fatalf("privatePrefixesFromNetrc(%q) = %v, want %v (oracle: cmd/go/internal/auth.parseNetrc)", data, got, want)
+		for _, m := range want {
+			if !gotSet[m] {
+				t.Fatalf("privatePrefixesFromNetrc(%q) = %v, missing %q found by the stricter oracle: cmd/go/internal/auth.parseNetrc", data, got, m)
+			}
 		}
 	})
 }

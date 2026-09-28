@@ -24,19 +24,43 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 			want: []string{"git.privatecorp.internal"},
 		},
 		{
-			name: "missing password ignored, matching go's own parser",
+			// Regression test (run #472): a login-only entry still
+			// authenticates a real git-subprocess HTTPS fetch (verified
+			// live — see this function's doc comment), so it's a real
+			// signal even though cmd/go's own GOAUTH=netrc parser would
+			// ignore it for lacking a password.
+			name: "missing password still a signal, unlike go's own GOAUTH=netrc parser",
 			data: "machine git.privatecorp.internal\nlogin builder\n",
-			want: nil,
+			want: []string{"git.privatecorp.internal"},
 		},
 		{
-			name: "missing login ignored, matching go's own parser",
+			// Regression test (run #472): same as above, mirrored — a
+			// password-only entry authenticates too (verified live).
+			name: "missing login still a signal, unlike go's own GOAUTH=netrc parser",
 			data: "machine git.privatecorp.internal\npassword s3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
+		},
+		{
+			// A "machine" entry with neither login nor password at all is
+			// the one shape verified live NOT to authenticate anything (a
+			// real `git ls-remote` against it fails outright with "could
+			// not read Username") — still correctly not a signal.
+			name: "neither login nor password present is not a signal",
+			data: "machine git.privatecorp.internal\n",
 			want: nil,
 		},
 		{
 			name: "known public host excluded",
 			data: "machine github.com\nlogin builder\npassword s3cr3t\n",
 			want: nil,
+		},
+		{
+			// Regression test (run #472): the deferred-commit rewrite must
+			// still handle a login line followed by its own password line
+			// as one entry, not two premature partial commits.
+			name: "login then password on separate lines still one entry",
+			data: "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
 		},
 		{
 			name: "multiple entries, deduped",
@@ -97,6 +121,36 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 func TestRunFindsLeakViaNetrc(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n")
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.privatecorp.internal/team/widgets v1.2.3
+`)
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaNetrcWithLoginOnly is the end-to-end regression test
+// for run #472's fix: a netrc entry with a "login" line but no "password"
+// line still authenticates a real git-subprocess HTTPS fetch (verified live
+// against real git and curl — see privatePrefixesFromNetrc's doc comment),
+// so it's a real sumdb-leak signal even though the pre-fix code, mirroring
+// cmd/go/internal/auth.parseNetrc's machine+login+password completeness
+// rule verbatim, silently required all three fields and reported "no
+// issues found" for exactly this setup.
+func TestRunFindsLeakViaNetrcWithLoginOnly(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin builder\n")
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()

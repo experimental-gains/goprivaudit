@@ -276,7 +276,7 @@ here too: an `[http "https://user@host/..."] extraheader = ...` context
 never matches the userless URL `go get` fetches with.
 
 **Netrc.** It also checks the netrc file (`$NETRC`, or `~/.netrc` — `~/_netrc` on
-Windows) for `machine` entries with a login and password. This is easy to
+Windows) for `machine` entries with a login and/or a password. This is easy to
 end up relying on by accident: many environments already have a
 `~/.netrc` for unrelated tools, and both `go`'s own HTTPS client (via
 `GOAUTH`, default `netrc` — `go help goauth`) and a `git` subprocess
@@ -285,6 +285,13 @@ it automatically, with nothing module-specific to opt into. Unlike
 `go`'s own client, `git` has no notion of `GOAUTH` at all — it always
 reads `~/.netrc` for a plain HTTPS remote — so a `machine` entry counts
 as a signal unconditionally, regardless of the effective `GOAUTH` value.
+A `machine` entry only needs *one* of login/password set to count: verified
+live that a real `git` HTTPS fetch authenticates off just a login (empty
+password) or just a password (empty login) via the same libcurl netrc
+reader `curl` itself uses — a stricter "both required" rule (`go`'s own
+GOAUTH=netrc parser requires exactly that, since it's a different code
+path) would silently miss a real leak from a netrc entry with one field
+left unset, an easy slip.
 
 ## What it does not do
 
