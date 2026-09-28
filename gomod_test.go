@@ -391,6 +391,43 @@ func TestGoModHasInvalidGoDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasUnknownDirective covers goModHasUnknownDirective's
+// live-verified trigger condition: a top-level line whose first token isn't
+// one of the real parser's recognized go.mod directive keywords (module,
+// go, toolchain, require, exclude, replace, retract, tool, ignore,
+// godebug) is exactly what makes golang.org/x/mod/modfile's real parser
+// Fatal every module-aware go subcommand with "unknown directive: %s"
+// before resolving a single module — confirmed against real `go list -m
+// all` (see TestRunUnknownDirectiveGoModNoLeak in main_test.go for the
+// end-to-end regression). Every recognized verb, including ones this file
+// has no dedicated parser for at all (retract, ignore, godebug), must NOT
+// be flagged — nor may a line legitimately sitting inside an existing
+// block, whose own first token can be anything (a module path, a version
+// interval) without being a directive verb at all.
+func TestGoModHasUnknownDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"plain valid go.mod", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"pluralized require typo", "module example.com/foo\n\ngo 1.24\n\nrequires example.com/bar v1.0.0\n", true},
+		{"uppercase GO instead of go", "module example.com/foo\n\nGO 1.24\n", true},
+		{"misspelled replase", "module example.com/foo\n\ngo 1.24\n\nreplase example.com/bar => ../local\n", true},
+		{"outright garbage line", "module example.com/foo\n\ngo 1.24\n\nthis is not a directive\n", true},
+		{"every real directive keyword accepted", "module example.com/foo\n\ngo 1.24\n\ntoolchain go1.24.4\n\ngodebug tlsmlkem=0\n\nrequire example.com/bar v1.0.0\n\nexclude example.com/bar v0.9.0\n\nreplace example.com/bar => ../local\n\nretract v1.0.0\n\ntool example.com/bar/cmd/x\n\nignore ./testdata\n", false},
+		{"require block entries aren't verb-checked", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0\n\texample.com/baz v2.0.0\n)\n", false},
+		{"retract block entries aren't verb-checked", "module example.com/foo\n\ngo 1.24\n\nretract (\n\tv1.0.0\n\t[v1.1.0, v1.2.0]\n)\n", false},
+		{"no-space block-open form", "module example.com/foo\n\ngo 1.24\n\nrequire(\n\texample.com/bar v1.0.0\n)\n", false},
+		{"unknown verb after a valid block closes", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0\n)\n\nrequires example.com/baz v1.0.0\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasUnknownDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasUnknownDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`

@@ -858,6 +858,47 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunUnknownDirectiveGoModNoLeak is the direct regression test for
+// goModHasUnknownDirective (see gomod.go): a go.mod containing a top-level
+// line whose first token isn't a real go.mod directive keyword — here,
+// "requires" instead of "require", a plausible pluralization slip — makes
+// every module-aware go subcommand Fatal parsing go.mod before it resolves
+// a single module, so the otherwise-uncovered private-auth signal below can
+// never actually leak. Verified live before this fix: `go list -m all` on
+// the equivalent file Fatals immediately with "errors parsing go.mod:
+// go.mod:7: unknown directive: requires", while this tool still reported
+// "SUMDB LEAK" for the require line it could still see above the bogus
+// line.
+func TestRunUnknownDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+requires bogus/directive v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod has an unrecognized top-level directive (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active

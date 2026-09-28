@@ -62,7 +62,12 @@
 // skipped when the go.mod's own `go` directive line is malformed (see
 // goModHasInvalidGoDirective) — an argument not shaped like a real go
 // version, or a missing/extra argument — for the identical reason: the real
-// go command's strict go.mod parser Fatals before resolving anything.
+// go command's strict go.mod parser Fatals before resolving anything. Both
+// are also skipped when go.mod contains any top-level line whose first
+// token isn't one of the real parser's recognized directive keywords (see
+// goModHasUnknownDirective) — a typo like "requires" instead of "require",
+// or any other unrecognized verb — for the same reason, one level more
+// general than the go-directive-specific check just above.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -286,6 +291,17 @@ func run(args []string, stdout, stderr *os.File) int {
 		// single module (see goModHasInvalidGoDirective). Same "cannot leak"
 		// reasoning as goModHasBlockComment above, just reached via a
 		// different unparsable-go.mod shape.
+	case goModHasUnknownDirective(data):
+		// A go.mod containing any top-level line whose first token isn't
+		// one of the real parser's recognized directive keywords (see
+		// goModHasUnknownDirective) — a typo'd verb ("requires" for
+		// "require"), a case mismatch ("GO" for "go"), or outright garbage —
+		// makes every module-aware go subcommand Fatal with "unknown
+		// directive: %s" parsing go.mod itself, before it resolves a single
+		// module. Same "cannot leak" reasoning as goModHasInvalidGoDirective
+		// just above, one level more general: that check only ever catches a
+		// malformed *argument* to a recognized "go" line, not an entirely
+		// unrecognized verb anywhere else in the file.
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own validation rejects
 		// outright — a malformed shape (goflagsMalformed), an explicit

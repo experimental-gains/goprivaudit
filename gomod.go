@@ -182,6 +182,94 @@ func goModHasInvalidGoDirective(data []byte) bool {
 	return false
 }
 
+// goModValidTopLevelVerbs is the complete, fixed set of go.mod top-level
+// directive keywords golang.org/x/mod/modfile's real parser
+// ((*File).add's verb switch, rule.go) recognizes for the main module:
+// module, go, toolchain, require, exclude, replace, retract, tool,
+// ignore, and godebug — every case in that switch besides its `default`.
+// Anything else hits that default case outright: `errorf("unknown
+// directive: %s", verb)`. Like goflagsInvalidModValue's accepted -mod
+// set, this is small, stable, and fully documented (`go help go.mod`) —
+// it hasn't changed shape since `ignore`/`godebug` were added — so it's
+// checked directly rather than by shelling out to a live `go` binary the
+// way goflagsRejectedByGo's registered-flag-name check does for GOFLAGS
+// (whose accepted set isn't otherwise enumerable from outside cmd/go).
+var goModValidTopLevelVerbs = map[string]bool{
+	"module": true, "go": true, "toolchain": true, "require": true,
+	"exclude": true, "replace": true, "retract": true, "tool": true,
+	"ignore": true, "godebug": true,
+}
+
+// goModHasUnknownDirective reports whether data contains a top-level line
+// whose first token isn't one of goModValidTopLevelVerbs — the general
+// shape goModHasInvalidGoDirective only ever covers for the "go"
+// directive specifically (a recognized "go" line with a malformed
+// argument). An entirely unrecognized verb — a plausible pluralization
+// slip like "requires" instead of "require" (exactly the kind of mistake
+// an LLM's training-data intuition for English grammar produces, the
+// same failure class this whole tool exists to catch), a case mismatch
+// like "GO" instead of "go" (verb matching is case-sensitive: verified
+// live that `GO 1.24` Fatals with "unknown directive: GO", not treated
+// as the `go` directive), a misspelling, or outright garbage — makes the
+// real go command's strict go.mod parser Fatal with "unknown directive:
+// %s" before resolving a single module, before it even gets to whichever
+// directive-specific validation goModHasInvalidGoDirective/
+// goModHasBlockComment model. Same "cannot leak" reasoning as every
+// other malformed-go.mod skip in this file: a query that never happens
+// can't leak anything.
+//
+// Confirmed live end-to-end against the actual goprivaudit binary,
+// pre-fix: a go.mod with a real, otherwise-uncovered private-auth-signaled
+// require plus an unrelated "requires bogus/directive v1.0.0" line
+// elsewhere in the file was reported "SUMDB LEAK", while `go list -m
+// all`/`go build` on the identical file Fatal immediately with "errors
+// parsing go.mod: go.mod:N: unknown directive: requires" and never get
+// far enough to query anything (see
+// TestRunUnknownDirectiveGoModNoLeak in main_test.go for the exact
+// reproduction).
+//
+// Lines inside an existing block ("require (\n...\n)") are never
+// verb-checked themselves: the real parser dispatches every block entry
+// under its own block's opening verb, never re-examines each inner
+// line's first token as a directive verb of its own — the same
+// convention parseRequires/parseReplaces/parseTools's own dedicated
+// block tracking already follows, just generalized here across every
+// verb (including ones this file has no dedicated parser for at all,
+// like "retract (...)" or "ignore (...)"), not just the handful with
+// their own parser. Block-open detection matches cutKeyword's own
+// documented rule: the verb may be followed directly by "(" with no
+// separating space at all ("require(" is real, accepted go.mod syntax,
+// verified live), not just "verb (".
+func goModHasUnknownDirective(data []byte) bool {
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		if !goModValidTopLevelVerbs[verb] {
+			return true
+		}
+		if strings.TrimSpace(trimmed[i:]) == "(" {
+			inBlock = true
+		}
+	}
+	return false
+}
+
 // parseTools extracts package import paths from `tool` directives in a
 // go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
 // names a *package* path, not necessarily a module path — e.g. `tool
