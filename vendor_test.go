@@ -80,6 +80,55 @@ func TestGoflagsMalformed(t *testing.T) {
 	}
 }
 
+// TestGoflagsInvalidModValue is the regression test for the third
+// distinct GOFLAGS "-mod" divergence goflagsMalformed/goflagsRejectedByGo
+// don't catch: a syntactically valid "-mod=X" whose X isn't one of the
+// four real go accepts. Verified live: `GOFLAGS=-mod=Vendor go list -m`
+// (capitalized, a plausible typo of the correct lowercase "vendor")
+// exits 1 with "-mod=Vendor not supported (can be ”, 'mod', 'readonly',
+// or 'vendor')" — a message that, unlike goflagsRejectedByGo's cases,
+// never mentions "$GOFLAGS" at all — before resolving a single module.
+func TestGoflagsInvalidModValue(t *testing.T) {
+	cases := []struct {
+		goflags string
+		want    bool
+	}{
+		{"", false},
+		{"-race", false},
+		// The four values real go actually accepts.
+		{"-mod=", false},
+		{"-mod=mod", false},
+		{"-mod=readonly", false},
+		{"-mod=vendor", false},
+		{"--mod=vendor", false},
+		{`"-mod=vendor"`, false},
+		// Wrong-cased or simply invalid values: real go Fatals with
+		// "-mod=X not supported (can be '', 'mod', 'readonly', or
+		// 'vendor')" for every one of these, verified live for "Vendor".
+		{"-mod=Vendor", true},
+		{"-mod=Mod", true},
+		{"-mod=readOnly", true},
+		{"-mod=bogus", true},
+		{"--mod=Vendor", true},
+		{`"-mod=Vendor"`, true},
+		{"-race -mod=Vendor -v", true},
+		// Repeated flag: only the last one (what explicitModFlag itself
+		// resolves to) determines the result, same last-wins precedence as
+		// explicitModFlag.
+		{"-mod=Vendor -mod=vendor", false},
+		{"-mod=vendor -mod=Vendor", true},
+		// No explicit -mod= entry at all: nothing to reject here (a bare
+		// "-mod" with no value is goflagsRejectedByGo's territory, not
+		// this function's).
+		{"-mod", false},
+	}
+	for _, c := range cases {
+		if got := goflagsInvalidModValue(c.goflags); got != c.want {
+			t.Errorf("goflagsInvalidModValue(%q) = %v, want %v", c.goflags, got, c.want)
+		}
+	}
+}
+
 func TestGoVersionAtLeast(t *testing.T) {
 	cases := []struct {
 		version string

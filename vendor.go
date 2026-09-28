@@ -83,6 +83,55 @@ func explicitModFlag(goflags string) (value string, ok bool) {
 	return value, ok
 }
 
+// goflagsInvalidModValue reports whether goflags contains an explicit
+// "-mod=" (or "--mod=") entry whose value isn't one of the four the real
+// go command actually accepts. Per cmd/go/internal/work.buildModeInit's own
+// switch (go/src/cmd/go/internal/work/init.go), anything other than
+// ""/"mod"/"readonly"/"vendor" hits its default case and Fatals with
+// `-mod=<value> not supported (can be ”, 'mod', 'readonly', or 'vendor')`
+// — verified live: `GOFLAGS=-mod=Vendor go list -m` (a very plausible
+// mistake: the correct value is lowercase, but a shell variable, a
+// generated CI config, or simple habit can easily capitalize it) exits 1
+// with exactly that message, before resolving a single module, for every
+// module-aware go subcommand (list, build, get, mod download, test, ...),
+// not just build — they all funnel through work.BuildInit, which calls
+// buildModeInit right after modload.Init(), before anything module-aware
+// happens. Confirmed live end-to-end against the actual goprivaudit
+// binary, pre-fix: a go.mod with a real, otherwise-uncovered
+// private-auth-signaled require plus GOFLAGS=-mod=Vendor was reported
+// "SUMDB LEAK" — an active wrong claim for a checksum-database query that
+// structurally cannot happen, the same failure class goflagsMalformed and
+// goflagsRejectedByGo already close for the other two invalid-GOFLAGS
+// shapes (a non-flag-shaped token, and a shape-valid but unregistered flag
+// name / missing required value).
+//
+// Unlike goflagsRejectedByGo's cases, this rejection message never
+// mentions "$GOFLAGS"/"%GOFLAGS%" at all (verified live, see above), so
+// goflagsRejectedByGo's stderr-substring probe doesn't catch it — hence a
+// separate function rather than widening that one's match. And unlike
+// goflagsRejectedByGo's registered-flag-name/missing-argument checks
+// (which ask a live `go` binary specifically because the full set of
+// registered flag names and which of them are boolean shifts across go
+// versions and isn't otherwise enumerable from outside cmd/go), the
+// accepted `-mod` values are a small, stable, and already fully documented
+// part of the go command's interface (`go help build`) that hasn't
+// changed since modules were introduced — so this is checked directly,
+// the same static-check style as goflagsMalformed, rather than by paying
+// for another `go list -m` subprocess that could only ever confirm the
+// same fixed set.
+func goflagsInvalidModValue(goflags string) bool {
+	mod, ok := explicitModFlag(goflags)
+	if !ok {
+		return false
+	}
+	switch mod {
+	case "", "mod", "readonly", "vendor":
+		return false
+	default:
+		return true
+	}
+}
+
 // quotedFields splits a GOFLAGS-style value the way the real go command does
 // — cmd/go/internal/base.InitGOFLAGS feeds $GOFLAGS through
 // cmd/internal/quoted.Split, not strings.Fields — allowing a whole flag to be

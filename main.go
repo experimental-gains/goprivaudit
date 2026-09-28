@@ -42,13 +42,16 @@
 // workspace, so it's only honored when GOWORK is unset/"off" (or an
 // explicit -mod=vendor override is present, which applies either way).
 // Both are also skipped when GOFLAGS itself is rejected outright by the
-// real go command's own validation — either a malformed shape
-// (goflagsMalformed) or a shape-valid entry whose flag name isn't
-// registered by any go subcommand at all (goflagsRejectedByGo, asked of a
-// real `go list -m` since the exact registered-flag set isn't something
-// this tool can enumerate itself) — every module-aware go subcommand
-// Fatals before resolving anything in either case, so no sumdb query can
-// happen either. Both are also skipped
+// real go command's own validation — a malformed shape (goflagsMalformed),
+// an explicit "-mod=" value that isn't one of the four real go accepts
+// (goflagsInvalidModValue, checked statically since that set is small,
+// stable, and already documented), or a shape-valid entry whose flag name
+// isn't registered by any go subcommand at all, or is registered but
+// missing its required value (goflagsRejectedByGo, asked of a real `go
+// list -m` since the exact registered-flag set isn't something this tool
+// can enumerate itself) — every module-aware go subcommand Fatals before
+// resolving anything in any of these cases, so no sumdb query can happen
+// either. Both are also skipped
 // when the go.mod being audited itself contains a bare "/*" outside a
 // quoted string (see goModHasBlockComment) — go.mod's grammar only allows
 // "//" comments, and every module-aware go subcommand Fatals parsing the
@@ -234,7 +237,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	vendorModulesTxt := filepath.Join(moduleDir, "vendor", "modules.txt")
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
-	goflagsBad := goflagsMalformed(goflags) || goflagsRejectedByGo(moduleDir, goflags)
+	goflagsBad := goflagsMalformed(goflags) || goflagsInvalidModValue(goflags) || goflagsRejectedByGo(moduleDir, goflags)
 
 	// GOPROXY is still read here purely so the long-documented -proxy flag
 	// keeps parsing for any existing caller that passes it explicitly; its
@@ -258,16 +261,19 @@ func run(args []string, stdout, stderr *os.File) int {
 		// goflagsBad/gosumdb==off/vendorActive below, just reached because
 		// the go.mod never finishes parsing at all.
 	case goflagsBad:
-		// A GOFLAGS entry the real go command's own $GOFLAGS validation
-		// rejects outright — either a malformed shape (goflagsMalformed) or
-		// a shape-valid but unregistered flag name (goflagsRejectedByGo) —
-		// makes every module-aware go subcommand — build, list, get, mod
+		// A GOFLAGS entry the real go command's own validation rejects
+		// outright — a malformed shape (goflagsMalformed), an explicit
+		// "-mod=" value that isn't one of the four real values
+		// (goflagsInvalidModValue), or a shape-valid but unregistered flag
+		// name or missing required value (goflagsRejectedByGo) — makes
+		// every module-aware go subcommand — build, list, get, mod
 		// download, mod tidy, test, everything except `go env`/`go bug` —
-		// Fatal immediately with "go: parsing $GOFLAGS: non-flag ..." or
-		// "go: parsing $GOFLAGS: unknown flag ..." before it ever resolves a
-		// single module, let alone queries a checksum database. Same
-		// "cannot leak" reasoning as GOSUMDB=off and vendor mode below, just
-		// reached
+		// Fatal immediately (with "go: parsing $GOFLAGS: non-flag ...",
+		// "go: parsing $GOFLAGS: unknown flag ...", or "-mod=X not
+		// supported (can be '', 'mod', 'readonly', or 'vendor')") before it
+		// ever resolves a single module, let alone queries a checksum
+		// database. Same "cannot leak" reasoning as GOSUMDB=off and vendor
+		// mode below, just reached
 		// because the build never gets past parsing its own flags.
 	case gosumdb == "off":
 		// GOSUMDB=off disables the checksum database entirely, for every

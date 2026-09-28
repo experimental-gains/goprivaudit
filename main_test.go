@@ -726,6 +726,60 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunInvalidModValueGoflagsNoLeak is the regression test for a real
+// false positive found by testing against real go, a third distinct
+// GOFLAGS "-mod" divergence from TestRunMalformedGoflagsNoLeak (a
+// non-flag-shaped token), TestRunUnknownGoflagsFlagNameNoLeak (an
+// unregistered flag name), and TestRunGoflagsMissingArgNoLeak (a
+// registered flag missing its required value): GOFLAGS="-mod=Vendor"
+// (capitalized — a plausible typo of the correct lowercase "vendor") is
+// shaped exactly like a valid, registered "-name=value" flag, so neither
+// goflagsMalformed's shape check nor goflagsRejectedByGo's
+// "$GOFLAGS"/"%GOFLAGS%"-substring probe catches it. But
+// cmd/go/internal/work.buildModeInit Fatals once it actually checks the
+// value itself, printing "-mod=Vendor not supported (can be ”, 'mod',
+// 'readonly', or 'vendor')" — verified live: `GOFLAGS=-mod=Vendor go
+// list -m`/`go build` both exit 1 immediately with exactly that message,
+// before resolving a single module or contacting GOPROXY/GOSUMDB, for
+// every module-aware go subcommand alike (they all funnel through
+// work.BuildInit during their own init). Note this message never
+// mentions "$GOFLAGS"/"%GOFLAGS%" at all, unlike either of
+// goflagsRejectedByGo's cases — hence goflagsInvalidModValue as its own,
+// statically-checked function (see vendor.go) rather than a widened
+// goflagsRejectedByGo substring match. Pre-fix, goflagsBad was only
+// goflagsMalformed || goflagsRejectedByGo, neither of which caught this
+// value, so the audit ran normally and reported a SUMDB LEAK for a
+// checksum-database query that can never actually happen, since the real
+// go command dies before getting anywhere near it.
+func TestRunInvalidModValueGoflagsNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "-mod=Vendor",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when GOFLAGS carries an invalid -mod value (go itself would Fatal before any query), got: %s", stdout)
+	}
+}
+
 // TestRunBlockCommentGoModNoLeak is the direct regression test for
 // goModHasBlockComment (see gomod.go): a go.mod containing a stray "/* ... */"
 // line anywhere — unrelated to the require directive itself — makes every
