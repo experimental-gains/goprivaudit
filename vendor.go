@@ -69,15 +69,64 @@ func vendorModeActive(goflags, goVersion, vendorModulesTxtPath, gowork string) b
 }
 
 // explicitModFlag scans a GOFLAGS-style flag list for a "-mod=..." (or
-// "--mod=...") entry and returns its value. If more than one is present,
-// the last one wins, matching how the flag package resolves a repeated flag
-// when GOFLAGS values are prepended to a real argv.
+// "--mod=...") entry and returns its resolved value plus whether -mod
+// counts as having been set explicitly at all.
+//
+// value always reflects the LAST "-mod=" occurrence, even an empty one
+// ("-mod="), matching how the flag package resolves a repeated flag when
+// GOFLAGS values are prepended to a real argv. But ok does NOT simply
+// track "was any -mod= token present": it mirrors cmd/go's own
+// explicitStringFlag.Set (go/src/cmd/go/internal/base/flag.go), the Var
+// implementation the real -mod flag is registered with:
+//
+//	func (f explicitStringFlag) Set(v string) error {
+//		*f.value = v
+//		if v != "" {
+//			*f.explicit = true
+//		}
+//		return nil
+//	}
+//
+// *explicit is only ever assigned true — never reset to false — and only
+// when the value being set is non-empty. So "ok" here is true iff ANY
+// "-mod=" occurrence anywhere in goflags had a non-empty value, regardless
+// of what a later occurrence set value to.
+//
+// This matters for a real, live-verified divergence: pre-fix, this
+// function treated a single "-mod=" (empty value) the same as any other
+// explicit "-mod=X" — reporting (value="", ok=true) — which made
+// vendorModeActive treat it as an explicit override to non-vendor mode
+// (mod == "vendor" is false), when real go's cfg.BuildModExplicit is
+// simply never set for it at all, so go instead falls through to the
+// normal vendor auto-default exactly as if -mod had been omitted entirely.
+// Confirmed live: with a real vendor/modules.txt present (go >= 1.14, no
+// workspace) and GOPROXY pointed at an unreachable address,
+// `GOFLAGS=-mod= go list -m all` fails with "go: can't compute 'all'
+// using the vendor directory" — proof real go auto-vendored and never
+// touched the network — both inside and outside an active go.work
+// workspace, the exact opposite of what the pre-fix (value="", ok=true)
+// result made vendorModeActive conclude. That's an active wrong claim
+// (SUMDB LEAK reported for a query that structurally cannot happen), the
+// same severity class goflagsInvalidModValue's own "-mod=Vendor" fix
+// closed.
+//
+// The sticky-ok/last-value split also matters for a second real go
+// behavior verified live: `GOFLAGS="-mod=vendor -mod="` inside an active
+// workspace (value ends up "", but ok is true because "vendor" was
+// non-empty) still Fatals with go's workspace-mode "-mod may only be set
+// to readonly or vendor" error — exactly as goflagsModRejectedInWorkspace
+// (see below) computes from these two return values, and exactly unlike
+// a bare "-mod=" alone (ok=false), which does not Fatal and instead
+// auto-vendors as described above.
 func explicitModFlag(goflags string) (value string, ok bool) {
 	for _, tok := range quotedFields(goflags) {
 		tok = strings.TrimPrefix(tok, "--")
 		tok = strings.TrimPrefix(tok, "-")
 		if v, found := strings.CutPrefix(tok, "mod="); found {
-			value, ok = v, true
+			value = v
+			if v != "" {
+				ok = true
+			}
 		}
 	}
 	return value, ok
@@ -130,6 +179,56 @@ func goflagsInvalidModValue(goflags string) bool {
 	default:
 		return true
 	}
+}
+
+// goflagsModRejectedInWorkspace reports whether goflags carries an explicit
+// -mod value that the real go command rejects specifically because an
+// active go.work workspace is narrower than plain module mode: per
+// modload.setDefaultBuildMod's own check (go/src/cmd/go/internal/modload/
+// init.go):
+//
+//	if cfg.BuildModExplicit {
+//		if inWorkspaceMode() && cfg.BuildMod != "readonly" && cfg.BuildMod != "vendor" {
+//			base.Fatalf("go: -mod may only be set to readonly or vendor " +
+//				"when in workspace mode, but it is set to %q...")
+//		}
+//	}
+//
+// -mod=mod — perfectly valid outside a workspace, and one of the four
+// values goflagsInvalidModValue itself accepts — Fatals immediately inside
+// one, before resolving a single module. Verified live: with a real go.work
+// naming the module and GOPROXY pointed at an unreachable address,
+// `GOFLAGS=-mod=mod go list -m all` (and `go build`) both exit 1 with
+// exactly that "-mod may only be set to readonly or vendor when in
+// workspace mode" message, while the identical GOFLAGS outside the
+// workspace (GOWORK=off) builds normally. Before this function existed,
+// goprivaudit had no way to know this: goflagsInvalidModValue accepts
+// "mod" unconditionally (correct outside a workspace), and vendorModeActive
+// only checks whether the resolved value equals "vendor" — so a go.mod
+// with a real, otherwise-uncovered private-auth-signaled require, an active
+// go.work, and GOFLAGS=-mod=mod (a common way to force dependency updates,
+// e.g. in CI) was reported "SUMDB LEAK" — an active wrong claim for a
+// checksum-database query that structurally cannot happen, the same
+// failure class goflagsInvalidModValue's own "-mod=Vendor" fix closed, just
+// reached via workspace mode rather than a bare invalid value.
+//
+// Deliberately checked ahead of (and independently from)
+// goflagsInvalidModValue: since explicitModFlag's "ok" is sticky (see its
+// own doc comment) while its "value" is last-write-wins even when that
+// last write is empty, a compound GOFLAGS like "-mod=vendor -mod=" also
+// Fatals with this exact message inside a workspace (verified live) even
+// though its resolved value ("") is one goflagsInvalidModValue itself
+// treats as valid — so this check cannot simply be folded into that
+// function's existing switch.
+func goflagsModRejectedInWorkspace(goflags, gowork string) bool {
+	if gowork == "" || gowork == "off" {
+		return false
+	}
+	mod, ok := explicitModFlag(goflags)
+	if !ok {
+		return false
+	}
+	return mod != "readonly" && mod != "vendor"
 }
 
 // quotedFields splits a GOFLAGS-style value the way the real go command does

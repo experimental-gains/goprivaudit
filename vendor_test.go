@@ -30,6 +30,26 @@ func TestExplicitModFlag(t *testing.T) {
 		{`'-mod=vendor'`, "vendor", true},
 		{`"-tags=a b" -mod=vendor`, "vendor", true},
 		{`-mod=mod "-tags=a b"`, "mod", true},
+		// A bare "-mod=" (explicitly empty value): real go's own
+		// explicitStringFlag.Set (cmd/go/internal/base/flag.go) only ever
+		// sets cfg.BuildModExplicit when the value being set is non-empty,
+		// so this must NOT count as an explicit override — it behaves
+		// exactly as if -mod had never been mentioned at all. Verified
+		// live: with a real vendor/modules.txt present (go >= 1.14, no
+		// workspace) and an unreachable GOPROXY, `GOFLAGS=-mod= go list -m
+		// all` fails with "can't compute 'all' using the vendor
+		// directory" — proof go auto-vendored, the same as if GOFLAGS were
+		// empty — not proof it forced a non-vendor mode.
+		{"-mod=", "", false},
+		// Compound: an earlier non-empty "-mod=vendor" makes ok sticky
+		// true even though the LAST occurrence's value is empty and wins
+		// for value itself — mirroring cfg.BuildModExplicit never being
+		// reset to false by a later Set(""). Verified live: inside an
+		// active go.work workspace, `GOFLAGS="-mod=vendor -mod=" go list
+		// -m all` still Fatals with go's workspace "-mod may only be set
+		// to readonly or vendor" error (value ""), unlike a bare "-mod="
+		// alone, which does not Fatal.
+		{"-mod=vendor -mod=", "", true},
 	}
 	for _, c := range cases {
 		value, ok := explicitModFlag(c.goflags)
@@ -125,6 +145,58 @@ func TestGoflagsInvalidModValue(t *testing.T) {
 	for _, c := range cases {
 		if got := goflagsInvalidModValue(c.goflags); got != c.want {
 			t.Errorf("goflagsInvalidModValue(%q) = %v, want %v", c.goflags, got, c.want)
+		}
+	}
+}
+
+// TestGoflagsModRejectedInWorkspace is the regression test for the bug
+// found via real-world-testing pass: cmd/go's setDefaultBuildMod
+// (go/src/cmd/go/internal/modload/init.go) restricts -mod to "readonly" or
+// "vendor" specifically inside an active go.work workspace — "-mod=mod",
+// perfectly valid standalone, Fatals immediately once GOWORK points at a
+// real workspace, before resolving a single module. Verified live:
+// `GOFLAGS=-mod=mod go list -m all` (and `go build`) both exit 1 with
+// "go: -mod may only be set to readonly or vendor when in workspace mode,
+// but it is set to \"mod\"" when GOWORK is active, and both exit 0 with the
+// identical GOFLAGS when GOWORK=off. Neither goflagsInvalidModValue ("mod"
+// is one of the four values it accepts) nor vendorModeActive (only checks
+// for "vendor") caught this on their own.
+func TestGoflagsModRejectedInWorkspace(t *testing.T) {
+	cases := []struct {
+		goflags string
+		gowork  string
+		want    bool
+	}{
+		// No workspace: "-mod=mod" is completely normal.
+		{"-mod=mod", "", false},
+		{"-mod=mod", "off", false},
+		// Active workspace, "-mod=mod": the live-verified Fatal case.
+		{"-mod=mod", "/repo/go.work", true},
+		// Active workspace, the two values go itself still accepts there.
+		{"-mod=readonly", "/repo/go.work", false},
+		{"-mod=vendor", "/repo/go.work", false},
+		// Active workspace, no explicit -mod= at all: nothing to reject
+		// (the auto-default applies instead, handled elsewhere).
+		{"", "/repo/go.work", false},
+		{"-race", "/repo/go.work", false},
+		// Active workspace, a bare "-mod=" (empty, not explicit per
+		// explicitModFlag's sticky-ok semantics): does not Fatal, same as
+		// no -mod= at all.
+		{"-mod=", "/repo/go.work", false},
+		// Active workspace, an already-invalid value: also Fatals, via
+		// this same workspace-mode check (verified live: the workspace
+		// message fires, not goflagsInvalidModValue's "-mod=bogus not
+		// supported" message) — goflagsBad ORs both checks so the overlap
+		// is harmless either way.
+		{"-mod=bogus", "/repo/go.work", true},
+		// Compound: sticky ok (from the earlier non-empty "vendor") but a
+		// final empty value — verified live this still Fatals inside a
+		// workspace, unlike a bare "-mod=" alone.
+		{"-mod=vendor -mod=", "/repo/go.work", true},
+	}
+	for _, c := range cases {
+		if got := goflagsModRejectedInWorkspace(c.goflags, c.gowork); got != c.want {
+			t.Errorf("goflagsModRejectedInWorkspace(%q, %q) = %v, want %v", c.goflags, c.gowork, got, c.want)
 		}
 	}
 }

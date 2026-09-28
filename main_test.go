@@ -886,6 +886,54 @@ github.com/myorg/internal-tool
 	}
 }
 
+// TestRunGoflagsModInWorkspaceNoLeak is the direct end-to-end regression
+// test for goflagsModRejectedInWorkspace (see vendor.go): GOFLAGS=-mod=mod
+// is completely ordinary outside a workspace (see
+// TestRunVendorModeExplicitModModStillLeaks), but real go's own
+// setDefaultBuildMod restricts -mod to "readonly"/"vendor" once an active
+// go.work workspace is in play — "-mod=mod" Fatals immediately with "-mod
+// may only be set to readonly or vendor when in workspace mode", before
+// resolving a single module. Verified live end-to-end against the actual
+// goprivaudit binary before this fix: this exact go.mod/go.work/git-config
+// combination was reported "SUMDB LEAK" — an active wrong claim for a
+// checksum-database query that structurally cannot happen, since the real
+// go command dies parsing its own flags first.
+func TestRunGoflagsModInWorkspaceNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "-mod=mod",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when GOFLAGS=-mod=mod is set inside an active go.work workspace (go itself would Fatal before any query), got: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaGitConfigInclude covers a real, common git config
 // pattern this tool previously missed entirely: an insteadOf rewrite
 // living in a file pulled in via [include] rather than written directly
