@@ -58,7 +58,11 @@
 // when the go.mod being audited itself contains a bare "/*" outside a
 // quoted string (see goModHasBlockComment) — go.mod's grammar only allows
 // "//" comments, and every module-aware go subcommand Fatals parsing the
-// file itself in that case, before resolving anything.
+// file itself in that case, before resolving anything. Both are also
+// skipped when the go.mod's own `go` directive line is malformed (see
+// goModHasInvalidGoDirective) — an argument not shaped like a real go
+// version, or a missing/extra argument — for the identical reason: the real
+// go command's strict go.mod parser Fatals before resolving anything.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -273,6 +277,15 @@ func run(args []string, stdout, stderr *os.File) int {
 		// goModHasBlockComment). Same "cannot leak" reasoning as
 		// goflagsBad/gosumdb==off/vendorActive below, just reached because
 		// the go.mod never finishes parsing at all.
+	case goModHasInvalidGoDirective(data):
+		// A go.mod whose `go` directive line real go's own strict parser
+		// rejects — an argument that doesn't match modfile's GoVersionRE
+		// ("go 1.9x"), a missing/extra argument ("go", "go 1.14 extra"), or
+		// a mistaken "go (...)" block attempt — makes every module-aware go
+		// subcommand Fatal parsing go.mod itself, before it resolves a
+		// single module (see goModHasInvalidGoDirective). Same "cannot leak"
+		// reasoning as goModHasBlockComment above, just reached via a
+		// different unparsable-go.mod shape.
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own validation rejects
 		// outright — a malformed shape (goflagsMalformed), an explicit

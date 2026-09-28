@@ -354,6 +354,43 @@ func TestGoModHasBlockComment(t *testing.T) {
 	}
 }
 
+// TestGoModHasInvalidGoDirective covers goModHasInvalidGoDirective's
+// live-verified trigger condition: a `go` directive line whose argument
+// doesn't match golang.org/x/mod/modfile's own strict GoVersionRE, or that
+// doesn't carry exactly one argument, is exactly what makes the real go
+// command's strict go.mod parser (modfile.Parse, what cmd/go actually calls)
+// Fatal every module-aware go subcommand before resolving a single module —
+// confirmed against real `go list -m all` (see
+// TestRunInvalidGoDirectiveGoModNoLeak in main_test.go for the end-to-end
+// regression). A go.mod with no `go` directive at all is NOT one of these
+// cases — verified live, real go parses and resolves it normally — matching
+// parseGoVersion's own "no directive" convention.
+func TestGoModHasInvalidGoDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no go directive at all", "module example.com/foo\n\nrequire example.com/bar v1.0.0\n", false},
+		{"plain major.minor", "module example.com/foo\n\ngo 1.14\n", false},
+		{"major.minor.patch", "module example.com/foo\n\ngo 1.24.4\n", false},
+		{"prerelease suffix directly appended", "module example.com/foo\n\ngo 1.21rc1\n", false},
+		{"trailing non-digit garbage", "module example.com/foo\n\ngo 1.9x\n", true},
+		{"single component, no dot", "module example.com/foo\n\ngo 1\n", true},
+		{"leading zero in minor", "module example.com/foo\n\ngo 1.05\n", true},
+		{"bare go directive, no argument", "module example.com/foo\n\ngo\n\nrequire example.com/bar v1.0.0\n", true},
+		{"extra argument after the version", "module example.com/foo\n\ngo 1.14 extra\n", true},
+		{"quoted version string", "module example.com/foo\n\ngo \"1.24.4\"\n", true},
+		{"mistaken go (...) block attempt", "module example.com/foo\n\ngo (\n\t1.14\n)\n", true},
+		{"godebug directive is not mistaken for go", "module example.com/foo\n\ngo 1.24.4\n\ngodebug (\n\ttlsmlkem=0\n)\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidGoDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidGoDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`

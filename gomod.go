@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -109,6 +110,76 @@ func parseGoVersion(data []byte) string {
 		}
 	}
 	return ""
+}
+
+// goVersionDirectiveRE mirrors golang.org/x/mod/modfile's own GoVersionRE
+// (rule.go) exactly: the shape a `go` directive's argument must match for
+// the real go command's strict parser (modfile.Parse — what cmd/go actually
+// calls to read a go.mod, verified in modload.ReadModFile) to accept it at
+// all. Notably: a bare major.minor ("1.14") is valid, a full
+// major.minor.patch ("1.24.4") is valid, and a prerelease-style suffix
+// directly appended with no separator ("1.21rc1") is valid too — but a
+// leading zero on either component, a missing minor, or any other trailing
+// garbage is not.
+var goVersionDirectiveRE = regexp.MustCompile(`^([1-9][0-9]*)\.(0|[1-9][0-9]*)(\.(0|[1-9][0-9]*))?([a-z]+[0-9]+)?$`)
+
+// goModHasInvalidGoDirective reports whether data contains a `go` directive
+// line the real go command's own strict go.mod parser (modfile.Parse)
+// rejects outright — either because its single argument doesn't match
+// goVersionDirectiveRE ("invalid go version '<x>': must match format
+// 1.23.0"), or because the line doesn't carry exactly one argument at all
+// ("go directive expects exactly one argument", e.g. a bare "go" line with
+// nothing after it, "go 1.14 extra", or a mistaken "go (...)" block attempt
+// — the `go` directive, unlike require/replace/tool, is never a block form,
+// confirmed by parseGoVersion's own doc comment).
+//
+// This matters for the same reason goModHasBlockComment and goflagsMalformed
+// already skip the audit: a go.mod real go refuses to parse at all can never
+// resolve a single module, so no sumdb query for anything in it can ever
+// happen — reporting a SUMDB LEAK/BROAD PATTERN finding for a require line
+// that's technically still sitting there in the raw bytes, when the one
+// thing that would ever query the checksum database for it never runs, is
+// an actively wrong claim, not just a missed check. Confirmed live
+// end-to-end against the actual goprivaudit binary: a go.mod with a real,
+// otherwise-uncovered private-auth-signaled require plus an invalid `go`
+// directive ("go 1.9x") was reported "SUMDB LEAK" pre-fix, while `go list -m
+// all`/`go build` on the identical file Fatal immediately with "errors
+// parsing go.mod: go.mod:N: invalid go version '1.9x': must match format
+// 1.23.0" and never get far enough to query anything. A missing `go`
+// directive entirely is NOT one of these cases — verified live, a go.mod
+// with no `go` line at all parses and resolves normally — so this only
+// triggers when a `go` line is actually present and malformed, matching
+// parseGoVersion's own "no `go` directive" convention (empty string, not an
+// error).
+//
+// Deliberately does not reuse cutKeyword here (unlike parseGoVersion):
+// cutKeyword requires its keyword be followed by whitespace or "(" — a
+// sensible guard against matching a module path that happens to start with
+// "go" (e.g. "godebug"), but it also rejects a bare "go" line with nothing
+// after it at all (rest == ""), which is exactly one of the two invalid
+// shapes this function needs to catch (modfile's real lexer reports that as
+// "go directive expects exactly one argument", not "unknown directive").
+// Splitting trimmed on whitespace directly and comparing the first field
+// against "go" avoids that gap while still correctly leaving "godebug (" (a
+// different first field entirely) alone.
+func goModHasInvalidGoDirective(data []byte) bool {
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if fields[0] != "go" {
+			continue
+		}
+		args := fields[1:]
+		if len(args) != 1 || !goVersionDirectiveRE.MatchString(args[0]) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseTools extracts package import paths from `tool` directives in a
