@@ -244,6 +244,15 @@ counts. An empty `helper = ` value (git's own way to clear an inherited
 default before setting a real one — `gh auth setup-git` writes exactly
 this pattern) doesn't count either, since it configures no credentials.
 
+A context whose URL embeds an explicit username (e.g. `[credential
+"https://svcuser@github.com/myorg"]`) also doesn't count, for a different
+reason: per `git help gitcredentials`, a context URL's username must match
+the credential request's username exactly, and `go get`'s own subprocess
+`git`/`git-remote-https` never puts a username in the plain URL it
+constructs from a module path — so a helper scoped this way can never
+actually fire for an ordinary module fetch, and flagging it would be a
+false positive.
+
 **Git config: extraHeader.** It also looks for a URL-scoped
 `http.<url>.extraHeader` (git-config(1)) — the mechanism `actions/
 checkout` (the default way almost every GitHub Actions Go workflow checks
@@ -261,7 +270,10 @@ applies: `actions/checkout`'s default run against `https://github.com`
 module-specific and would otherwise mark every public dependency checked
 out in an ordinary CI job as a leak — but the identical mechanism against
 a self-hosted GitHub/GitLab Enterprise instance (a common enterprise
-`githubServerUrl` setup) is a genuine per-host private-auth signal.
+`githubServerUrl` setup) is a genuine per-host private-auth signal. The
+same explicit-username exemption as `credential.helper` above applies
+here too: an `[http "https://user@host/..."] extraheader = ...` context
+never matches the userless URL `go get` fetches with.
 
 **Netrc.** It also checks the netrc file (`$NETRC`, or `~/.netrc` — `~/_netrc` on
 Windows) for `machine` entries with a login and password. This is easy to

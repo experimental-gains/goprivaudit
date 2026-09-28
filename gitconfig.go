@@ -222,7 +222,8 @@ type prefixSlot struct {
 // helper that happens not to exist), and a non-empty value activates the
 // existing slot for that URL if one exists or creates and records a new
 // one (appended to *slots, so it's emitted in first-occurrence order) —
-// unless the URL normalizes to a known public host, in which case no slot
+// unless the URL normalizes to a known public host, or the URL carries an
+// explicit username (see sectionURLHasExplicitUser), in which case no slot
 // is ever created for it at all, same as every other signal source in
 // this file.
 func setSignalSlot(slots *[]*prefixSlot, bySectionURL map[string]*prefixSlot, sectionURL, value string) {
@@ -236,6 +237,9 @@ func setSignalSlot(slots *[]*prefixSlot, bySectionURL map[string]*prefixSlot, se
 		s.active = true
 		return
 	}
+	if sectionURLHasExplicitUser(sectionURL) {
+		return
+	}
 	p := normalizeToModulePrefix(sectionURL)
 	if p == "" || isKnownPublicHost(p) {
 		return
@@ -243,6 +247,55 @@ func setSignalSlot(slots *[]*prefixSlot, bySectionURL map[string]*prefixSlot, se
 	s := &prefixSlot{value: p, active: true}
 	*slots = append(*slots, s)
 	bySectionURL[sectionURL] = s
+}
+
+// sectionURLHasExplicitUser reports whether a [credential "..."]/[http
+// "..."] section's context URL embeds an explicit username (e.g.
+// "https://svcuser@git.corp.example/org", the form many hand-written CI
+// credential-setup snippets use to scope a PAT to one account) rather than
+// a bare host/path (e.g. "https://git.corp.example/org", what `gh auth
+// setup-git` and this tool's other examples write).
+//
+// This distinction is load-bearing, not cosmetic: per gitcredentials(7)
+// ("CREDENTIAL CONTEXTS"), a context URL's username, when present, must
+// match the credential request's username *exactly* for the entry to
+// apply at all — verified live with real git: a `[credential
+// "https://svcuser@git.corp.example/org"] helper = ...` entry answers `git
+// credential fill` for a request carrying `username=svcuser`, but the
+// IDENTICAL request with no username field at all (`protocol=https
+// host=git.corp.example path=org/repo.git`, no "username=" line — exactly
+// what git's own HTTP backend sends for a plain, anonymous-looking
+// `https://git.corp.example/org/repo.git` fetch, the only kind of URL
+// `go get`'s subprocess `git`/`git-remote-https` ever constructs on its
+// own) fails outright with "could not read Username ... No such device or
+// address": the helper is never invoked. Confirmed identically for
+// `http.<url>.extraHeader` via `git config --get-urlmatch`. Before this
+// fix, setSignalSlot treated any such section exactly like a userless one
+// (normalizeToModulePrefix unconditionally strips the "user@" prefix when
+// deriving the module-path prefix — correct for THAT purpose, since no
+// go.mod module path can ever contain one, but conflated with the
+// separate question of whether the config actually authenticates an
+// ordinary module fetch at all), reporting a SUMDB LEAK for a module whose
+// only "private-auth" signal can never actually fire for the plain,
+// userless URL go's own tooling fetches it with — a false positive on
+// exactly the kind of config this tool exists to read faithfully rather
+// than pattern-match superficially. (An insteadOf rewrite that itself
+// embeds the same username in its "new" side is unaffected by this
+// check — schemeOf/normalizeToModulePrefix there already key off the
+// rewrite's "old" side, which is what a real go.mod module path is
+// derived from, and that insteadOf entry generates its own independent
+// signal regardless of any [credential]/[http] section.)
+func sectionURLHasExplicitUser(url string) bool {
+	for _, scheme := range []string{"https://", "http://", "ssh://", "git://"} {
+		if strings.HasPrefix(url, scheme) {
+			url = strings.TrimPrefix(url, scheme)
+			break
+		}
+	}
+	if slash := strings.Index(url, "/"); slash >= 0 {
+		url = url[:slash]
+	}
+	return strings.Contains(url, "@")
 }
 
 func privatePrefixesFromGitConfig(data []byte) []string {

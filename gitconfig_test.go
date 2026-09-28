@@ -351,6 +351,74 @@ func TestPrivatePrefixesFromGitConfig_PortScopedCredential(t *testing.T) {
 	}
 }
 
+// TestPrivatePrefixesFromGitConfig_UsernameScopedCredentialNotASignal
+// reproduces a real false positive: a [credential "..."]/[http "..."]
+// section whose context URL embeds an explicit username (a real,
+// hand-written pattern for scoping a PAT-based helper to one service
+// account, e.g. "https://svcuser@git.corp.example/org") never actually
+// authenticates a plain module fetch. Verified live with real git (see
+// sectionURLHasExplicitUser's doc comment): `git credential fill` for a
+// request with no "username=" line at all — exactly what git's own HTTP
+// backend sends for the plain, anonymous-looking URL `go get`'s
+// subprocess git constructs on its own — never invokes the configured
+// helper, and `git config --get-urlmatch http.extraheader` against the
+// same userless URL fails outright too. Before sectionURLHasExplicitUser
+// existed, both sections here were treated exactly like their userless
+// equivalents (normalizeToModulePrefix silently drops the "user@" part
+// when deriving the module-path prefix), so this module was reported as a
+// SUMDB LEAK even though nothing in this config can ever authenticate the
+// plain fetch go itself performs.
+func TestPrivatePrefixesFromGitConfig_UsernameScopedCredentialNotASignal(t *testing.T) {
+	src := `[credential "https://svcuser@git.corp.example/org"]
+	helper = store
+
+[http "https://otheruser@git.corp.example/org2"]
+	extraheader = AUTHORIZATION: basic ZmFrZQ==
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	if len(got) != 0 {
+		t.Errorf("got %v, want no signal for a username-scoped credential/http section", got)
+	}
+
+	r := audit([]string{"git.corp.example/org/repo", "git.corp.example/org2/repo"}, got, nil)
+	if len(r.SumdbLeaks) != 0 {
+		t.Errorf("audit SumdbLeaks = %v, want none: username-scoped sections never authenticate a userless module fetch", r.SumdbLeaks)
+	}
+}
+
+// TestPrivatePrefixesFromEnv_UsernameScopedCredentialNotASignal is
+// TestPrivatePrefixesFromGitConfig_UsernameScopedCredentialNotASignal's
+// counterpart for the GIT_CONFIG_COUNT/KEY/VALUE env-var config mechanism,
+// which funnels through the same setSignalSlot helper.
+func TestPrivatePrefixesFromEnv_UsernameScopedCredentialNotASignal(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "1",
+		"GIT_CONFIG_KEY_0":   "credential.https://svcuser@git.corp.example/org.helper",
+		"GIT_CONFIG_VALUE_0": "store",
+	}
+	got := privatePrefixesFromEnv(func(k string) string { return env[k] })
+	if len(got) != 0 {
+		t.Errorf("got %v, want no signal for a username-scoped credential subsection", got)
+	}
+}
+
+func TestSectionURLHasExplicitUser(t *testing.T) {
+	cases := map[string]bool{
+		"https://git.corp.example/org":         false,
+		"https://svcuser@git.corp.example/org": true,
+		"https://git.corp.example:8443/org":    false,
+		"git.corp.example/org":                 false,
+		"svcuser@git.corp.example/org":         true,
+		"https://svcuser@git.corp.example":     true,
+		"https://@git.corp.example/org":        true, // empty user is still "explicit" syntactically
+	}
+	for in, want := range cases {
+		if got := sectionURLHasExplicitUser(in); got != want {
+			t.Errorf("sectionURLHasExplicitUser(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestNormalizeToModulePrefix(t *testing.T) {
 	cases := map[string]string{
 		"https://github.com/myorg/":     "github.com/myorg",
