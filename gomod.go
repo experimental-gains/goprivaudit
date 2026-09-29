@@ -341,6 +341,159 @@ func goModHasUnknownDirective(data []byte) bool {
 	return false
 }
 
+// goModFixedArgCountVerbs is the subset of goModValidTopLevelVerbs whose
+// entire argument-validity rule, per golang.org/x/mod/modfile's real parser
+// ((*File).add's verb switch, rule.go), is a single fixed required argument
+// count with no further content-shape check beyond that — unlike `go`/
+// `toolchain`, whose argument must ALSO match a version/toolchain-name regex
+// (already covered by goModHasInvalidGoDirective/
+// goModHasInvalidToolchainDirective), or `replace`/`retract`/`godebug`,
+// whose usage errors depend on token *content* (an "=>" arrow, a "["/"]"
+// version-interval bracket, an embedded quote/comma), not just count, and
+// are deliberately left out of scope here — approximating either of those
+// risks a wrong verdict in either direction rather than a purely
+// conservative one, the same reason `hasconfig:` was ruled out for
+// includeIfMatches. Confirmed directly against rule.go's own switch: cases
+// "require","exclude" both require len(args)==2 (module path, version);
+// "tool" requires len(args)==1 (package path).
+var goModFixedArgCountVerbs = map[string]int{
+	"require": 2,
+	"exclude": 2,
+	"tool":    1,
+}
+
+// goModHasInvalidDirectiveArgCount reports whether data contains a
+// require/exclude/tool directive line (single-line or block-entry form)
+// that the real go command's own strict go.mod parser (modfile.Parse)
+// rejects outright for carrying the wrong number of arguments: a require
+// line missing its version ("require example.com/foo"), one carrying a
+// stray extra token ("require example.com/foo v1.0.0 extra" — a plausible
+// leftover from a botched merge-conflict resolution or hand-edit), or a
+// tool line naming more than one package. Live-verified (2026-09) against
+// the real go toolchain: each of those shapes, plus the exclude/block-entry
+// equivalents, Fatals immediately with "usage: require module/path
+// v1.2.3" / "usage: exclude module/path v1.2.3" / "tool directive expects
+// exactly one argument" — before resolving a single module. Same
+// "cannot leak" reasoning as every other malformed-go.mod skip in this file
+// (see goModHasInvalidGoDirective's doc comment): a go.mod real go refuses
+// to parse at all can never resolve a single module, so no sumdb query for
+// anything in it — including an unrelated, otherwise-valid require line
+// sitting elsewhere in the same file — can ever happen. Confirmed live
+// end-to-end against the actual goprivaudit binary, pre-fix: a go.mod with
+// a real, otherwise-uncovered private-auth-signaled netrc-covered require
+// plus an unrelated "require example.com/foo v1.0.0 extra" line was
+// reported "SUMDB LEAK", while `go list -m all`/`go build` on the identical
+// file Fatal immediately and never get far enough to query anything.
+//
+// This is the general-across-verbs sibling of goModHasInvalidGoDirective/
+// goModHasInvalidToolchainDirective, extending the same "recognized verb,
+// unchecked argument grammar" family one level further: recognizing
+// "require"/"exclude"/"tool" as valid top-level verbs
+// (goModHasUnknownDirective already does) is a different claim from
+// validating how many arguments follow them.
+//
+// Block-entry lines (inside "require (\n...\n)" etc.) are checked the same
+// way, using the enclosing block's own verb and that line's own tokens as
+// its argument list — matching how the real parser dispatches every block
+// entry under its own block's opening verb (see goModHasUnknownDirective's
+// doc comment for the identical block-tracking convention). A verb outside
+// goModFixedArgCountVerbs (go/toolchain, already covered elsewhere;
+// replace/retract/godebug/module, out of scope per that var's doc comment)
+// is not checked here at all.
+func goModHasInvalidDirectiveArgCount(data []byte) bool {
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if n, ok := goModFixedArgCountVerbs[blockVerb]; ok && countDirectiveArgs(trimmed) != n {
+				return true
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		rest := strings.TrimSpace(trimmed[i:])
+		if rest == "(" {
+			inBlock = true
+			blockVerb = verb
+			continue
+		}
+		if n, ok := goModFixedArgCountVerbs[verb]; ok && countDirectiveArgs(rest) != n {
+			return true
+		}
+	}
+	return false
+}
+
+// countDirectiveArgs counts the arguments in a go.mod directive's argument
+// text, honoring two real-lexer quirks a plain strings.Fields split would
+// miss:
+//
+//   - A quoted argument (e.g. a require path written as a Go string
+//     literal) counts as a single argument even if it contains embedded
+//     spaces — handled via leadingQuotedString, the same helper
+//     firstFieldAndRest already uses for this.
+//   - "(" and ")" are ALWAYS their own separate one-character tokens to the
+//     real lexer, even glued directly onto an adjacent argument with no
+//     whitespace at all. Live-verified: `require(example.com/foo v1.0.0)`
+//     — a require directive line whose parenthesis is attached with no
+//     space, immediately followed by two conceptual arguments and a closing
+//     paren all on the SAME line (not a multi-line block: the whole thing,
+//     including the closing ")", sits on one line) — Fatals with "usage:
+//     require module/path v1.2.3" exactly like a 3-or-more-argument
+//     require line does, because the real lexer counts 4 tokens ("(",
+//     "example.com/foo", "v1.0.0", ")"), not the 2 a naive split on
+//     whitespace-attached-to-parens would suggest. A tokenizer that instead
+//     glued a leading/trailing paren onto its neighboring word (as this
+//     function's first draft did, matching firstFieldAndRest's own
+//     whitespace-only field split) would silently miscount this exact
+//     shape as valid — a false negative on a real, live-confirmed
+//     unparsable go.mod, the same "active wrong claim" risk this whole
+//     function exists to close, just reached through the tokenizer instead
+//     of the count comparison.
+func countDirectiveArgs(s string) int {
+	n := 0
+	for {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return n
+		}
+		switch s[0] {
+		case '(', ')':
+			s = s[1:]
+		case '"', '`':
+			if _, consumed, ok := leadingQuotedString(s); ok {
+				s = s[consumed:]
+			} else {
+				s = s[1:]
+			}
+		default:
+			i := 0
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '(' && s[i] != ')' {
+				i++
+			}
+			if i == 0 {
+				i = 1
+			}
+			s = s[i:]
+		}
+		n++
+	}
+}
+
 // parseTools extracts package import paths from `tool` directives in a
 // go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
 // names a *package* path, not necessarily a module path — e.g. `tool

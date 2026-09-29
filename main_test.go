@@ -940,6 +940,44 @@ requires bogus/directive v1.0.0
 	}
 }
 
+// TestRunInvalidDirectiveArgCountGoModNoLeak is the direct regression test
+// for goModHasInvalidDirectiveArgCount (see gomod.go): a go.mod whose
+// require directive carries a stray extra argument makes every module-aware
+// go subcommand Fatal parsing go.mod before it resolves a single module, so
+// the otherwise-uncovered private-auth signal below can never actually
+// leak. Verified live before this fix: `go list -m all` on the equivalent
+// file Fatals immediately with "errors parsing go.mod: go.mod:5: usage:
+// require module/path v1.2.3", while this tool still reported "SUMDB LEAK"
+// for the exact same malformed require line, treating "extra" as silently
+// ignored trailing text instead of the parse-killing token it actually is.
+func TestRunInvalidDirectiveArgCountGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456 extra
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's require directive has a stray extra argument (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active

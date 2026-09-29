@@ -463,6 +463,46 @@ func TestGoModHasUnknownDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasInvalidDirectiveArgCount covers
+// goModHasInvalidDirectiveArgCount's live-verified trigger condition: a
+// require/exclude/tool directive line (single-line or block-entry form)
+// carrying the wrong number of arguments is exactly what makes
+// golang.org/x/mod/modfile's real parser Fatal every module-aware go
+// subcommand before resolving a single module — confirmed against real `go
+// list -m all` (see TestRunInvalidDirectiveArgCountGoModNoLeak in
+// main_test.go for the end-to-end regression). A valid go.mod with none of
+// these verbs malformed must NOT be flagged, including one using every
+// verb this function doesn't check at all (replace/retract/godebug/module).
+func TestGoModHasInvalidDirectiveArgCount(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"plain valid go.mod", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"require missing version", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar\n", true},
+		{"bare require, no arguments at all", "module example.com/foo\n\ngo 1.24\n\nrequire\n", true},
+		{"require with stray extra token", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0 extra\n", true},
+		{"quoted require path with embedded space counts as one argument", "module example.com/foo\n\ngo 1.24\n\nrequire \"example.com/spacey bar\" v1.0.0\n", false},
+		{"exclude with stray extra token", "module example.com/foo\n\ngo 1.24\n\nexclude example.com/bar v1.0.0 extra\n", true},
+		{"exclude missing version", "module example.com/foo\n\ngo 1.24\n\nexclude example.com/bar\n", true},
+		{"tool with extra package", "module example.com/foo\n\ngo 1.24\n\ntool example.com/bar/cmd/x extra\n", true},
+		{"bare tool, no argument", "module example.com/foo\n\ngo 1.24\n\ntool\n", true},
+		{"valid tool directive", "module example.com/foo\n\ngo 1.24\n\ntool example.com/bar/cmd/x\n", false},
+		{"require block entry with stray extra token", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0 extra\n)\n", true},
+		{"require block entry with missing version", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar\n)\n", true},
+		{"valid require block", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0\n\texample.com/baz v2.0.0\n)\n", false},
+		{"no-space block-open form still validated", "module example.com/foo\n\ngo 1.24\n\nrequire(\n\texample.com/bar v1.0.0 extra\n)\n", true},
+		{"paren glued directly onto a single-line require", "module example.com/foo\n\ngo 1.24\n\nrequire(example.com/bar v1.0.0)\n", true},
+		{"replace/retract/godebug/module are out of scope, even malformed", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar\n\nretract\n\ngodebug\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidDirectiveArgCount([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidDirectiveArgCount(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`

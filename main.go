@@ -72,7 +72,13 @@
 // isn't one of the real parser's recognized directive keywords (see
 // goModHasUnknownDirective) — a typo like "requires" instead of "require",
 // or any other unrecognized verb — for the same reason, one level more
-// general than the go/toolchain-directive-specific checks just above.
+// general than the go/toolchain-directive-specific checks just above. Both
+// are also skipped when go.mod contains a require/exclude/tool directive
+// (single-line or block-entry form) with the wrong number of arguments —
+// see goModHasInvalidDirectiveArgCount — a missing version, a stray extra
+// token, or a tool line naming more than one package, all of which the real
+// parser Fatals on before resolving anything, for the identical "cannot
+// leak" reason.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -318,6 +324,17 @@ func run(args []string, stdout, stderr *os.File) int {
 		// just above, one level more general: that check only ever catches a
 		// malformed *argument* to a recognized "go" line, not an entirely
 		// unrecognized verb anywhere else in the file.
+	case goModHasInvalidDirectiveArgCount(data):
+		// A go.mod containing a require/exclude/tool directive (single-line
+		// or block-entry form) with the wrong number of arguments — see
+		// goModHasInvalidDirectiveArgCount — makes every module-aware go
+		// subcommand Fatal parsing go.mod itself ("usage: require
+		// module/path v1.2.3", "usage: exclude module/path v1.2.3", or "tool
+		// directive expects exactly one argument"), before it resolves a
+		// single module. Same "cannot leak" reasoning as
+		// goModHasUnknownDirective just above, one level more specific:
+		// recognizing "require"/"exclude"/"tool" as valid verbs doesn't mean
+		// their own argument count was ever validated.
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own validation rejects
 		// outright — a malformed shape (goflagsMalformed), an explicit
