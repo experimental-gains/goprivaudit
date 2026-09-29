@@ -112,6 +112,42 @@ func parseGoVersion(data []byte) string {
 	return ""
 }
 
+// parseModulePath extracts a go.mod's own `module` directive path (the
+// value of "module <path>"), or "" if the file has no `module` directive at
+// all. Used by effectiveToolModules to recognize a `tool` directive whose
+// package lives inside the main module itself, rather than in any required
+// dependency.
+//
+// The path is unquoted via firstFieldAndRest the same way parseRequireLine
+// already does for a require path — go.mod's own module path can likewise
+// be written as a double- or backtick-quoted Go string literal purely as a
+// styling choice (modfile's lexer gives every module-path-shaped token the
+// same optional-quoting allowance), so a plain whitespace trim (parseGoVersion's
+// approach, correct for a `go` directive's version argument, which is never
+// quoted) would leave a quoted module path's literal quote characters
+// attached.
+//
+// The `module` directive is always a single-line directive, never a
+// `module (...)` block — confirmed against golang.org/x/mod/modfile's own
+// grammar (rule.go): only require/exclude/replace/retract/tool support a
+// parenthesized block form — so this doesn't need parseRequires/
+// parseReplaces' block tracking, the same as parseGoVersion.
+func parseModulePath(data []byte) string {
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if rest, ok := cutKeyword(trimmed, "module"); ok {
+			path, _ := firstFieldAndRest(rest)
+			return path
+		}
+	}
+	return ""
+}
+
 // goVersionDirectiveRE mirrors golang.org/x/mod/modfile's own GoVersionRE
 // (rule.go) exactly: the shape a `go` directive's argument must match for
 // the real go command's strict parser (modfile.Parse — what cmd/go actually
@@ -790,7 +826,30 @@ func parseTools(data []byte) []string {
 // module exist"). A tool path covered by a require entry is skipped so
 // it isn't checked (and potentially reported) twice under two different
 // strings for the same underlying dependency.
-func effectiveToolModules(tools []string, requires []requireEntry) []string {
+//
+// A tool path that is the main module itself, or a package inside it (exact
+// match against modulePath, or modulePath as a path prefix), is skipped
+// entirely rather than audited — go.dev/ref/mod's `tool` directive doc
+// explicitly allows naming "a main package in the main module" (not just a
+// dependency's), a real, documented, `go mod tidy`-stable pattern for
+// tracking an in-repo build tool (e.g. a `cmd/gen` used via `go tool` or
+// `go generate`) the same go.mod-level way Go 1.24 tracks a third-party
+// one. Live-verified against real go1.24.4: a go.mod with only `module
+// example.com/mymod` / `go 1.24.4` / `tool example.com/mymod/cmd/mytool` (no
+// require at all) builds fully offline (`GOPROXY=off go build ./...`
+// succeeds) and `go list -m all` resolves only the main module itself — the
+// tool path is never looked up as a separate module, so no sumdb query for
+// it can ever happen. Before this check existed, such a tool path fell
+// through to the "not covered by any require" branch exactly like a real
+// external dependency's tool would, and got audited as if it were one: with
+// a git insteadOf/credential-helper/netrc signal that happened to cover the
+// main module's own host (e.g. a private-hosted repo's own module path)
+// but wasn't itself listed in GOPRIVATE/GONOSUMDB, goprivaudit reported a
+// false "SUMDB LEAK" for a checksum-database query that structurally cannot
+// happen — confirmed live end-to-end against the actual goprivaudit binary
+// on the go.mod above plus a matching `[url "ssh://git@example.com/"]
+// insteadOf = https://example.com/`.
+func effectiveToolModules(tools []string, requires []requireEntry, modulePath string) []string {
 	seen := make(map[string]bool, len(tools))
 	var out []string
 	for _, t := range tools {
@@ -798,6 +857,10 @@ func effectiveToolModules(tools []string, requires []requireEntry) []string {
 			continue
 		}
 		seen[t] = true
+
+		if modulePath != "" && (t == modulePath || strings.HasPrefix(t, modulePath+"/")) {
+			continue
+		}
 
 		covered := false
 		for _, r := range requires {

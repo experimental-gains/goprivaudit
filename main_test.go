@@ -2334,6 +2334,85 @@ tool github.com/myorg/internal-tool/cmd/gen
 	}
 }
 
+// TestRunToolDirectiveInMainModuleNotFalselyLeaked covers a real, documented
+// Go 1.24 pattern (go.dev/ref/mod's `tool` directive doc: a tool directive
+// may name "a main package in the main module", not just a dependency's,
+// e.g. an in-repo build tool tracked the same go.mod-level way a
+// third-party one is) that effectiveToolModules had no notion of at all: no
+// function anywhere in this codebase read the go.mod's own `module`
+// directive before this fix, so a tool path inside the main module was
+// treated exactly like an uncovered external dependency's tool path (see
+// TestRunFindsLeakViaUncoveredToolDirective). Live-verified (2026-09)
+// against real go1.24.4: a go.mod with only `module github.com/myorg/mymod`
+// / `go 1.24.4` / `tool github.com/myorg/mymod/cmd/mytool` (no require at
+// all) builds fully offline (`GOPROXY=off go build ./...` succeeds) and `go
+// list -m all` resolves only the main module itself — the tool path is
+// never looked up as a separate module, so no sumdb query for it can ever
+// happen, regardless of what git config says about github.com/myorg.
+// Confirmed live end-to-end against the actual pre-fix goprivaudit binary:
+// this exact go.mod plus this exact insteadOf rewrite (which would be a
+// real, otherwise-uncovered private-auth signal for any *actual* dependency
+// under github.com/myorg) was reported "SUMDB LEAK:
+// github.com/myorg/mymod/cmd/mytool" pre-fix.
+func TestRunToolDirectiveInMainModuleNotFalselyLeaked(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module github.com/myorg/mymod
+
+go 1.24.4
+
+tool github.com/myorg/mymod/cmd/mytool
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@github.com/myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 for a tool path inside the main module; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("expected no leak for a main-module-local tool path (never fetched over the network), got: %s", stdout)
+	}
+}
+
+// TestRunToolDirectiveInMainModuleSiblingStillLeaked confirms the new
+// main-module exclusion doesn't over-match: a tool path under a
+// similarly-prefixed but genuinely different module
+// (github.com/myorg/mymod2, not a subpackage of github.com/myorg/mymod)
+// must still be audited as an external dependency's tool.
+func TestRunToolDirectiveInMainModuleSiblingStillLeaked(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module github.com/myorg/mymod
+
+go 1.24.4
+
+tool github.com/myorg/mymod2/cmd/mytool
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@github.com/myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/mymod2/cmd/mytool") {
+		t.Errorf("stdout missing expected leak finding for the sibling module's tool path: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaSystemGitConfig covers git's lowest-precedence config
 // tier — the system-wide $(prefix)/etc/gitconfig file, relocatable via
 // GIT_CONFIG_SYSTEM — which gitConfigCandidates never read at all before

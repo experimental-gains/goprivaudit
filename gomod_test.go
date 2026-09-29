@@ -935,8 +935,29 @@ func TestParseToolsQuotedPath(t *testing.T) {
 	}
 }
 
+func TestParseModulePath(t *testing.T) {
+	src := "module example.com/mymod\n\ngo 1.24.4\n"
+	if got, want := parseModulePath([]byte(src)), "example.com/mymod"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestParseModulePathQuoted(t *testing.T) {
+	src := `module "example.com/my mod"` + "\n\ngo 1.24.4\n"
+	if got, want := parseModulePath([]byte(src)), "example.com/my mod"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestParseModulePathMissing(t *testing.T) {
+	src := "go 1.24.4\n"
+	if got := parseModulePath([]byte(src)); got != "" {
+		t.Errorf("expected \"\" for a go.mod with no module directive, got %q", got)
+	}
+}
+
 func TestEffectiveToolModulesUncoveredIncluded(t *testing.T) {
-	got := effectiveToolModules([]string{"example.com/myorg/private/cmd/thing"}, nil)
+	got := effectiveToolModules([]string{"example.com/myorg/private/cmd/thing"}, nil, "")
 	want := []string{"example.com/myorg/private/cmd/thing"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -947,6 +968,7 @@ func TestEffectiveToolModulesCoveredByExactRequireExcluded(t *testing.T) {
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private"},
 		[]requireEntry{{path: "example.com/myorg/private", version: "v1.0.0"}},
+		"",
 	)
 	if got != nil {
 		t.Errorf("expected a tool path exactly matching a require entry to be excluded, got %v", got)
@@ -957,6 +979,7 @@ func TestEffectiveToolModulesCoveredByParentRequireExcluded(t *testing.T) {
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private/cmd/thing"},
 		[]requireEntry{{path: "example.com/myorg/private", version: "v1.0.0"}},
+		"",
 	)
 	if got != nil {
 		t.Errorf("expected a tool path under a required module's path to be excluded, got %v", got)
@@ -970,6 +993,7 @@ func TestEffectiveToolModulesSiblingPathNotFalselyCovered(t *testing.T) {
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private"},
 		[]requireEntry{{path: "example.com/myorg/private2", version: "v1.0.0"}},
+		"",
 	)
 	want := []string{"example.com/myorg/private"}
 	if !reflect.DeepEqual(got, want) {
@@ -981,8 +1005,52 @@ func TestEffectiveToolModulesDeduped(t *testing.T) {
 	got := effectiveToolModules(
 		[]string{"example.com/myorg/private/cmd/thing", "example.com/myorg/private/cmd/thing"},
 		nil,
+		"",
 	)
 	want := []string{"example.com/myorg/private/cmd/thing"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestEffectiveToolModulesMainModuleExactExcluded covers a real, documented
+// Go 1.24 pattern (go.dev/ref/mod's `tool` directive doc: a tool directive
+// may name "a main package in the main module", not just a dependency's) —
+// live-verified (see effectiveToolModules' own doc comment) that such a
+// path is never resolved as a separate module at all, so it must never be
+// audited as if it were an external, network-fetched dependency.
+func TestEffectiveToolModulesMainModuleExactExcluded(t *testing.T) {
+	got := effectiveToolModules(
+		[]string{"example.com/mymod"},
+		nil,
+		"example.com/mymod",
+	)
+	if got != nil {
+		t.Errorf("expected a tool path exactly matching the main module to be excluded, got %v", got)
+	}
+}
+
+func TestEffectiveToolModulesMainModuleSubpackageExcluded(t *testing.T) {
+	got := effectiveToolModules(
+		[]string{"example.com/mymod/cmd/mytool"},
+		nil,
+		"example.com/mymod",
+	)
+	if got != nil {
+		t.Errorf("expected a tool path inside the main module to be excluded, got %v", got)
+	}
+}
+
+func TestEffectiveToolModulesMainModuleSiblingNotFalselyExcluded(t *testing.T) {
+	// "example.com/mymod2" must not be treated as inside "example.com/mymod"
+	// — the same prefix-boundary check TestEffectiveToolModulesSiblingPathNotFalselyCovered
+	// already guards for the require-based exclusion.
+	got := effectiveToolModules(
+		[]string{"example.com/mymod2/cmd/thing"},
+		nil,
+		"example.com/mymod",
+	)
+	want := []string{"example.com/mymod2/cmd/thing"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
 	}
