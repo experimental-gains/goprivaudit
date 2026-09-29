@@ -224,11 +224,34 @@ func run(args []string, stdout, stderr *os.File) int {
 		privatePrefixesFromConfigFileInto(p, moduleDir, visited, &slots, credSlots, httpSlots)
 	}
 	privatePrefixesFromEnvInto(os.Getenv, &slots, credSlots, httpSlots)
+
+	// A credential.helper/http.extraHeader slot whose own section-URL
+	// scheme (see prefixSlot.scheme) is blocked by GIT_ALLOW_PROTOCOL or
+	// protocol.<name>.allow can never actually authenticate a fetch: real
+	// git refuses the transport before ever looking up a credential
+	// helper or attaching an extraHeader — verified live (see
+	// gitProtocolAllowed's doc comment for the general mechanism, and
+	// TestRunSuppressesLeakWhenGitAllowProtocolBlocksACredentialHelpersOwnScheme
+	// for this exact signal type): a real `go get`/`git ls-remote` against
+	// a plain, unrewritten `https://` URL fails immediately with "fatal:
+	// transport 'https' not allowed" once GIT_ALLOW_PROTOCOL omits https,
+	// before any hash is ever computed to send to the checksum database.
+	// Same "cannot leak" reasoning suppressProtocolBlockedInsteadOf
+	// already applies to a blocked insteadOf rewrite below, just reached
+	// for a different signal type — an insteadOf slot's scheme is always
+	// "" here (see prefixSlot.scheme), so this loop never touches it;
+	// that signal keeps going through suppressProtocolBlockedInsteadOf's
+	// own, separate mechanism unchanged.
+	protocolAllow := effectiveProtocolAllow(moduleDir)
 	var prefixes []string
 	for _, s := range slots {
-		if s.active {
-			prefixes = append(prefixes, s.value)
+		if !s.active {
+			continue
 		}
+		if s.scheme != "" && !gitProtocolAllowed(s.scheme, protocolAllow, os.Getenv) {
+			continue
+		}
+		prefixes = append(prefixes, s.value)
 	}
 
 	// A netrc `machine` entry is treated as a signal unconditionally, the
@@ -488,13 +511,7 @@ func suppressProtocolBlockedInsteadOf(prefixes []string, moduleDir string, geten
 // module-path prefix, how many of its insteadOf rewrites target a
 // transport git would refuse.
 func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) map[string]int {
-	protocolAllow := map[string]string{}
-	visitedProto := map[string]bool{}
-	for _, p := range gitConfigCandidates(moduleDir) {
-		for k, v := range protocolAllowFromConfigFile(p, moduleDir, visitedProto) {
-			protocolAllow[k] = v
-		}
-	}
+	protocolAllow := effectiveProtocolAllow(moduleDir)
 
 	schemes := map[string][]string{}
 	visitedSchemes := map[string]bool{}
@@ -516,6 +533,26 @@ func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) 
 		}
 	}
 	return counts
+}
+
+// effectiveProtocolAllow resolves the effective protocol.allow/
+// protocol.<name>.allow config across every git config tier
+// gitConfigCandidates reads (system, global, local, worktree — file order,
+// later tiers overriding earlier ones per protocolAllowFromConfigFile's own
+// precedence), independent of GIT_ALLOW_PROTOCOL (which gitProtocolAllowed
+// checks separately and treats as fully authoritative when set — see its
+// own doc comment). Shared by blockedInsteadOfPrefixCounts (the insteadOf
+// case) and run()'s credential.helper/http.extraHeader scheme filter above,
+// since both need the identical config-file scan.
+func effectiveProtocolAllow(moduleDir string) map[string]string {
+	protocolAllow := map[string]string{}
+	visitedProto := map[string]bool{}
+	for _, p := range gitConfigCandidates(moduleDir) {
+		for k, v := range protocolAllowFromConfigFile(p, moduleDir, visitedProto) {
+			protocolAllow[k] = v
+		}
+	}
+	return protocolAllow
 }
 
 func gitConfigCandidates(moduleDir string) []string {

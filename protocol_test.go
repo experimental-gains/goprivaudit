@@ -304,6 +304,108 @@ require git.corp.example.com/org/private-lib v1.0.0
 	}
 }
 
+// TestRunSuppressesLeakWhenGitAllowProtocolBlocksACredentialHelpersOwnScheme
+// covers the credential.helper/http.extraHeader counterpart of
+// TestRunSuppressesLeakWhenGitAllowProtocolBlocksTheInsteadOfTarget: no
+// insteadOf rewrite at all here, just a URL-scoped credential helper for a
+// plain https:// context, combined with GIT_ALLOW_PROTOCOL=ssh (SSH-only
+// hardening — the mirror image of the https-only hardening the insteadOf
+// test uses, equally realistic: an org that moved off long-lived HTTPS PATs
+// to SSH keys and forgot to remove an old credential.helper entry).
+// Live-verified (see prefixSlot.scheme's doc comment): a real
+// `git ls-remote https://...`/`go get` against the identical combination
+// fails immediately with "fatal: transport 'https' not allowed", before the
+// credential helper is ever consulted and before any hash is computed to
+// send to the checksum database — so the module's only private-auth signal
+// can never actually authenticate anything, and this finding must not fire.
+func TestRunSuppressesLeakWhenGitAllowProtocolBlocksACredentialHelpersOwnScheme(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com/myorg"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ssh")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (no leak possible); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak for a structurally-blocked transport: %s", stdout)
+	}
+}
+
+// TestRunStillFlagsLeakForCredentialHelperWhenGitAllowProtocolAllowsHttps is
+// the regression guard for the fix above: the exact same config, but with
+// GIT_ALLOW_PROTOCOL explicitly permitting https, must still be flagged.
+func TestRunStillFlagsLeakForCredentialHelperWhenGitAllowProtocolAllowsHttps(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com/myorg"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "https:ssh")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunSuppressesLeakWhenGitAllowProtocolBlocksAnExtraHeadersOwnScheme is
+// the http.extraHeader counterpart of the credential.helper test above —
+// same mechanism (prefixSlot.scheme, populated by setSignalSlot for both
+// signal types identically), different signal source.
+func TestRunSuppressesLeakWhenGitAllowProtocolBlocksAnExtraHeadersOwnScheme(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.example.corp/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[http "https://github.example.corp/myorg"]
+	extraheader = AUTHORIZATION: basic dGVzdDp0ZXN0
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "ssh")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (no leak possible); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak for a structurally-blocked transport: %s", stdout)
+	}
+}
+
 // TestGitProtocolAllowedAgainstRealGit is an oracle-diff test against the
 // real `git` binary: for a representative scheme/policy combination, does
 // a real `git ls-remote` actually fail with "fatal: transport '<scheme>'

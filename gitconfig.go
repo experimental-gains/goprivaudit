@@ -212,6 +212,23 @@ func parseQuotedSection(line, keyword string) (subsection string, ok bool) {
 type prefixSlot struct {
 	value  string
 	active bool
+	// scheme is the transport scheme (see schemeOf) of the section URL a
+	// credential.helper/http.extraHeader slot was created for — both
+	// mechanisms only ever authenticate a fetch over the exact scheme
+	// their own section header names (a "[credential "https://..."]"
+	// context never applies to an ssh:// fetch of the same host, and vice
+	// versa; verified live against real git, same "context URL must match"
+	// rule sectionURLHasExplicitUser's doc comment already establishes for
+	// the userinfo half of the same URL). Left "" for an insteadOf slot
+	// (created directly in scanConfigSignals, not via setSignalSlot): that
+	// signal's blocked-transport check already has its own, separate
+	// mechanism (insteadOfSchemes/blockedInsteadOfPrefixCounts), which
+	// reads the rewrite's "new" side rather than this slot's "value" (the
+	// "old" side) — and "" for a credential/http slot whose section URL's
+	// scheme schemeOf couldn't determine with confidence, so
+	// gitProtocolAllowed's own fail-open convention (see its doc comment)
+	// applies uniformly here too: never suppress a real signal on a guess.
+	scheme string
 }
 
 // setSignalSlot records or resets a multi-valued, reset-on-empty git
@@ -244,7 +261,7 @@ func setSignalSlot(slots *[]*prefixSlot, bySectionURL map[string]*prefixSlot, se
 	if p == "" || isKnownPublicHost(p) {
 		return
 	}
-	s := &prefixSlot{value: p, active: true}
+	s := &prefixSlot{value: p, active: true, scheme: schemeOf(sectionURL)}
 	*slots = append(*slots, s)
 	bySectionURL[sectionURL] = s
 }
