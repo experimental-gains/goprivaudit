@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // netrcPath resolves the netrc file `go` itself would read, mirroring
@@ -259,7 +260,15 @@ func privatePrefixesFromNetrc(data []byte) []string {
 		if inMacro {
 			continue // token scanned (so its bytes are consumed) but ignored
 		}
-		switch tok {
+		// Real curl's parsenetrc dispatches on every keyword token via
+		// strcasecompare, not a case-sensitive match (confirmed reading
+		// lib/netrc.c directly and live: a real ~/.netrc with capitalized
+		// "Machine"/"Login"/"Password" authenticated an identical `curl -v`
+		// request and `git ls-remote` subprocess fetch, GIT_CURL_VERBOSE=1,
+		// to the all-lowercase form — same Authorization header both ways).
+		// Only the keyword position is folded; values read via the
+		// subsequent nextToken() calls below keep their original case.
+		switch strings.ToLower(tok) {
 		case "machine":
 			if inDefault {
 				// Per the netrc format's own rule ("There can be only one

@@ -187,6 +187,38 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 			data: "default\nlogin anon\npassword anon\n",
 			want: []string{"*"},
 		},
+		{
+			// Regression test: real curl's netrc keyword dispatch
+			// (lib/netrc.c parsenetrc) compares every token against
+			// "machine"/"login"/"password"/"macdef"/"default" with
+			// strcasecompare, not a case-sensitive match — confirmed both
+			// by reading the installed curl 8.14.1 source directly and
+			// live: a `~/.netrc` with "Machine"/"Login"/"Password"
+			// (capitalized, a real hand-edited-netrc style) authenticated
+			// a real `curl -v` request AND a real `git ls-remote`
+			// subprocess (GIT_CURL_VERBOSE=1) identically to the
+			// all-lowercase form, sending the same Authorization header.
+			// The pre-fix switch here matched only the exact lowercase
+			// spelling, so this entry was silently invisible.
+			name: "capitalized Machine/Login/Password keywords still a signal",
+			data: "Machine git.privatecorp.internal\n\tLogin builder\n\tPassword s3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
+		},
+		{
+			// Regression test: same case-insensitivity for "default" —
+			// real curl's NOTHING-state dispatch recognizes "DEFAULT" via
+			// strcasecompare exactly like "default".
+			name: "uppercase DEFAULT keyword still a signal",
+			data: "DEFAULT\nlogin anon\npassword anon\n",
+			want: []string{"*"},
+		},
+		{
+			// Regression test: mixed-case "machine" mid-word, confirming
+			// this isn't just an all-caps special case.
+			name: "mixed-case MaChInE keyword still a signal",
+			data: "MaChInE git.privatecorp.internal\nlogin builder\npassword s3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -375,6 +407,37 @@ require git.privatecorp.internal/team/widgets v1.2.3
 func TestRunFindsLeakViaNetrcWithMacdefMidEntry(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nmacdef mymacro\nlogin builder\npassword s3cr3t\n")
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.privatecorp.internal/team/widgets v1.2.3
+`)
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaNetrcCapitalizedKeywords is the end-to-end regression
+// test for the bug fixed here: real curl's netrc keyword dispatch
+// (lib/netrc.c parsenetrc) matches "machine"/"login"/"password" via
+// strcasecompare, not a case-sensitive match, so a hand-edited netrc using
+// capitalized keywords is a real, live-verified sumdb-leak signal (see
+// privatePrefixesFromNetrc's doc comment and the TestPrivatePrefixesFromNetrc
+// case above for the live curl/git verification). Pre-fix, the switch here
+// matched only the exact lowercase spelling, silently treating this entire
+// entry as unrecognized junk and reporting "no issues found".
+func TestRunFindsLeakViaNetrcCapitalizedKeywords(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "Machine git.privatecorp.internal\n\tLogin builder\n\tPassword s3cr3t\n")
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()

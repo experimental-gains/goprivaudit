@@ -351,9 +351,16 @@ func curlParseNetrc(data string) []stdlibNetrcLine {
 			continue
 		}
 
+		// Keyword dispatch is case-insensitive here too, mirroring
+		// netrc.go's own fix (see privatePrefixesFromNetrc's switch): real
+		// curl's parsenetrc compares every keyword token via
+		// strcasecompare, confirmed reading lib/netrc.c directly. lcTok is
+		// only used to pick a branch; l.machine/l.login/l.password below
+		// still store the original-case tok.
+		lcTok := strings.ToLower(tok)
 		switch state {
 		case stNothing:
-			switch tok {
+			switch lcTok {
 			case "macdef":
 				inMacro = true
 			case "machine":
@@ -375,18 +382,18 @@ func curlParseNetrc(data string) []stdlibNetrcLine {
 			case keyword == kwPassword:
 				l.password = tok
 				keyword = kwNone
-			case tok == "login":
+			case lcTok == "login":
 				keyword = kwLogin
-			case tok == "password":
+			case lcTok == "password":
 				keyword = kwPassword
-			case tok == "machine":
+			case lcTok == "machine":
 				if inDefault {
 					commit()
 					return out
 				}
 				commit()
 				state = stHostFound
-			case tok == "default":
+			case lcTok == "default":
 				if atEOL {
 					if inDefault {
 						commit()
@@ -417,6 +424,9 @@ func FuzzPrivatePrefixesFromNetrc(f *testing.F) {
 		"macdef \nmachine a.internal login x password y\n",
 		"default 0 machine a.internal login x password y\n",
 		"0 password machine a.internal login x password y\n",
+		"Machine git.privatecorp.internal\n\tLogin builder\n\tPassword s3cr3t\n",
+		"DEFAULT\nlogin anon\npassword anon\n",
+		"MaChInE a.internal LoGiN x PaSsWoRd y\n",
 	}
 	for _, s := range seeds {
 		f.Add(s)
