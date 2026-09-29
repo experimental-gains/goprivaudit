@@ -257,13 +257,65 @@ func setSignalSlot(slots *[]*prefixSlot, bySectionURL map[string]*prefixSlot, se
 	if sectionURLHasExplicitUser(sectionURL) {
 		return
 	}
-	p := normalizeToModulePrefix(sectionURL)
+	p := normalizeSectionURLToModulePrefix(sectionURL)
 	if p == "" || isKnownPublicHost(p) {
 		return
 	}
-	s := &prefixSlot{value: p, active: true, scheme: schemeOf(sectionURL)}
+	// Only ask schemeOf for a section URL that actually names one
+	// explicitly (a real "scheme://..." prefix): schemeOf's ssh-vs-file
+	// disambiguation is about a real fetch/remote URL, a different
+	// question from what a bare, scheme-omitted [credential "..."]/[http
+	// "..."] context pattern means (see
+	// normalizeSectionURLToModulePrefix's doc comment — omitting the
+	// scheme there means "matches every scheme", not "assume file").
+	// Leaving scheme == "" here makes prefixSlot.scheme's own documented
+	// fail-open convention apply: never suppress this signal on a guessed
+	// transport, since it wasn't scoped to just one.
+	scheme := ""
+	if strings.Contains(sectionURL, "://") {
+		scheme = schemeOf(sectionURL)
+	}
+	s := &prefixSlot{value: p, active: true, scheme: scheme}
 	*slots = append(*slots, s)
 	bySectionURL[sectionURL] = s
+}
+
+// normalizeSectionURLToModulePrefix is normalizeToModulePrefix's
+// counterpart for a [credential "..."]/[http "..."] section header
+// specifically. Unlike a real fetch/remote URL — the only kind of value
+// normalizeToModulePrefix's own scp-shorthand-vs-local-path disambiguation
+// (see schemeOf's doc comment) is about — a section header pattern with no
+// "scheme://" prefix at all is not ambiguous between ssh and a local
+// filesystem path: there is no such thing as a "local path" credential/http
+// context. Per gitcredentials(7) ("CREDENTIAL CONTEXTS") and the
+// http.<url>.* matching rules it points to, omitting the scheme from a
+// context pattern simply means "match this host/path under any protocol".
+// Verified live against real git: `git config credential."git.corp.
+// example.com".helper store` — no scheme at all in the section header — is
+// invoked by `git credential fill` for both a protocol=https request and a
+// protocol=http request to that host, where the equivalent
+// "https://git.corp.example.com"-scoped entry only answers protocol=https.
+// Before this fix, setSignalSlot fed every section URL straight to
+// normalizeToModulePrefix, which only recognizes an explicit
+// "scheme://host..." prefix or a "user@host:path" shorthand and returns ""
+// for anything else — so a bare, scheme-omitted section (a real,
+// git-documented, live-verified config shape, not a malformed one) was
+// silently dropped as if it configured no credential/header at all,
+// regardless of any GIT_ALLOW_PROTOCOL/protocol.allow policy. A bare
+// "host[:port][/path]" pattern names a real host exactly the way an
+// explicit "https://host[:port][/path]" one does, so once
+// normalizeToModulePrefix itself reports it found no recognized scheme or
+// shorthand, this normalizes the bare form identically (stripHostPort +
+// finishPrefix, the same two helpers the scheme-prefixed branches already
+// funnel through).
+func normalizeSectionURLToModulePrefix(sectionURL string) string {
+	if p := normalizeToModulePrefix(sectionURL); p != "" {
+		return p
+	}
+	if strings.Contains(sectionURL, "://") || strings.Contains(sectionURL, "@") {
+		return ""
+	}
+	return finishPrefix(stripHostPort(sectionURL))
 }
 
 // sectionURLHasExplicitUser reports whether a [credential "..."]/[http

@@ -406,6 +406,50 @@ require github.example.corp/myorg/internal-tool v0.0.0-20230101000000-abcdef1234
 	}
 }
 
+// TestRunStillFlagsLeakForSchemeOmittedCredentialHelperWhenFileProtocolBlocked
+// covers a scheme-omitted [credential "..."] section (see
+// TestPrivatePrefixesFromGitConfigCredentialHelperSchemeOmitted in
+// gitconfig_test.go for the parsing-level half of this bug) combined with
+// the protocol-blocked-transport suppression this file adds
+// (TestRunSuppressesLeakWhenGitAllowProtocolBlocksACredentialHelpersOwnScheme
+// above): a section pattern that never named an explicit scheme applies to
+// every protocol (verified live — see
+// normalizeSectionURLToModulePrefix's doc comment in gitconfig.go), so it
+// must never be treated as scoped to just one guessed scheme the way an
+// explicit "https://..."-scoped section is. Before this fix, schemeOf was
+// called on the bare section URL unconditionally and (per its own
+// documented ssh-vs-local-path heuristic for a colon-less string)
+// classified it as "file" — so once GIT_ALLOW_PROTOCOL blocked "file"
+// (leaving https, the transport go actually uses, allowed) the credential
+// helper's own protocol-scheme filter wrongly suppressed a real, live
+// leak signal.
+func TestRunStillFlagsLeakForSchemeOmittedCredentialHelperWhenFileProtocolBlocked(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.corp.example.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "git.corp.example.com"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "https")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.corp.example.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
 // TestGitProtocolAllowedAgainstRealGit is an oracle-diff test against the
 // real `git` binary: for a representative scheme/policy combination, does
 // a real `git ls-remote` actually fail with "fatal: transport '<scheme>'

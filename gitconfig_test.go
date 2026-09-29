@@ -158,6 +158,52 @@ func TestPrivatePrefixesFromGitConfigCredentialHelperOrgScoped(t *testing.T) {
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigCredentialHelperSchemeOmitted covers a
+// [credential "..."]/[http "..."] section whose context pattern omits the
+// scheme entirely (e.g. "git.corp.example.com", not
+// "https://git.corp.example.com") — a real, git-documented shape, not a
+// malformed one: per gitcredentials(7) ("CREDENTIAL CONTEXTS") and the
+// http.<url>.* matching rules, dropping the scheme from a context pattern
+// means "match this host under any protocol". Verified live against real
+// git: `git config credential."git.corp.example.com".helper store` (no
+// scheme at all) is invoked by `git credential fill` for both a
+// protocol=https request and a protocol=http request to that host.
+//
+// Before this fix, setSignalSlot fed the section URL straight to
+// normalizeToModulePrefix, which only recognizes an explicit
+// "scheme://host..." prefix or a "user@host:path" shorthand and returns ""
+// for anything else — so this real signal was silently dropped
+// (privatePrefixesFromGitConfig returned nil) as if the config had no
+// credential helper at all, a false negative independent of any
+// GIT_ALLOW_PROTOCOL/protocol.allow policy.
+func TestPrivatePrefixesFromGitConfigCredentialHelperSchemeOmitted(t *testing.T) {
+	src := `[credential "git.corp.example.com"]
+	helper = store
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"git.corp.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigHTTPExtraHeaderSchemeOmittedOrgPath is
+// TestPrivatePrefixesFromGitConfigCredentialHelperSchemeOmitted's
+// counterpart for http.extraHeader and a section pattern that also
+// includes a path segment (org-scoped, not just host-scoped) — confirming
+// the fallback normalizes a scheme-omitted "host/path" pattern the same
+// way an explicit "https://host/path" one already does.
+func TestPrivatePrefixesFromGitConfigHTTPExtraHeaderSchemeOmittedOrgPath(t *testing.T) {
+	src := `[http "git.corp.example.com/myorg"]
+	extraHeader = Authorization: Bearer secret-token
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"git.corp.example.com/myorg"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 // TestPrivatePrefixesFromGitConfigCredentialHelperGhAuthSetupGit
 // reproduces `gh auth setup-git`'s actual real-world output verbatim
 // (confirmed against its --help text and gitcredentials(7)): an empty
