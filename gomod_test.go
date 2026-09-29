@@ -577,6 +577,81 @@ func TestGoModHasInvalidDirectiveArgCount(t *testing.T) {
 	}
 }
 
+// TestGoModHasInvalidGodebugDirective covers
+// goModHasInvalidGodebugDirective's live-verified trigger condition: a
+// `godebug` directive line (single-line or block-entry form) whose argument
+// isn't a single "key=value" token free of `"`/backtick/`'`/`,` is exactly
+// what makes the real go command's strict go.mod parser (modfile.Parse)
+// Fatal every module-aware go subcommand before resolving a single module —
+// confirmed against real `go list -m all` (see
+// TestRunInvalidGodebugDirectiveGoModNoLeak in main_test.go for the
+// end-to-end regression). A go.mod with no `godebug` directive at all is NOT
+// one of these cases.
+func TestGoModHasInvalidGodebugDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no godebug directive at all", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"valid single-line godebug", "module example.com/foo\n\ngo 1.24\n\ngodebug httplaxcontentlength=1\n", false},
+		{"no equals sign at all", "module example.com/foo\n\ngo 1.24\n\ngodebug nokeyvalue\n", true},
+		{"bare godebug, no argument", "module example.com/foo\n\ngo 1.24\n\ngodebug\n\nrequire example.com/bar v1.0.0\n", true},
+		{"embedded comma", "module example.com/foo\n\ngo 1.24\n\ngodebug foo=bar,baz\n", true},
+		{"embedded double quote", "module example.com/foo\n\ngo 1.24\n\ngodebug foo=\"bar\"\n", true},
+		{"extra argument after key=value", "module example.com/foo\n\ngo 1.24\n\ngodebug foo=bar extra\n", true},
+		{"valid godebug block", "module example.com/foo\n\ngo 1.24\n\ngodebug (\n\tfoo=bar\n\tbaz=qux\n)\n", false},
+		{"godebug block entry with no equals", "module example.com/foo\n\ngo 1.24\n\ngodebug (\n\tfoo=bar\n\tnokeyvalue\n)\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidGodebugDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidGodebugDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoModHasInvalidRetractDirective covers
+// goModHasInvalidRetractDirective's live-verified trigger condition: a
+// `retract` directive line (single-line or block-entry form) whose argument
+// doesn't match golang.org/x/mod/modfile's own parseVersionInterval grammar
+// — a bare version with a stray trailing token, an incomplete bracketed
+// interval, or a missing argument entirely — is exactly what makes the real
+// go command's strict go.mod parser (modfile.Parse) Fatal every
+// module-aware go subcommand before resolving a single module, fully
+// offline (GOPROXY=off) — confirmed against real `go list -m all` (see
+// TestRunInvalidRetractDirectiveGoModNoLeak in main_test.go for the
+// end-to-end regression). A version token's own syntax (e.g.
+// "bogus-not-a-version") is deliberately NOT checked — live-verified that
+// shape instead sends a real go.mod parse down a later, network-dependent
+// validation path (a proxy lookup), not an immediate offline Fatal, so it
+// must NOT be flagged here.
+func TestGoModHasInvalidRetractDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no retract directive at all", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"valid single version", "module example.com/foo\n\ngo 1.24\n\nretract v1.2.3\n", false},
+		{"valid bracketed interval", "module example.com/foo\n\ngo 1.24\n\nretract [v1.0.0,v1.9.9]\n", false},
+		{"valid bracketed interval, no spaces at all", "module example.com/foo\n\ngo 1.24\n\nretract[v1.0.0,v1.9.9]\n", false},
+		{"version with no real semver syntax is not flagged (needs network to judge)", "module example.com/foo\n\ngo 1.24\n\nretract bogus-not-a-version\n", false},
+		{"bare retract, no argument", "module example.com/foo\n\ngo 1.24\n\nretract\n\nrequire example.com/bar v1.0.0\n", true},
+		{"extra token after a single version", "module example.com/foo\n\ngo 1.24\n\nretract v1.2.3 extra\n", true},
+		{"missing comma in bracketed interval", "module example.com/foo\n\ngo 1.24\n\nretract [v1.0.0 v1.9.9]\n", true},
+		{"missing closing bracket", "module example.com/foo\n\ngo 1.24\n\nretract [v1.0.0,v1.9.9\n", true},
+		{"missing second version after comma", "module example.com/foo\n\ngo 1.24\n\nretract [v1.0.0,]\n", true},
+		{"extra token after a complete bracketed interval", "module example.com/foo\n\ngo 1.24\n\nretract [v1.0.0,v1.9.9] extra\n", true},
+		{"valid retract block", "module example.com/foo\n\ngo 1.24\n\nretract (\n\tv1.0.0\n\t[v1.2.0,v1.2.9]\n)\n", false},
+		{"retract block entry with a stray extra token", "module example.com/foo\n\ngo 1.24\n\nretract (\n\tv1.0.0\n\tv1.2.3 extra\n)\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidRetractDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidRetractDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`

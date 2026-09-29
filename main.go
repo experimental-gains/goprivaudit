@@ -356,6 +356,21 @@ func run(args []string, stdout, stderr *os.File) int {
 		// goModHasUnknownDirective just above, one level more specific:
 		// recognizing "require"/"exclude"/"tool" as valid verbs doesn't mean
 		// their own argument count was ever validated.
+	case goModHasInvalidRetractDirective(data) || goModHasInvalidGodebugDirective(data):
+		// A go.mod containing a `retract` directive (see
+		// goModHasInvalidRetractDirective) or a `godebug` directive (see
+		// goModHasInvalidGodebugDirective) — single-line or block-entry form
+		// — whose argument the real go command's own strict go.mod parser
+		// rejects outright makes every module-aware go subcommand Fatal
+		// parsing go.mod itself ("usage: godebug key=value", "expected '['
+		// or version", "unexpected token after version"), before it resolves
+		// a single module. Same "cannot leak" reasoning as
+		// goModHasInvalidDirectiveArgCount just above, one level further
+		// into the same family: recognizing "retract"/"godebug" as valid
+		// top-level verbs (goModHasUnknownDirective) doesn't mean their own
+		// argument grammar was ever validated, the same gap
+		// goModHasInvalidGoDirective/goModHasInvalidToolchainDirective
+		// already closed for "go"/"toolchain".
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own validation rejects
 		// outright — a malformed shape (goflagsMalformed), an explicit

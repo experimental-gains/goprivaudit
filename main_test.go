@@ -978,6 +978,84 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456 extra
 	}
 }
 
+// TestRunInvalidRetractDirectiveGoModNoLeak is the direct regression test
+// for goModHasInvalidRetractDirective (see gomod.go): a go.mod whose
+// `retract` directive carries no argument at all makes every module-aware go
+// subcommand Fatal parsing go.mod before it resolves a single module, so the
+// otherwise-uncovered private-auth signal below can never actually leak.
+// Verified live before this fix: `go list -m all` (GOPROXY=off) on the
+// equivalent file Fatals immediately with "errors parsing go.mod: go.mod:7:
+// expected '[' or version", while this tool still reported "SUMDB LEAK" for
+// the require line it could still see above the bare "retract" line.
+func TestRunInvalidRetractDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+retract
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's retract directive has no argument (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
+// TestRunInvalidGodebugDirectiveGoModNoLeak is the direct regression test
+// for goModHasInvalidGodebugDirective (see gomod.go): a go.mod whose
+// `godebug` directive argument has no "=" at all makes every module-aware go
+// subcommand Fatal parsing go.mod before it resolves a single module, so the
+// otherwise-uncovered private-auth signal below can never actually leak.
+// Verified live before this fix: `go list -m all` (GOPROXY=off) on the
+// equivalent file Fatals immediately with "errors parsing go.mod: go.mod:7:
+// usage: godebug key=value", while this tool still reported "SUMDB LEAK" for
+// the require line it could still see above the malformed godebug line.
+func TestRunInvalidGodebugDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+godebug nokeyvalue
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's godebug directive has no \"=\" (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunBlockCommentGoWorkNoLeak is the direct end-to-end regression test
 // for goWorkHasUnparseableDirective (see gomod.go): unlike
 // TestRunBlockCommentGoModNoLeak above (a stray block comment in the go.mod

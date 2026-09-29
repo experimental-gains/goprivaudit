@@ -527,6 +527,205 @@ func countDirectiveArgs(s string) int {
 	}
 }
 
+// isValidGodebugArg reports whether s (a `godebug` directive's argument
+// text, single-line or block-entry) is the shape golang.org/x/mod/modfile's
+// real strict parser accepts: exactly one token, containing no `"`, “ ` “,
+// `'`, or `,` byte, and containing at least one "=" — mirroring rule.go's
+// "godebug" case exactly (`len(args) != 1 ||
+// strings.ContainsAny(args[0], "\"`',")`, then `strings.Cut(args[0], "=")`
+// failing when there's no "=" at all).
+func isValidGodebugArg(s string) bool {
+	fields := strings.Fields(s)
+	if len(fields) != 1 {
+		return false
+	}
+	arg := fields[0]
+	return !strings.ContainsAny(arg, "\"`',") && strings.Contains(arg, "=")
+}
+
+// goModHasInvalidGodebugDirective reports whether data contains a
+// `godebug` directive line (single-line or block-entry form — godebug is
+// one of the verbs golang.org/x/mod/modfile's LineBlock switch accepts in
+// block form, see goModValidTopLevelVerbs' doc comment) the real go
+// command's own strict go.mod parser (modfile.Parse) rejects outright: a
+// missing/extra argument, an argument with no "=" at all, or one embedding
+// a `"`, backtick, `'`, or `,` byte (see isValidGodebugArg). Live-verified
+// against real go1.26.8, fully offline (GOPROXY=off): `godebug nokeyvalue`
+// (no "=") and `godebug foo=bar,baz` (an embedded comma, one of the
+// rejected bytes) both Fatal immediately with "errors parsing go.mod: ...
+// usage: godebug key=value", before resolving a single module — the same
+// "cannot leak" shape as goModHasInvalidGoDirective/
+// goModHasInvalidToolchainDirective, just for the sibling directive that
+// also supports the block form. Deliberately does not validate the key
+// itself against go's actual recognized godebug settings
+// (httplaxcontentlength, etc.) — that's a semantic check real go performs
+// later, not a go.mod-parse-time Fatal; a go.mod naming an unrecognized
+// godebug key still parses and resolves fine (verified live).
+func goModHasInvalidGodebugDirective(data []byte) bool {
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if blockVerb == "godebug" && !isValidGodebugArg(trimmed) {
+				return true
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		rest := strings.TrimSpace(trimmed[i:])
+		if rest == "(" {
+			inBlock = true
+			blockVerb = verb
+			continue
+		}
+		if verb == "godebug" && !isValidGodebugArg(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// retractDirectiveTokens splits a retract directive's own argument text (or
+// a block-entry line's text) into golang.org/x/mod/modfile's real token
+// stream for this grammar: "[", "]", and "," are always their own
+// single-character tokens, even glued directly onto a version with no
+// separating whitespace at all — live-verified: real go accepts
+// "retract[v1.0.0,v1.0.1]" with zero spaces anywhere, tokenizing it
+// identically to the spaced-out form — exactly the same real-lexer
+// convention countDirectiveArgs already documents for "(" and ")".
+// Anything else is a bracket/comma/whitespace-delimited word, standing in
+// for parseVersionInterval's own "version" token: this only needs the
+// token count and shape (see retractArgInvalid), not whether a version
+// token is itself a syntactically valid semver string — that's a separate,
+// later, network-dependent question (see goModHasInvalidRetractDirective's
+// doc comment) out of scope here.
+func retractDirectiveTokens(s string) []string {
+	var toks []string
+	for {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return toks
+		}
+		switch s[0] {
+		case '[', ']', ',':
+			toks = append(toks, s[:1])
+			s = s[1:]
+		default:
+			i := 0
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '[' && s[i] != ']' && s[i] != ',' {
+				i++
+			}
+			if i == 0 {
+				i = 1
+			}
+			toks = append(toks, s[:i])
+			s = s[i:]
+		}
+	}
+}
+
+// retractArgInvalid reports whether toks (from retractDirectiveTokens)
+// violates golang.org/x/mod/modfile's parseVersionInterval grammar
+// (rule.go) — the exact structural shape real go's strict go.mod parser
+// requires for a retract directive's argument: either one bare version
+// token with nothing else, or "[" version "," version "]" with nothing
+// left over either way (a real go.mod strict-parses "unexpected token
+// after version" when anything trails a complete interval, single-version
+// or bracketed). Deliberately does not check whether either version token
+// is itself syntactically valid semver: modfile's own retract-specific
+// version fixer (dontFixRetract) never validates that at parse time either
+// — live-verified that a syntactically nonsensical version
+// ("retract bogus-not-a-version") reaches a LATER, network-dependent
+// validation step (a proxy lookup to canonicalize it) rather than an
+// immediate offline go.mod parse error, unlike every shape this function
+// does flag — so treating that shape as invalid here would be a guess this
+// tool has no local way to confirm, the same reason GOPROXY=off isn't
+// treated as an unconditional "cannot leak" guarantee elsewhere in this
+// package.
+func retractArgInvalid(toks []string) bool {
+	if len(toks) == 0 || toks[0] == "(" {
+		return true
+	}
+	if toks[0] != "[" {
+		return len(toks) != 1
+	}
+	return len(toks) != 5 || toks[2] != "," || toks[4] != "]"
+}
+
+// goModHasInvalidRetractDirective reports whether data contains a
+// `retract` directive line (single-line or block-entry form) the real go
+// command's own strict go.mod parser (modfile.Parse) rejects outright per
+// retractArgInvalid's grammar — a bare "retract" with no version at all, a
+// stray extra token after a complete version or bracketed interval, or an
+// incomplete bracketed interval (missing the comma, the second version, or
+// the closing "]"). Live-verified against real go1.26.8, fully offline
+// (GOPROXY=off): a bare "retract" line Fatals with "errors parsing go.mod:
+// ... expected '[' or version", and "retract v1.2.3 extra" Fatals with
+// "... unexpected token after version", both before resolving a single
+// module — the same "cannot leak" shape as goModHasInvalidGoDirective/
+// goModHasInvalidToolchainDirective/goModHasInvalidGodebugDirective, for
+// the sibling directive whose argument grammar hadn't been checked at all
+// before this: goModHasUnknownDirective already accepts "retract" as a
+// valid top-level verb, and goModFixedArgCountVerbs' own doc comment
+// explicitly scoped retract out of the simpler require/exclude/tool
+// arg-count check (its argument count varies — 1 token for a bare version,
+// 5 for a bracketed interval — so a naive fixed-count check doesn't apply),
+// but that never meant no check was possible, just that it needed to
+// follow the actual token grammar instead of a bare count, the same way
+// goModHasInvalidGoDirective/goModHasInvalidToolchainDirective already do
+// for their own directives via a regex instead of a count.
+func goModHasInvalidRetractDirective(data []byte) bool {
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if blockVerb == "retract" && retractArgInvalid(retractDirectiveTokens(trimmed)) {
+				return true
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		rest := strings.TrimSpace(trimmed[i:])
+		if rest == "(" {
+			inBlock = true
+			blockVerb = verb
+			continue
+		}
+		if verb == "retract" && retractArgInvalid(retractDirectiveTokens(rest)) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseTools extracts package import paths from `tool` directives in a
 // go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
 // names a *package* path, not necessarily a module path — e.g. `tool
