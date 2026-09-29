@@ -1,0 +1,2 @@
+go test fuzz v1
+string("machine 0 macdef login 0")
