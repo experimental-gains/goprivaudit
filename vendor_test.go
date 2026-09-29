@@ -323,6 +323,99 @@ func TestVendorModeActive(t *testing.T) {
 	}
 }
 
+// TestVendorModeActiveWorkspaceAutoVendor is the regression test for the
+// bug found via real-world-testing pass: `go work vendor` produces a
+// workspace-ROOT vendor/modules.txt (annotated "## workspace") that real
+// go's setDefaultBuildMod auto-defaults to vendor mode for, even with no
+// explicit -mod=vendor override at all — a distinct auto-default from the
+// per-module one vendorModeActive already modeled, keyed off go.work's own
+// directory and its own `go` directive, not the audited module's. Live-
+// verified against real go1.24.4: a two-module workspace vendored via
+// `go work vendor`, no -mod= override, unreachable GOPROXY — `go build`
+// inside a member module succeeds fully offline. Pre-fix, vendorModeActive
+// returned false unconditionally the moment gowork was set to anything
+// other than ""/"off", so goprivaudit's own audit ran for a query that
+// structurally cannot happen, reporting a false SUMDB LEAK.
+func TestVendorModeActiveWorkspaceAutoVendor(t *testing.T) {
+	dir := t.TempDir()
+	gowork := filepath.Join(dir, "go.work")
+	if err := os.WriteFile(gowork, []byte("go 1.24.4\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workspaceVendorTxt := filepath.Join(dir, "vendor", "modules.txt")
+	if err := os.MkdirAll(filepath.Dir(workspaceVendorTxt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// No workspace-root vendor/modules.txt yet: the workspace auto-default
+	// doesn't apply (same as no vendor/ directory at all outside a
+	// workspace).
+	if vendorModeActive("", "1.24.4", filepath.Join(dir, "member", "vendor", "modules.txt"), gowork) {
+		t.Error("vendorModeActive should be false: no workspace-root vendor/modules.txt present yet")
+	}
+
+	// A workspace-root vendor/modules.txt that was NOT produced by
+	// `go work vendor` (no "## workspace" annotation — e.g. a stray `go mod
+	// vendor` output) must not trigger the workspace auto-default either,
+	// matching real go's own mismatch check.
+	if err := os.WriteFile(workspaceVendorTxt, []byte("# example.com/mainmod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if vendorModeActive("", "1.24.4", filepath.Join(dir, "member", "vendor", "modules.txt"), gowork) {
+		t.Error("vendorModeActive should be false: workspace-root vendor/modules.txt isn't annotated for a workspace")
+	}
+
+	// A real `go work vendor`-shaped modules.txt (starts "## workspace"):
+	// the workspace-level auto-default now applies, live-verified above.
+	if err := os.WriteFile(workspaceVendorTxt, []byte("## workspace\n# example.com/mainmod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !vendorModeActive("", "1.24.4", filepath.Join(dir, "member", "vendor", "modules.txt"), gowork) {
+		t.Error("vendorModeActive should be true: workspace-root vendor/modules.txt is annotated for a workspace, go.work go directive >= 1.14")
+	}
+
+	// An explicit -mod=mod override still suppresses the workspace
+	// auto-default too, matching every other override case.
+	if vendorModeActive("-mod=mod", "1.24.4", filepath.Join(dir, "member", "vendor", "modules.txt"), gowork) {
+		t.Error("vendorModeActive should be false: explicit -mod=mod overrides the workspace auto-default")
+	}
+
+	// go.work's own `go` directive below 1.14 suppresses the workspace
+	// auto-default, mirroring the per-module go-version gate.
+	if err := os.WriteFile(gowork, []byte("go 1.13\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if vendorModeActive("", "1.24.4", filepath.Join(dir, "member", "vendor", "modules.txt"), gowork) {
+		t.Error("vendorModeActive should be false: go.work's own go directive is below 1.14")
+	}
+}
+
+// TestVendorModeActiveMismatchedWorkspaceAnnotation is the non-workspace
+// counterpart: a per-module vendor/modules.txt annotated "## workspace" (a
+// realistic leftover from a directory that used to be a workspace root, or
+// content copied from one) must NOT trigger the per-module auto-default
+// outside an active workspace either — live-verified against real go1.24.4:
+// copying a genuine `go work vendor` vendor/ tree into a plain module
+// directory and running `GOWORK=off go build` with an unreachable GOPROXY
+// fails with "missing go.sum entry", proof real go reached the network
+// rather than using the mismatched vendor/ directory.
+func TestVendorModeActiveMismatchedWorkspaceAnnotation(t *testing.T) {
+	dir := t.TempDir()
+	vendorTxt := filepath.Join(dir, "vendor", "modules.txt")
+	if err := os.MkdirAll(filepath.Dir(vendorTxt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(vendorTxt, []byte("## workspace\n# example.com/mainmod\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if vendorModeActive("", "1.24.4", vendorTxt, "") {
+		t.Error("vendorModeActive should be false: vendor/modules.txt is annotated for a workspace but no workspace is active")
+	}
+	if vendorModeActive("", "1.24.4", vendorTxt, "off") {
+		t.Error("vendorModeActive should be false: GOWORK=off, vendor/modules.txt annotated for a workspace, still a mismatch")
+	}
+}
+
 func TestQuotedFields(t *testing.T) {
 	cases := []struct {
 		in   string
