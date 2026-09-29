@@ -78,7 +78,15 @@
 // see goModHasInvalidDirectiveArgCount — a missing version, a stray extra
 // token, or a tool line naming more than one package, all of which the real
 // parser Fatals on before resolving anything, for the identical "cannot
-// leak" reason.
+// leak" reason. Both are also skipped when an ACTIVE go.work file (not the
+// go.mod being audited) itself contains one of these same unparsable
+// shapes — a stray block comment, a malformed go/toolchain directive, or an
+// unrecognized top-level verb under go.work's own, narrower set of
+// recognized directives (go, toolchain, use, replace) — see
+// goWorkHasUnparseableDirective: go.work shares go.mod's strict parser, so
+// the identical "Fatals before resolving anything" reasoning applies one
+// file up, and this tool's own go.mod-side checks alone never noticed a
+// broken go.work at all.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -275,6 +283,19 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	var r Report
 	switch {
+	case goWorkHasUnparseableDirective(gowork):
+		// An active go.work file that itself contains a stray "/*" block
+		// comment, a malformed `go`/`toolchain` directive, or a line whose
+		// verb isn't one of go.work's own four recognized directives (go,
+		// toolchain, use, replace) makes every module-aware go subcommand
+		// Fatal parsing go.work itself, before it ever resolves a single one
+		// of moduleDir's own requires — see goWorkHasUnparseableDirective's
+		// doc comment for the live-verified error messages. Same "cannot
+		// leak" reasoning as every other malformed-go.mod skip below, just
+		// reached because the *workspace* file never finishes parsing,
+		// checked ahead of moduleOutsideWorkspace since a go.work this
+		// broken can't even be trusted to answer "is moduleDir a member" in
+		// the first place.
 	case moduleOutsideWorkspace(gowork, moduleDir):
 		// An active go.work workspace that doesn't `use` moduleDir (or
 		// reach it via a member's local replace) makes every standard

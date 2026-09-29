@@ -978,6 +978,172 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456 extra
 	}
 }
 
+// TestRunBlockCommentGoWorkNoLeak is the direct end-to-end regression test
+// for goWorkHasUnparseableDirective (see gomod.go): unlike
+// TestRunBlockCommentGoModNoLeak above (a stray block comment in the go.mod
+// being audited), this puts the stray "/* ... */" line in the ACTIVE go.work
+// file instead — the go.mod itself is perfectly well-formed. Verified live
+// before this fix: `go list -m all`/`go build` both Fatal immediately with
+// "errors parsing go.work: ...: mod files must use // comments (not /* */
+// comments)", never resolving a single requirement in app/go.mod, while this
+// tool still reported "SUMDB LEAK" for the real, otherwise-uncovered
+// private-auth-signaled require it could still see in that go.mod — an
+// active wrong claim, since none of the existing go.mod-side parse checks
+// ever looked at the go.work file's own bytes at all.
+func TestRunBlockCommentGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./app
+
+/* a stray block comment some tooling or human mistakenly wrote */
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work itself has a stray block comment (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
+// TestRunInvalidGoDirectiveGoWorkNoLeak is TestRunBlockCommentGoWorkNoLeak's
+// sibling for a malformed `go` directive living in the go.work file instead
+// of the go.mod being audited. Verified live before this fix: `go list -m
+// all` Fatals immediately with "errors parsing go.work: ...: invalid go
+// version '1.9x': must match format 1.23.0", while this tool still reported
+// "SUMDB LEAK".
+func TestRunInvalidGoDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.9x
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work's go directive is malformed (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
+// TestRunInvalidToolchainDirectiveGoWorkNoLeak is
+// TestRunBlockCommentGoWorkNoLeak's sibling for a malformed `toolchain`
+// directive living in the go.work file. Verified live before this fix: `go
+// list -m all` Fatals immediately with `go: invalid toolchain "1.24.4" in
+// go.work` (missing the required "go" prefix), while this tool still
+// reported "SUMDB LEAK".
+func TestRunInvalidToolchainDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+toolchain 1.24.4
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work's toolchain directive is malformed (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
+// TestRunUnknownDirectiveGoWorkNoLeak is TestRunBlockCommentGoWorkNoLeak's
+// sibling for a top-level line in the go.work file whose verb isn't one of
+// go.work's own four recognized directives — here, "uses" typo'd for "use".
+// Verified live before this fix: `go list -m all` Fatals immediately with
+// "errors parsing go.work: ...: unknown directive: uses", while this tool
+// still reported "SUMDB LEAK".
+func TestRunUnknownDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+uses ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work has an unrecognized top-level directive (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active

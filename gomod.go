@@ -312,6 +312,39 @@ var goModValidTopLevelVerbs = map[string]bool{
 // separating space at all ("require(" is real, accepted go.mod syntax,
 // verified live), not just "verb (".
 func goModHasUnknownDirective(data []byte) bool {
+	return hasUnknownTopLevelDirective(data, goModValidTopLevelVerbs)
+}
+
+// goWorkValidTopLevelVerbs is the complete, fixed set of go.work top-level
+// directive keywords golang.org/x/mod/modfile's real parser
+// ((*WorkFile).add's verb switch, rule.go) recognizes: go, toolchain, use,
+// and replace — a DIFFERENT, narrower set than goModValidTopLevelVerbs
+// (go.work has no module/require/exclude/retract/tool/ignore/godebug
+// directives at all; "use" instead is unique to go.work). Verified live:
+// a go.work containing a `require ...` line — perfectly valid in a go.mod —
+// Fatals with "unknown directive: require" parsing go.work, confirming the
+// two grammars really are distinct sets, not one a subset of the other.
+var goWorkValidTopLevelVerbs = map[string]bool{
+	"go": true, "toolchain": true, "use": true, "replace": true,
+}
+
+// goWorkHasUnknownDirective is goModHasUnknownDirective's go.work
+// counterpart, using go.work's own distinct valid-verb set — see
+// goWorkHasUnparseableDirective's doc comment for why go.work needs this
+// family of checks at all.
+func goWorkHasUnknownDirective(data []byte) bool {
+	return hasUnknownTopLevelDirective(data, goWorkValidTopLevelVerbs)
+}
+
+// hasUnknownTopLevelDirective is the shared scan goModHasUnknownDirective
+// and goWorkHasUnknownDirective both drive off their own distinct
+// validVerbs set: golang.org/x/mod/modfile parses go.mod and go.work with
+// two separate (*File).add/(*WorkFile).add verb switches that don't
+// recognize the same keywords (see goWorkValidTopLevelVerbs), so a single
+// shared verb set would either wrongly accept a go.mod-only verb inside a
+// go.work file or wrongly reject a go.work-only verb ("use") — either one a
+// wrong "cannot leak" verdict in the direction that actually matters here.
+func hasUnknownTopLevelDirective(data []byte, validVerbs map[string]bool) bool {
 	inBlock := false
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
 	for sc.Scan() {
@@ -331,7 +364,7 @@ func goModHasUnknownDirective(data []byte) bool {
 			i++
 		}
 		verb := trimmed[:i]
-		if !goModValidTopLevelVerbs[verb] {
+		if !validVerbs[verb] {
 			return true
 		}
 		if strings.TrimSpace(trimmed[i:]) == "(" {
@@ -1001,6 +1034,63 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 		return nil
 	}
 	return parseReplaces(data)
+}
+
+// goWorkHasUnparseableDirective reports whether an active go.work file
+// itself — not the go.mod being audited — contains one of the same
+// grammar-level shapes golang.org/x/mod/modfile's real strict parser
+// (modfile.ParseWork, what cmd/go actually calls to read a go.work, mirrored
+// by modload.ReadWorkFile) Fatals on outright: a stray "/*" block comment, a
+// malformed `go`/`toolchain` directive argument, or a top-level line whose
+// verb isn't one of go.work's own four recognized directives (go, toolchain,
+// use, replace — see goWorkValidTopLevelVerbs). Every one of these checks
+// already exists for go.mod itself (goModHasBlockComment,
+// goModHasInvalidGoDirective, goModHasInvalidToolchainDirective,
+// goModHasUnknownDirective/goWorkHasUnknownDirective) — this just re-applies
+// the three grammar-generic ones (block comment and the go/toolchain
+// directive shape checks don't care which file type they're reading) plus
+// the go.work-specific unknown-verb variant to gowork's own bytes instead.
+//
+// This matters for the identical "cannot leak" reason as every other
+// malformed-go.mod skip in main.go's run(): before this fix, none of the
+// four go.mod-parse-Fatal checks were ever applied to the go.work file
+// itself, only to the go.mod being audited — so a go.work with, say, a
+// stray block comment (unrelated to any "use"/"replace" directive) left
+// every module-aware go subcommand Fataling on go.work before it ever
+// resolved a single requirement, while this tool still ran its own audit
+// against the go.mod and reported a SUMDB LEAK for a checksum-database query
+// that structurally cannot happen. Confirmed live end-to-end against the
+// actual goprivaudit binary for all three shapes (block comment, invalid
+// `go` directive, and an unrecognized verb — e.g. "uses" typo'd for "use"):
+// `go list -m all`/`go build` both Fatal immediately with "errors parsing
+// go.work: ...", yet pre-fix goprivaudit still reported "SUMDB LEAK" for a
+// real, otherwise-uncovered private-auth-signaled require in the workspace
+// member's own go.mod.
+//
+// gowork == ""/"off" (no active workspace) and an unreadable go.work (e.g.
+// stale GOWORK) both report false — the same "missing/unreadable go.work is
+// like no workspace" fail-open convention goWorkReplaces/goWorkUseDirs
+// already use, since this tool has no better way to tell "not a workspace"
+// from "a workspace file some other problem already made irrelevant".
+// Deliberately does not also check goModHasInvalidDirectiveArgCount: that
+// function's own fixed-arg-count verbs (require/exclude/tool) don't exist in
+// go.work's grammar at all, and go.work's own "use"/"replace" argument-shape
+// validation is out of scope for the same reason goModHasInvalidDirectiveArgCount's
+// own doc comment already excludes replace/retract/godebug from go.mod's
+// version of this check — approximating a content-shape rule (not just a
+// fixed count) risks a wrong verdict in either direction.
+func goWorkHasUnparseableDirective(gowork string) bool {
+	if gowork == "" || gowork == "off" {
+		return false
+	}
+	data, err := os.ReadFile(gowork)
+	if err != nil {
+		return false
+	}
+	return goModHasBlockComment(data) ||
+		goModHasInvalidGoDirective(data) ||
+		goModHasInvalidToolchainDirective(data) ||
+		goWorkHasUnknownDirective(data)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of

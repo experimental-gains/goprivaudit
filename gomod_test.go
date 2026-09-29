@@ -463,6 +463,80 @@ func TestGoModHasUnknownDirective(t *testing.T) {
 	}
 }
 
+// TestGoWorkHasUnknownDirective covers goWorkHasUnknownDirective's own,
+// narrower valid-verb set (go, toolchain, use, replace) — distinct from
+// goModHasUnknownDirective's go.mod set, confirmed live: a go.work
+// containing a `require` line (perfectly valid in a go.mod) Fatals with
+// "unknown directive: require" parsing go.work (see
+// TestRunUnknownDirectiveGoWorkNoLeak in main_test.go for the end-to-end
+// regression), while "use" — invalid in a go.mod — is go.work's own real
+// directive.
+func TestGoWorkHasUnknownDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"plain valid go.work", "go 1.24\n\nuse ./app\n", false},
+		{"use block form", "go 1.24\n\nuse (\n\t./app\n\t./other\n)\n", false},
+		{"replace directive", "go 1.24\n\nuse ./app\n\nreplace example.com/bar => ../local\n", false},
+		{"toolchain directive", "go 1.24\n\ntoolchain go1.24.4\n\nuse ./app\n", false},
+		{"require is a go.mod-only verb, unknown in go.work", "go 1.24\n\nuse ./app\n\nrequire example.com/bar v1.0.0\n", true},
+		{"module is a go.mod-only verb, unknown in go.work", "module example.com/app\n\ngo 1.24\n", true},
+		{"typo'd uses instead of use", "go 1.24\n\nuses ./app\n", true},
+		{"no-space block-open form", "go 1.24\n\nuse(\n\t./app\n)\n", false},
+	}
+	for _, c := range cases {
+		if got := goWorkHasUnknownDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goWorkHasUnknownDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoWorkHasUnparseableDirective covers goWorkHasUnparseableDirective's
+// own gowork-path handling (empty/"off"/unreadable all fail open to false,
+// same convention as goWorkReplaces), on top of the shape checks already
+// covered individually by TestGoModHasBlockComment/
+// TestGoModHasInvalidGoDirective/TestGoModHasInvalidToolchainDirective/
+// TestGoWorkHasUnknownDirective above.
+func TestGoWorkHasUnparseableDirective(t *testing.T) {
+	dir := t.TempDir()
+	if got := goWorkHasUnparseableDirective(""); got {
+		t.Errorf("empty gowork (no workspace) = %v, want false", got)
+	}
+	if got := goWorkHasUnparseableDirective("off"); got {
+		t.Errorf(`gowork="off" = %v, want false`, got)
+	}
+	if got := goWorkHasUnparseableDirective(filepath.Join(dir, "does-not-exist.work")); got {
+		t.Errorf("unreadable gowork = %v, want false (fail open, matching goWorkReplaces)", got)
+	}
+
+	valid := writeFile(t, dir, "valid.work", "go 1.24\n\nuse ./app\n")
+	if got := goWorkHasUnparseableDirective(valid); got {
+		t.Errorf("valid go.work = %v, want false", got)
+	}
+
+	blockComment := writeFile(t, dir, "blockcomment.work", "go 1.24\n\nuse ./app\n\n/* stray */\n")
+	if got := goWorkHasUnparseableDirective(blockComment); !got {
+		t.Errorf("go.work with a stray block comment = %v, want true", got)
+	}
+
+	invalidGo := writeFile(t, dir, "invalidgo.work", "go 1.9x\n\nuse ./app\n")
+	if got := goWorkHasUnparseableDirective(invalidGo); !got {
+		t.Errorf("go.work with a malformed go directive = %v, want true", got)
+	}
+
+	invalidToolchain := writeFile(t, dir, "invalidtoolchain.work", "go 1.24\n\ntoolchain 1.24.4\n\nuse ./app\n")
+	if got := goWorkHasUnparseableDirective(invalidToolchain); !got {
+		t.Errorf("go.work with a malformed toolchain directive = %v, want true", got)
+	}
+
+	unknownVerb := writeFile(t, dir, "unknownverb.work", "go 1.24\n\nuses ./app\n")
+	if got := goWorkHasUnparseableDirective(unknownVerb); !got {
+		t.Errorf("go.work with an unrecognized verb = %v, want true", got)
+	}
+}
+
 // TestGoModHasInvalidDirectiveArgCount covers
 // goModHasInvalidDirectiveArgCount's live-verified trigger condition: a
 // require/exclude/tool directive line (single-line or block-entry form)
