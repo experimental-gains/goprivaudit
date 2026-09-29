@@ -308,7 +308,46 @@ func privatePrefixesFromNetrc(data []byte) []string {
 				}
 			}
 		case "macdef":
-			inMacro = true
+			// Real curl only special-cases "macdef" while its parser state
+			// is NOTHING (lib/netrc.c parsenetrc's outer switch: the
+			// "macdef" arm lives solely under `case NOTHING`) — once a
+			// "machine"/"default" token has opened an entry (HOSTFOUND/
+			// HOSTVALID), a literal "macdef" appearing before that entry's
+			// login/password are both read isn't recognized as anything
+			// special at all: HOSTVALID's own else-if chain has no "macdef"
+			// arm, so the token is simply skipped like any other unrecognized
+			// word, and scanning continues looking for "login"/"password"/
+			// "machine"/"default" exactly as if it had never appeared.
+			// Verified live (2026-09, GIT_CURL_VERBOSE=1 against a
+			// Basic-Auth test server): a real `~/.netrc` with
+			//
+			//	machine 127.0.0.1
+			//	macdef mymacro
+			//	login realuser
+			//	password realpass
+			//
+			// — a stray "macdef" wedged between "machine" and its own
+			// "login"/"password" lines — still authenticated with
+			// realuser/realpass (`Authorization: Basic
+			// cmVhbHVzZXI6cmVhbHBhc3M=`, confirmed by curl -v and the
+			// server's decoded Authorization header), proving real curl
+			// does NOT swallow the rest of that entry as an unnamed macro
+			// body the way this function's pre-fix, state-blind
+			// `inMacro = true` (recognizing "macdef" unconditionally,
+			// anywhere in the file) did — that unconditional form silently
+			// dropped the entry's login/password as unscanned macro-body
+			// text, missing a real, live-verified sumdb-leak signal for a
+			// netrc file shaped this way. haveMachine (also true for an
+			// open "default" entry) is exactly this function's own stand-in
+			// for "not state NOTHING": both privatePrefixesFromNetrc and
+			// its curlParseNetrc fuzz oracle (fuzz_test.go) already commit
+			// an entry and clear machine/login/password before starting a
+			// new one, so "haveMachine" tracks "currently inside an
+			// established machine/default entry" the same way curl's own
+			// state != NOTHING does for this purpose.
+			if !haveMachine {
+				inMacro = true
+			}
 		case "default":
 			if atEOL {
 				// Matching parseNetrc's own narrower trigger for

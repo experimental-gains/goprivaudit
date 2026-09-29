@@ -93,6 +93,47 @@ func TestPrivatePrefixesFromNetrc(t *testing.T) {
 			want: []string{"real.internal"},
 		},
 		{
+			// Regression test (run #500+): a stray "macdef" token wedged
+			// between a "machine" line and its own "login"/"password"
+			// lines — a real, if unusual, hand-edited-netrc shape — is NOT
+			// a real macro definition per real curl (lib/netrc.c
+			// parsenetrc's "macdef" arm lives solely under `case NOTHING`;
+			// once "machine" has opened an entry, state is HOSTFOUND/
+			// HOSTVALID, and HOSTVALID's own dispatch has no "macdef" case
+			// at all, so the token is simply skipped like any other
+			// unrecognized word). Verified live (GIT_CURL_VERBOSE=1 /
+			// curl -v against a real Basic-Auth server): this exact netrc
+			// shape still authenticated with realuser/realpass. The pre-fix
+			// code recognized "macdef" unconditionally, anywhere in the
+			// file, and so treated "login realuser"/"password realpass" as
+			// unscanned macro body — a false "no issues found" for a real,
+			// live-verified sumdb-leak signal.
+			name: "macdef mid-entry before login/password is not a real macro, still a signal",
+			data: "machine git.privatecorp.internal\nmacdef mymacro\nlogin builder\npassword s3cr3t\n",
+			want: []string{"git.privatecorp.internal"},
+		},
+		{
+			// Regression test: a stray "macdef" appearing mid-entry AFTER
+			// login/password have already been read (still before the next
+			// "machine"/"default" token) is, for the identical real-curl
+			// reason, still just a skipped, unrecognized token — the
+			// already-populated entry is unaffected.
+			name: "macdef mid-entry after login/password does not erase the signal",
+			data: "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\nmacdef mymacro\n",
+			want: []string{"git.privatecorp.internal"},
+		},
+		{
+			// Regression test: real curl only ties "macdef" to state
+			// NOTHING — before the FIRST "machine"/"default" token in the
+			// file, macdef recognition is unaffected by this fix, so the
+			// pre-existing "macdef body not scanned for machine tokens"
+			// coverage below still holds.
+			name: "macdef before the first machine entry still swallows its body",
+			data: "macdef mymacro\nmachine fake.internal login x password y\n\n" +
+				"machine real.internal\nlogin builder\npassword s3cr3t\n",
+			want: []string{"real.internal"},
+		},
+		{
 			// Regression test: a real `~/.netrc` entry with "login"/
 			// "password" each written on their own physical line, separate
 			// from the "machine" line, is a real, live-verified signal (a
@@ -303,6 +344,37 @@ require git.privatecorp.internal/team/widgets v1.2.3
 func TestRunFindsLeakViaNetrcMultiLineFields(t *testing.T) {
 	home := t.TempDir()
 	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin\nbuilder\npassword\ns3cr3t\n")
+	t.Setenv("HOME", home)
+
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.privatecorp.internal/team/widgets v1.2.3
+`)
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.privatecorp.internal/team/widgets") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunFindsLeakViaNetrcWithMacdefMidEntry is the end-to-end regression
+// test for the bug fixed here: a stray "macdef" token sitting between a
+// "machine" line and its own "login"/"password" lines is not a real macro
+// definition per real curl (see privatePrefixesFromNetrc's "macdef" case for
+// the live GIT_CURL_VERBOSE/curl -v verification), so the login/password
+// that follow it are still a real, live-verified sumdb-leak signal. Pre-fix,
+// privatePrefixesFromNetrc treated any "macdef" token as starting a macro
+// unconditionally, anywhere in the file, silently swallowing this entry's
+// own credentials as unscanned macro body and reporting "no issues found".
+func TestRunFindsLeakViaNetrcWithMacdefMidEntry(t *testing.T) {
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nmacdef mymacro\nlogin builder\npassword s3cr3t\n")
 	t.Setenv("HOME", home)
 
 	dir := t.TempDir()
