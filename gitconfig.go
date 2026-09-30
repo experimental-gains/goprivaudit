@@ -91,6 +91,77 @@ func parseQuotedSection(line, keyword string) (subsection string, ok bool) {
 	return "", false // no closing quote found on this line
 }
 
+// parseDotSection recognizes git-config(1)'s OTHER, deprecated section
+// syntax for a subsectioned header — "[section.subsection]", no space and
+// no quotes at all — which parseQuotedSection's "keyword SP* '\"' ... '\"'
+// ']'" grammar cannot match (there is no quote character anywhere in this
+// form). git-config(1) still documents and supports it today: "Alternatively,
+// [...] subsection names can be specified as a concatenation of the section
+// name, a dot, and the subsection name, in which case the subsection name is
+// case insensitive as well" — UNlike the quoted form, where subsection case
+// is preserved verbatim.
+//
+// Live-verified against real git 2.47.3 which of these two forms actually
+// parses: `[credential.git.corp.example.com]` (dots inside the subsection
+// itself, i.e. an ordinary bare hostname) is accepted and resolves to the
+// lowercased key `credential.git.corp.example.com.helper`; `[credential.
+// UPPER.Host]` resolves identically lowercased to
+// `credential.upper.host.helper`. But the instant the subsection contains a
+// '/' , ':', '@', '~', or '_' — every character a realistic org/path-scoped
+// or scp-shorthand context pattern needs (see
+// TestPrivatePrefixesFromGitConfigCredentialHelperOrgScoped's
+// "https://github.com/myorg" for the ordinary path-scoped shape) — real git
+// Fatals the whole file with "bad config line", confirmed against each
+// character individually. So this form is only ever usable for a bare
+// hostname (letters, digits, '.', '-' — the same charset a real DNS
+// hostname allows), never an org/path-scoped context; a bare-hostname
+// [credential "..."]/[http "..."] context is itself already a real signal
+// this tool tracks (see setSignalSlot; only isKnownPublicHost's short,
+// explicit list of multi-tenant hosts is excluded, not bare hosts in
+// general — a private host like "git.corp.example.com" scoped only by
+// hostname, no org path, is exactly the shape gh CLI-style tooling and
+// hand-written internal docs commonly show using this older syntax).
+//
+// Before this fix, scanConfigSignals recognized ONLY the quoted form for
+// every one of url/credential/http/includeif, so a
+// `[credential.git.corp.example.com]`/`[http.git.corp.example.com]` section
+// (equally real, equally live-verified git syntax) was silently treated as
+// an unrecognized section entirely — section reset to "" — dropping a real
+// credential.helper/http.extraHeader private-auth signal with no trace,
+// independent of GOPRIVATE/GONOSUMDB: a false negative confirmed end-to-end
+// via the built CLI (a go.mod requiring a module hosted at exactly this
+// dot-form-scoped host reported "no issues found" pre-fix, "SUMDB LEAK"
+// once the identical config was rewritten to the quoted form).
+func parseDotSection(line, keyword string) (subsection string, ok bool) {
+	if len(line) == 0 || line[0] != '[' {
+		return "", false
+	}
+	rest := line[1:]
+	if len(rest) < len(keyword) || !strings.EqualFold(rest[:len(keyword)], keyword) {
+		return "", false
+	}
+	rest = rest[len(keyword):]
+	if len(rest) == 0 || rest[0] != '.' {
+		return "", false
+	}
+	rest = rest[1:]
+	if len(rest) == 0 || rest[len(rest)-1] != ']' {
+		return "", false
+	}
+	body := rest[:len(rest)-1]
+	if body == "" {
+		return "", false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		isAlnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if !isAlnum && c != '.' && c != '-' {
+			return "", false
+		}
+	}
+	return strings.ToLower(body), true
+}
+
 // privatePrefixesFromGitConfig scans a gitconfig file's contents for three
 // independent private-auth signals:
 //
@@ -426,9 +497,15 @@ func scanConfigSignals(data []byte, slots *[]*prefixSlot, credSlots, httpSlots m
 			default:
 				if _, ok := parseQuotedSection(line, "url"); ok {
 					section = "url"
+				} else if _, ok := parseDotSection(line, "url"); ok {
+					section = "url"
 				} else if sub, ok := parseQuotedSection(line, "credential"); ok {
 					section, sectionURL = "credential", sub
+				} else if sub, ok := parseDotSection(line, "credential"); ok {
+					section, sectionURL = "credential", sub
 				} else if sub, ok := parseQuotedSection(line, "http"); ok {
+					section, sectionURL = "http", sub
+				} else if sub, ok := parseDotSection(line, "http"); ok {
 					section, sectionURL = "http", sub
 				} else if sub, ok := parseQuotedSection(line, "includeif"); ok {
 					section, cond = "includeif", sub
@@ -668,6 +745,9 @@ func insteadOfSchemes(data []byte) map[string][]string {
 		}
 		if strings.HasPrefix(line, "[") {
 			if sub, ok := parseQuotedSection(line, "url"); ok {
+				inURL = true
+				sectionURL = sub
+			} else if sub, ok := parseDotSection(line, "url"); ok {
 				inURL = true
 				sectionURL = sub
 			} else {

@@ -187,6 +187,53 @@ func TestPrivatePrefixesFromGitConfigCredentialHelperSchemeOmitted(t *testing.T)
 	}
 }
 
+// TestPrivatePrefixesFromGitConfigCredentialHelperDeprecatedDotSyntax
+// covers git-config(1)'s OTHER, deprecated subsectioned-header syntax —
+// "[section.subsection]", no space, no quotes — which is a real, still
+// fully supported form distinct from the quoted "[section \"subsection\"]"
+// form every other test in this file uses. Live-verified against real git
+// 2.47.3: `git config --file <f> --list` on a file containing exactly
+// `[credential.git.corp.example.com]\n\thelper = store\n` resolves to
+// `credential.git.corp.example.com.helper=store` with no parse error at
+// all — and a real `git credential fill` for a
+// protocol=https/host=git.corp.example.com request against that exact file
+// genuinely invokes the configured helper. Before this fix,
+// scanConfigSignals recognized only the quoted section form for
+// credential/http/url, so this equally-real syntax was silently treated as
+// an unrecognized section (section reset to ""), dropping the whole
+// credential.helper signal with no trace. See parseDotSection's doc
+// comment for why only a bare hostname (no org/path segment) can be
+// expressed this way at all — real git Fatals parsing the file the
+// instant the subsection contains '/', ':', '@', '~', or '_'.
+func TestPrivatePrefixesFromGitConfigCredentialHelperDeprecatedDotSyntax(t *testing.T) {
+	src := `[credential.git.corp.example.com]
+	helper = store
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"git.corp.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromGitConfigHTTPExtraHeaderDeprecatedDotSyntax is
+// TestPrivatePrefixesFromGitConfigCredentialHelperDeprecatedDotSyntax's
+// counterpart for http.extraHeader, and also confirms git's own
+// case-insensitive-subsection rule for this syntax (git-config(1): "the
+// subsection name is case insensitive as well", unlike the quoted form) —
+// live-verified: `[http.GIT.CORP.EXAMPLE.COM]` resolves via real git to
+// the lowercased key `http.git.corp.example.com.extraheader`.
+func TestPrivatePrefixesFromGitConfigHTTPExtraHeaderDeprecatedDotSyntax(t *testing.T) {
+	src := `[http.GIT.CORP.EXAMPLE.COM]
+	extraHeader = Authorization: Bearer secret-token
+`
+	got := privatePrefixesFromGitConfig([]byte(src))
+	want := []string{"git.corp.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
 // TestPrivatePrefixesFromGitConfigHTTPExtraHeaderSchemeOmittedOrgPath is
 // TestPrivatePrefixesFromGitConfigCredentialHelperSchemeOmitted's
 // counterpart for http.extraHeader and a section pattern that also

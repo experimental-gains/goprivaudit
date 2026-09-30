@@ -242,6 +242,39 @@ require github.mycorp.example/myorg/internal-tool v1.2.3
 	}
 }
 
+// TestCredentialHelperDeprecatedDotSyntaxEndToEnd covers the built CLI's
+// end of the same gap TestPrivatePrefixesFromGitConfigCredentialHelperDeprecatedDotSyntax
+// exercises at the unit level: git-config(1)'s deprecated, unquoted
+// "[section.subsection]" header syntax (case-insensitive subsection, no
+// space, no quotes) for a [credential "..."] context — real, live-verified
+// git syntax (see parseDotSection's doc comment), just a different header
+// shape than every other credential-helper test in this file uses.
+func TestCredentialHelperDeprecatedDotSyntaxEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.corp.example.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential.git.corp.example.com]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.corp.example.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
 // TestRunExtraHeaderBareHostNoLeak covers actions/checkout's far more
 // common default case: a bare, known-public host (plain github.com), the
 // same shape `gh auth setup-git`'s bare-host credential helper takes.
