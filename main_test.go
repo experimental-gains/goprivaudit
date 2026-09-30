@@ -1298,6 +1298,58 @@ uses ./app
 	}
 }
 
+// TestRunInvalidReplaceDirectiveGoWorkNoLeak is
+// TestRunInvalidReplaceDirectiveGoModNoLeak's sibling for a malformed
+// `replace` directive living in the ACTIVE go.work file instead of the
+// go.mod being audited — the go.mod itself is perfectly well-formed.
+// go.work's replace syntax is identical to go.mod's (see goWorkReplaces'
+// own doc comment: both are parsed through golang.org/x/mod/modfile's same
+// parseReplace grammar), so the same "path@version" mistake (instead of
+// go.mod's real space-separated "path version" form) is just as much a
+// parse-time Fatal one file up. Verified live before this fix: `go list -m
+// all` (GOENV=/dev/null GOPROXY=off) Fatals immediately with "errors parsing
+// go.work: ...: replacement module must match format 'path version', not
+// 'path@version'", never resolving a single requirement in app/go.mod, while
+// this tool still reported "SUMDB LEAK" for the real, otherwise-uncovered
+// private-auth-signaled require it could still see in that go.mod —
+// goWorkHasUnparseableDirective never called goModHasInvalidReplaceDirective
+// on the go.work's own bytes at all before this fix, even though the
+// go.mod-side check of the identical shape already existed.
+func TestRunInvalidReplaceDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./app
+
+replace example.com/foo => example.com/bar@v1.0.0
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work's replace directive uses \"path@version\" instead of \"path version\" (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active

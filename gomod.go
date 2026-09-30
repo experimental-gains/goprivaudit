@@ -1450,31 +1450,50 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // grammar-level shapes golang.org/x/mod/modfile's real strict parser
 // (modfile.ParseWork, what cmd/go actually calls to read a go.work, mirrored
 // by modload.ReadWorkFile) Fatals on outright: a stray "/*" block comment, a
-// malformed `go`/`toolchain` directive argument, or a top-level line whose
+// malformed `go`/`toolchain` directive argument, a top-level line whose
 // verb isn't one of go.work's own four recognized directives (go, toolchain,
-// use, replace — see goWorkValidTopLevelVerbs). Every one of these checks
-// already exists for go.mod itself (goModHasBlockComment,
-// goModHasInvalidGoDirective, goModHasInvalidToolchainDirective,
-// goModHasUnknownDirective/goWorkHasUnknownDirective) — this just re-applies
-// the three grammar-generic ones (block comment and the go/toolchain
-// directive shape checks don't care which file type they're reading) plus
-// the go.work-specific unknown-verb variant to gowork's own bytes instead.
+// use, replace — see goWorkValidTopLevelVerbs), or a malformed `replace`
+// directive. Every one of these checks already exists for go.mod itself
+// (goModHasBlockComment, goModHasInvalidGoDirective,
+// goModHasInvalidToolchainDirective,
+// goModHasUnknownDirective/goWorkHasUnknownDirective,
+// goModHasInvalidReplaceDirective) — this just re-applies the
+// grammar-generic ones (block comment and the go/toolchain directive shape
+// checks don't care which file type they're reading) plus the
+// go.work-specific unknown-verb variant, plus replace's own argument-grammar
+// check, to gowork's own bytes instead.
+//
+// The replace check is safe to reuse verbatim, unlike
+// goModHasInvalidDirectiveArgCount below: goWorkReplaces' own doc comment
+// already established that "go.work supports ... 'replace' directives — the
+// replace syntax is identical to go.mod's" (golang.org/x/mod/modfile parses
+// both through the exact same parseReplace grammar), so
+// goModHasInvalidReplaceDirective's structural checks (arrow position/count,
+// new-side directory-path-vs-version shape) apply to a go.work's replace
+// lines exactly as written for go.mod's, no go.work-specific variant needed.
 //
 // This matters for the identical "cannot leak" reason as every other
 // malformed-go.mod skip in main.go's run(): before this fix, none of the
-// four go.mod-parse-Fatal checks were ever applied to the go.work file
-// itself, only to the go.mod being audited — so a go.work with, say, a
-// stray block comment (unrelated to any "use"/"replace" directive) left
-// every module-aware go subcommand Fataling on go.work before it ever
-// resolved a single requirement, while this tool still ran its own audit
-// against the go.mod and reported a SUMDB LEAK for a checksum-database query
-// that structurally cannot happen. Confirmed live end-to-end against the
-// actual goprivaudit binary for all three shapes (block comment, invalid
-// `go` directive, and an unrecognized verb — e.g. "uses" typo'd for "use"):
+// go.mod-parse-Fatal checks were ever applied to the go.work file itself,
+// only to the go.mod being audited — so a go.work with, say, a stray block
+// comment (unrelated to any "use"/"replace" directive) left every
+// module-aware go subcommand Fataling on go.work before it ever resolved a
+// single requirement, while this tool still ran its own audit against the
+// go.mod and reported a SUMDB LEAK for a checksum-database query that
+// structurally cannot happen. Confirmed live end-to-end against the actual
+// goprivaudit binary for all four shapes (block comment, invalid `go`
+// directive, an unrecognized verb — e.g. "uses" typo'd for "use" — and now a
+// malformed replace, e.g. "replace example.com/foo => example.com/bar@v1.0.0"
+// — the common "path@version" habit already covered on the go.mod side):
 // `go list -m all`/`go build` both Fatal immediately with "errors parsing
 // go.work: ...", yet pre-fix goprivaudit still reported "SUMDB LEAK" for a
 // real, otherwise-uncovered private-auth-signaled require in the workspace
-// member's own go.mod.
+// member's own go.mod. This is the same "a checklist built for one file
+// format doesn't automatically extend to a second file sharing the same
+// reference-implementation grammar" gap the block-comment/go/toolchain/
+// unknown-verb checks above already closed once (when they were first added
+// to this function) — replace's own go.mod-side grammar check was added
+// later, and this function was never revisited to pick it up until now.
 //
 // gowork == ""/"off" (no active workspace) and an unreadable go.work (e.g.
 // stale GOWORK) both report false — the same "missing/unreadable go.work is
@@ -1483,11 +1502,14 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // from "a workspace file some other problem already made irrelevant".
 // Deliberately does not also check goModHasInvalidDirectiveArgCount: that
 // function's own fixed-arg-count verbs (require/exclude/tool) don't exist in
-// go.work's grammar at all, and go.work's own "use"/"replace" argument-shape
+// go.work's grammar at all, and go.work's own "use" directive's argument-shape
 // validation is out of scope for the same reason goModHasInvalidDirectiveArgCount's
 // own doc comment already excludes replace/retract/godebug from go.mod's
 // version of this check — approximating a content-shape rule (not just a
-// fixed count) risks a wrong verdict in either direction.
+// fixed count) risks a wrong verdict in either direction. "use" is left
+// alone for exactly that reason; "replace" gets its own dedicated check
+// above precisely because goModHasInvalidReplaceDirective already IS that
+// safe, content-shape-aware check, reused rather than approximated.
 func goWorkHasUnparseableDirective(gowork string) bool {
 	if gowork == "" || gowork == "off" {
 		return false
@@ -1499,7 +1521,8 @@ func goWorkHasUnparseableDirective(gowork string) bool {
 	return goModHasBlockComment(data) ||
 		goModHasInvalidGoDirective(data) ||
 		goModHasInvalidToolchainDirective(data) ||
-		goWorkHasUnknownDirective(data)
+		goWorkHasUnknownDirective(data) ||
+		goModHasInvalidReplaceDirective(data)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of

@@ -535,6 +535,16 @@ func TestGoWorkHasUnparseableDirective(t *testing.T) {
 	if got := goWorkHasUnparseableDirective(unknownVerb); !got {
 		t.Errorf("go.work with an unrecognized verb = %v, want true", got)
 	}
+
+	// go.work's replace syntax is identical to go.mod's (see goWorkReplaces'
+	// own doc comment), so the same goModHasInvalidReplaceDirective grammar
+	// check applies verbatim: a new-side path written "path@version" instead
+	// of the real space-separated "path version" form Fatals real go parsing
+	// go.work, before it resolves a single requirement in any member module.
+	invalidReplace := writeFile(t, dir, "invalidreplace.work", "go 1.24\n\nuse ./app\n\nreplace example.com/foo => example.com/bar@v1.0.0\n")
+	if got := goWorkHasUnparseableDirective(invalidReplace); !got {
+		t.Errorf("go.work with a malformed replace directive = %v, want true", got)
+	}
 }
 
 // TestGoModHasInvalidDirectiveArgCount covers
