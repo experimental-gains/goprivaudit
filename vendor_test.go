@@ -416,6 +416,66 @@ func TestVendorModeActiveMismatchedWorkspaceAnnotation(t *testing.T) {
 	}
 }
 
+// TestVendorModeActiveDirWithoutModulesTxt is the regression test for the
+// bug found via real-world-testing pass: a vendor/ DIRECTORY that exists but
+// has no modules.txt file inside it at all (e.g. an empty `mkdir vendor`, or
+// a legacy pre-modules vendor tree never run through `go mod vendor`) still
+// auto-defaults to vendor mode in the real go command, per
+// cmd/go/internal/modload's own modulesTextIsForWorkspace: a missing
+// modules.txt reads as "not annotated for a workspace" (ok=false, err=nil),
+// which is not a mismatch outside workspace mode, so the auto-default still
+// fires. Live-verified against real go1.24.4 (2026-09): a go.mod (`go
+// 1.24`, one require) with a bare `vendor/` directory (no modules.txt) and
+// an unroutable GOPROXY made `go list -m all` fail in ~5ms with "go:
+// inconsistent vendoring ... not marked as explicit in vendor/modules.txt"
+// — a vendor-mode-specific error, not a network timeout, proving BuildMod
+// was "vendor" and GOSUMDB was never queried. Pre-fix, vendorModeActive
+// gated its whole auto-default on os.Stat succeeding for the modules.txt
+// FILE, so this exact "cannot leak" state fell through to the normal audit
+// path — confirmed end-to-end against the actual goprivaudit binary: a
+// go.mod requiring a module with a real, uncovered git insteadOf signal,
+// plus this bare vendor/ directory, reported a false SUMDB LEAK pre-fix.
+func TestVendorModeActiveDirWithoutModulesTxt(t *testing.T) {
+	dir := t.TempDir()
+	vendorTxt := filepath.Join(dir, "vendor", "modules.txt")
+	if err := os.MkdirAll(filepath.Dir(vendorTxt), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately never create vendorTxt itself: the directory exists, the
+	// file inside it does not.
+
+	if !vendorModeActive("", "1.24.4", vendorTxt, "") {
+		t.Error("vendorModeActive should be true: vendor/ directory exists (no modules.txt), go 1.24.4, no override — real go still auto-vendors")
+	}
+
+	// go < 1.14 still suppresses the auto-default even in this shape,
+	// mirroring the modules.txt-present case.
+	if vendorModeActive("", "1.13", vendorTxt, "") {
+		t.Error("vendorModeActive should be false: go < 1.14 doesn't auto-vendor even with a bare vendor/ directory present")
+	}
+
+	// An active workspace's per-module auto-default is still suppressed the
+	// same way as every other case above.
+	if vendorModeActive("", "1.24.4", vendorTxt, filepath.Join(dir, "go.work")) {
+		t.Error("vendorModeActive should be false: an active workspace suppresses the per-module vendor auto-default even with a bare vendor/ directory")
+	}
+
+	// workspaceVendorModeActive, unlike vendorModeActive, genuinely requires
+	// modules.txt to exist (real go's in-workspace comparison needs
+	// vendoredWorkspace == true, and a missing file always reads as false —
+	// see workspaceVendorModeActive's own doc comment) — a bare workspace-
+	// root vendor/ directory with no modules.txt must NOT auto-vendor,
+	// unlike the non-workspace case just above. This isn't a new behavior
+	// change; it documents that the asymmetry is intentional.
+	gowork := filepath.Join(dir, "go.work")
+	if err := os.WriteFile(gowork, []byte("go 1.24.4\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceVendorModeActive(gowork) {
+		t.Error("workspaceVendorModeActive should be false: workspace-root vendor/ directory exists but has no modules.txt at all")
+	}
+}
+
 func TestQuotedFields(t *testing.T) {
 	cases := []struct {
 		in   string

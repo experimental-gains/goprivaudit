@@ -26,9 +26,11 @@ import (
 //     go 1.24, `GOFLAGS=-mod=mod go build` with an unreachable GOPROXY still
 //     fails trying to reach it — the explicit flag suppresses the auto-vendor
 //     default entirely.
+//
 //   - Absent an explicit override and OUTSIDE an active workspace, vendor
-//     mode is the default exactly when vendorModulesTxtPath exists, the
-//     go.mod's own `go` directive is 1.14 or higher, AND that modules.txt
+//     mode is the default exactly when the vendor/ DIRECTORY exists (its
+//     modules.txt file need not — see below), the go.mod's own `go`
+//     directive is 1.14 or higher, AND that directory's modules.txt (if any)
 //     isn't itself annotated "## workspace" (see
 //     vendorModulesTxtIsForWorkspace) — real go compares the file's own
 //     annotation against the mode it's actually running in and refuses the
@@ -43,6 +45,31 @@ import (
 //     running `GOWORK=off go build` with an unreachable GOPROXY fails with
 //     "missing go.sum entry" — proof real go reached the network instead of
 //     using the mismatched vendor/ directory.
+//
+//     A vendor/ directory that exists but has NO modules.txt inside it at
+//     all (not merely "not annotated for a workspace" — genuinely absent) is
+//     its own real, live-verified case, distinct from both of the above:
+//     cmd/go/internal/modload's own modulesTextIsForWorkspace treats a
+//     missing modules.txt as "not for a workspace" (ok=false, err=nil, its
+//     own doc comment: "Some vendor directories exist that don't contain
+//     modules.txt. This mostly happens when converting to modules. We want
+//     to preserve the behavior that mod=vendor is set"), which — outside
+//     workspace mode — is NOT a mismatch, so the auto-default still fires.
+//     Verified live (2026-09, go1.24.4): a go.mod (`go 1.24`, one `require`)
+//     with an empty `vendor/` directory (mkdir, no `go mod vendor` ever run)
+//     and an unroutable GOPROXY made `go list -m all` fail in 0.005s with
+//     "go: inconsistent vendoring ... not marked as explicit in
+//     vendor/modules.txt" — a vendor-mode-specific error, not a network
+//     timeout, proving BuildMod was set to "vendor" and GOSUMDB was never
+//     queried. Before this fix, vendorModeActive gated its whole auto-default
+//     on os.Stat(vendorModulesTxtPath) succeeding — the FILE, not the
+//     directory — so this exact real, live-verified "cannot leak" state
+//     (confirmed end-to-end against the actual goprivaudit binary: a
+//     go.mod requiring a module with an uncovered git insteadOf signal, plus
+//     this bare vendor/ directory, reported a false SUMDB LEAK pre-fix) fell
+//     straight through to the ordinary audit path instead of being skipped
+//     like every other vendor-mode case above.
+//
 //   - Absent an explicit override and INSIDE an active workspace, the
 //     per-module vendor/ directory above is ignored entirely — `go build`
 //     inside a workspace member still reaches the network exactly as if no
@@ -74,7 +101,14 @@ func vendorModeActive(goflags, goVersion, vendorModulesTxtPath, gowork string) b
 	if gowork != "" && gowork != "off" {
 		return workspaceVendorModeActive(gowork)
 	}
-	if _, err := os.Stat(vendorModulesTxtPath); err != nil {
+	// Gate on the vendor/ DIRECTORY existing, not its modules.txt file: real
+	// go's setDefaultBuildMod checks fsys.Stat(vendorDir).IsDir(), and a
+	// missing modules.txt inside it is handled separately (as "not annotated
+	// for a workspace", not "no vendor directory at all") — see this
+	// function's own doc comment for the live-verified case this distinction
+	// matters for.
+	vendorDir := filepath.Dir(vendorModulesTxtPath)
+	if info, err := os.Stat(vendorDir); err != nil || !info.IsDir() {
 		return false
 	}
 	if vendorModulesTxtIsForWorkspace(vendorModulesTxtPath) {
@@ -82,7 +116,11 @@ func vendorModeActive(goflags, goVersion, vendorModulesTxtPath, gowork string) b
 		// when this directory was itself a workspace root) doesn't match
 		// what real go expects to find outside workspace mode — see this
 		// function's own doc comment for the live-verified "missing go.sum
-		// entry" (network reached, not vendored) result.
+		// entry" (network reached, not vendored) result. A modules.txt that's
+		// simply absent (as opposed to present-but-differently-annotated)
+		// reads as false here too (see vendorModulesTxtIsForWorkspace's own
+		// doc comment), so it falls through to the goVersionAtLeast check
+		// below exactly like a present, unannotated modules.txt would.
 		return false
 	}
 	return goVersionAtLeast(goVersion, 1, 14)
