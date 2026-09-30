@@ -428,38 +428,50 @@ func hasUnknownTopLevelDirective(data []byte, validVerbs map[string]bool) bool {
 // len(args)==1 (the module path) — its `errorf("usage: module module/path")`
 // fires purely off the argument count, with the module path's own quoting
 // handled generically by parseString exactly like every other verb here, so
-// it belongs in this fixed-count family too. Confirmed live against real
-// go1.24.4: `module example.com/app extra` and a bare `module` line both
-// Fatal with "usage: module module/path" before resolving a single
-// dependency — `module` was simply missing from this map (an omission, not
-// a documented exclusion the way `replace`/`retract`/`godebug` are), the
-// same drift technique #61's family already found between `goprivaudit`'s
-// directive-recognition list and its argument-grammar validation.
+// it belongs in this fixed-count family too. `ignore` (added to
+// golang.org/x/mod/modfile after go1.24 — absent from go1.24's own vendored
+// copy, present from go1.26.8 onward, confirmed by diffing both installed
+// toolchains' vendored rule.go directly) shares the exact same
+// single-fixed-argument shape: `case "ignore": if len(args) != 1 {
+// errorf("ignore directive expects exactly one argument") }`, with its
+// argument's own quoting handled generically by parseString exactly like
+// module/tool. Confirmed live against real go1.26.8 (this repo's own go.mod
+// `go` directive, auto-selected via GOTOOLCHAIN=auto): both a bare `ignore`
+// line and `ignore testdata extra` Fatal with "ignore directive expects
+// exactly one argument" before resolving a single dependency — `ignore` was
+// simply missing from this map (an omission, not a documented exclusion the
+// way `replace`/`retract`/`godebug` are), the same drift technique #61's
+// family already found once for retract/godebug and technique #86's family
+// found again for `module`.
 var goModFixedArgCountVerbs = map[string]int{
 	"require": 2,
 	"exclude": 2,
 	"tool":    1,
 	"module":  1,
+	"ignore":  1,
 }
 
 // goModHasInvalidDirectiveArgCount reports whether data contains a
-// require/exclude/tool/module directive line (single-line or block-entry
-// form) that the real go command's own strict go.mod parser (modfile.Parse)
-// rejects outright for carrying the wrong number of arguments: a require
-// line missing its version ("require example.com/foo"), one carrying a
-// stray extra token ("require example.com/foo v1.0.0 extra" — a plausible
-// leftover from a botched merge-conflict resolution or hand-edit), a tool
-// line naming more than one package, or a module line carrying zero or two-
-// plus arguments ("module" alone, or "module example.com/app extra" — the
-// same plausible hand-edit slip, just on the one directive every go.mod
-// has). Live-verified (2026-09) against the real go toolchain: each of
+// require/exclude/tool/module/ignore directive line (single-line or
+// block-entry form) that the real go command's own strict go.mod parser
+// (modfile.Parse) rejects outright for carrying the wrong number of
+// arguments: a require line missing its version ("require
+// example.com/foo"), one carrying a stray extra token ("require
+// example.com/foo v1.0.0 extra" — a plausible leftover from a botched
+// merge-conflict resolution or hand-edit), a tool line naming more than one
+// package, a module line carrying zero or two-plus arguments ("module"
+// alone, or "module example.com/app extra" — the same plausible hand-edit
+// slip, just on the one directive every go.mod has), or an ignore line
+// carrying zero or two-plus arguments ("ignore" alone, or "ignore testdata
+// extra"). Live-verified (2026-09) against the real go toolchain: each of
 // those shapes, plus the exclude/block-entry equivalents, Fatals
 // immediately with "usage: require module/path v1.2.3" / "usage: exclude
 // module/path v1.2.3" / "tool directive expects exactly one argument" /
-// "usage: module module/path" — before resolving a single module. Same
-// "cannot leak" reasoning as every other malformed-go.mod skip in this file
-// (see goModHasInvalidGoDirective's doc comment): a go.mod real go refuses
-// to parse at all can never resolve a single module, so no sumdb query for
+// "usage: module module/path" / "ignore directive expects exactly one
+// argument" — before resolving a single module. Same "cannot leak"
+// reasoning as every other malformed-go.mod skip in this file (see
+// goModHasInvalidGoDirective's doc comment): a go.mod real go refuses to
+// parse at all can never resolve a single module, so no sumdb query for
 // anything in it — including an unrelated, otherwise-valid require line
 // sitting elsewhere in the same file — can ever happen. Confirmed live
 // end-to-end against the actual goprivaudit binary, pre-fix: a go.mod with
@@ -468,24 +480,27 @@ var goModFixedArgCountVerbs = map[string]int{
 // reported "SUMDB LEAK", while `go list -m all`/`go build` on the identical
 // file Fatal immediately and never get far enough to query anything. The
 // identical false SUMDB LEAK reproduced (and is fixed by this same check)
-// for a malformed `module` line instead — see
-// TestRunInvalidModuleDirectiveArgCountGoModNoLeak.
+// for a malformed `module` line, and again for a malformed `ignore` line —
+// see TestRunInvalidModuleDirectiveArgCountGoModNoLeak and
+// TestRunInvalidIgnoreDirectiveArgCountGoModNoLeak.
 //
 // This is the general-across-verbs sibling of goModHasInvalidGoDirective/
 // goModHasInvalidToolchainDirective, extending the same "recognized verb,
 // unchecked argument grammar" family one level further: recognizing
-// "require"/"exclude"/"tool"/"module" as valid top-level verbs
+// "require"/"exclude"/"tool"/"module"/"ignore" as valid top-level verbs
 // (goModHasUnknownDirective already does) is a different claim from
-// validating how many arguments follow them. `module` was, until this
-// fix, missing from that family — not because its argument grammar is any
-// different from `tool`'s (both are a single fixed-count argument with no
-// further content-shape check), but by simple omission: this function's own
-// doc comment used to claim it was "out of scope per [goModFixedArgCountVerbs']
-// doc comment" alongside replace/retract/godebug, but that var's doc
-// comment never actually named `module` as one of the deliberately-excluded,
-// content-dependent verbs — the same "an explicit exclusion reads as more
-// final than an ordinary gap" trap technique #66 already named once, just
-// recurring as a plain gap this time instead of a documented one.
+// validating how many arguments follow them. `module` and `ignore` were,
+// until fixed, both missing from that family — not because either's
+// argument grammar is any different from `tool`'s (all three are a single
+// fixed-count argument with no further content-shape check), but by simple
+// omission: this function's own doc comment used to claim `module` was
+// "out of scope per [goModFixedArgCountVerbs'] doc comment" alongside
+// replace/retract/godebug, but that var's doc comment never actually named
+// `module` (or `ignore`, added to the language after this function was
+// first written) as one of the deliberately-excluded, content-dependent
+// verbs — the same "an explicit exclusion reads as more final than an
+// ordinary gap" trap technique #66 already named once, just recurring as a
+// plain gap each time instead of a documented one.
 //
 // Block-entry lines (inside "require (\n...\n)" etc.) are checked the same
 // way, using the enclosing block's own verb and that line's own tokens as

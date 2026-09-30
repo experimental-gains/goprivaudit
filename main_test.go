@@ -1084,6 +1084,88 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunInvalidIgnoreDirectiveArgCountGoModNoLeak is the direct regression
+// test for goModHasInvalidDirectiveArgCount's newly-added "ignore" coverage
+// (see gomod.go's goModFixedArgCountVerbs): a go.mod whose `ignore`
+// directive carries a stray extra argument makes every module-aware go
+// subcommand Fatal parsing go.mod before it resolves a single module, so the
+// otherwise-uncovered private-auth signal below can never actually leak.
+// `ignore` is a newer go.mod directive, absent from go1.24's own vendored
+// golang.org/x/mod (confirmed by diffing that toolchain's vendored rule.go
+// against a newer one) but present from go1.26.8 onward, which is what this
+// repo's own go.mod `go` directive selects via GOTOOLCHAIN=auto. Verified
+// live before this fix, against that real go1.26.8 toolchain: `go list -m
+// all` (GOPROXY=off) on the equivalent file Fatals immediately with "errors
+// parsing go.mod: go.mod:7: ignore directive expects exactly one argument",
+// while this tool still reported "SUMDB LEAK" for the require line it could
+// still see above the malformed directive — `ignore` was missing from
+// goModFixedArgCountVerbs despite sharing `tool`/`module`'s exact
+// single-fixed-argument grammar.
+func TestRunInvalidIgnoreDirectiveArgCountGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.26.8
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+ignore testdata extra
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's ignore directive has a stray extra argument (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
+// TestRunInvalidIgnoreDirectiveZeroArgsGoModNoLeak is
+// TestRunInvalidIgnoreDirectiveArgCountGoModNoLeak's zero-argument sibling:
+// a bare "ignore" line with nothing after it. Verified live before this fix
+// (real go1.26.8): `go list -m all` (GOPROXY=off) on the equivalent file
+// Fatals identically with "ignore directive expects exactly one argument".
+func TestRunInvalidIgnoreDirectiveZeroArgsGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.26.8
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+ignore
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's ignore directive has zero arguments (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunInvalidRetractDirectiveGoModNoLeak is the direct regression test
 // for goModHasInvalidRetractDirective (see gomod.go): a go.mod whose
 // `retract` directive carries no argument at all makes every module-aware go

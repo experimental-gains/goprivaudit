@@ -582,6 +582,11 @@ func TestGoModHasInvalidDirectiveArgCount(t *testing.T) {
 		{"module with stray extra token", "module example.com/foo extra\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", true},
 		{"bare module, no argument", "module\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", true},
 		{"quoted module path counts as one argument", "module \"example.com/foo\"\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"ignore with stray extra token", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore testdata extra\n", true},
+		{"bare ignore, no argument", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore\n", true},
+		{"valid ignore directive", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore testdata\n", false},
+		{"quoted ignore path counts as one argument", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore \"test data\"\n", false},
+		{"ignore block entry with stray extra token", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore (\n\ttestdata extra\n)\n", true},
 	}
 	for _, c := range cases {
 		if got := goModHasInvalidDirectiveArgCount([]byte(c.src)); got != c.want {
