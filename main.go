@@ -202,7 +202,31 @@ func run(args []string, stdout, stderr *os.File) int {
 	}
 	gonosumdb := *nosumdbOverride
 	if !nosumdbSet {
-		gonosumdb = goEnv(moduleDir, "GONOSUMDB")
+		// Pass the already-resolved goprivate value (whether it's the real
+		// `go env GOPRIVATE` or a -private override) into the child `go env
+		// GONOSUMDB` invocation's own environment. `go env GONOSUMDB`
+		// doesn't print the raw/unset value: cmd/go's own
+		// cfg.EnvOrAndChanged("GONOSUMDB", cfg.GOPRIVATE) already applies
+		// the "GOPRIVATE is the fallback default for GONOSUMDB" rule
+		// *inside* that one command, using whatever GOPRIVATE that child
+		// process's own environment resolves to. Without this, a -private
+		// override is silently ignored by this exact fallback the moment
+		// GONOSUMDB itself is unset AND the real ambient environment
+		// happens to already have its own, different real GOPRIVATE set
+		// (e.g. a corporate machine with `go env -w GOPRIVATE=...`
+		// persisted globally, while a wrapper script uses -private to
+		// audit one project against a different, more specific pattern) —
+		// live-verified: with real GOPRIVATE=othercorp.example.com/* in
+		// the environment, `goprivaudit -private gitlab.corp.example.com/*`
+		// against a go.mod/insteadOf pair that pattern covers still
+		// reported a false SUMDB LEAK pre-fix, because `go env GONOSUMDB`
+		// resolved its fallback against the real ambient GOPRIVATE instead
+		// of the override, and the manual `gonosumdb == ""` fallback below
+		// never even ran since that call already returned a non-empty
+		// (just wrong) value. When -private isn't overridden, goprivate
+		// already equals the real ambient GOPRIVATE, so passing it through
+		// here is a no-op.
+		gonosumdb = goEnv(moduleDir, "GONOSUMDB", "GOPRIVATE="+goprivate)
 	}
 	if gonosumdb == "" {
 		gonosumdb = goprivate // GOPRIVATE is the fallback default for GONOSUMDB
@@ -683,10 +707,19 @@ func gitConfigCandidates(moduleDir string) []string {
 // goEnv runs `go env <name>` with cmd.Dir set to dir, so directory-dependent
 // values (GOWORK's default auto-discovery above all — see the comment
 // where moduleDir is computed in run()) reflect the module actually being
-// audited rather than this process's own working directory.
-func goEnv(dir, name string) string {
+// audited rather than this process's own working directory. extraEnv, if
+// given, is appended after the inherited environment (so each entry
+// overrides its own key, matching os/exec's "last value wins" convention)
+// — used by run() to make a child `go env GONOSUMDB` resolve its own
+// GOPRIVATE-fallback logic against an already-resolved (possibly
+// -private-overridden) value instead of silently falling back to this
+// process's real ambient GOPRIVATE.
+func goEnv(dir, name string, extraEnv ...string) string {
 	cmd := exec.Command("go", "env", name)
 	cmd.Dir = dir
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	out, err := cmd.Output()
 	if err != nil {
 		return ""

@@ -2609,3 +2609,81 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 		t.Errorf("stdout has a false leak finding despite GIT_CONFIG_NOSYSTEM: %s", stdout)
 	}
 }
+
+// TestRunPrivateOverridePropagatesToGonosumdbAmbientFallback is the direct
+// regression test for a gap in the "-private overrides GOPRIVATE instead of
+// reading it from `go env`" flag: when -nosumdb is left unset, run() reads
+// the effective GONOSUMDB via `go env GONOSUMDB`, which — per cmd/go's own
+// cfg.EnvOrAndChanged("GONOSUMDB", cfg.GOPRIVATE) — already resolves "GOPRIVATE
+// is the fallback default for GONOSUMDB" itself, using whatever GOPRIVATE
+// that child `go env` process's own environment sees. Before this fix,
+// goEnv never passed the already-resolved (possibly -private-overridden)
+// value into that child process's environment, so on a machine/CI runner
+// with its own real, different ambient GOPRIVATE already set (e.g. a
+// corporate `go env -w GOPRIVATE=...` applied machine-wide), a -private
+// override meant to audit one project against a different, more specific
+// pattern was silently ignored for the GONOSUMDB fallback: `go env
+// GONOSUMDB` returned the real ambient GOPRIVATE's value instead, which
+// came back non-empty, so the manual `gonosumdb == ""` fallback line never
+// even ran. Live-verified pre-fix: with real GOPRIVATE=othercorp.example.com/*
+// in the environment, `-private gitlab.corp.example.com/*` against a go.mod
+// whose only dependency is privately-rewritten under that exact overridden
+// pattern still reported a false SUMDB LEAK.
+func TestRunPrivateOverridePropagatesToGonosumdbAmbientFallback(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require gitlab.corp.example.com/team/privaterepo v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@gitlab.corp.example.com/"]
+	insteadOf = https://gitlab.corp.example.com/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	// A real, different ambient GOPRIVATE already set machine-wide — the
+	// exact condition that silently defeated the -private override pre-fix.
+	t.Setenv("GOPRIVATE", "othercorp.example.com/*")
+	t.Setenv("GONOSUMDB", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "gitlab.corp.example.com/*",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 once the -private override covers the module; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout has a false leak finding: the -private override should also cover GONOSUMDB's fallback, got: %s", stdout)
+	}
+}
+
+// TestRunNosumdbOverrideStillWinsOverPrivateOverride guards against
+// over-correcting the fix above: an explicit -nosumdb override must still
+// take priority over -private's value, exactly like real go's GONOSUMDB env
+// var takes priority over GOPRIVATE whenever it's actually set.
+func TestRunNosumdbOverrideStillWinsOverPrivateOverride(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require gitlab.corp.example.com/team/privaterepo v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@gitlab.corp.example.com/"]
+	insteadOf = https://gitlab.corp.example.com/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GOPRIVATE", "othercorp.example.com/*")
+	t.Setenv("GONOSUMDB", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "gitlab.corp.example.com/*",
+		"-nosumdb", "othercorp.example.com/*", // deliberately does NOT cover the module
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; an explicit -nosumdb override that doesn't cover the module should still leak; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: gitlab.corp.example.com/team/privaterepo") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
