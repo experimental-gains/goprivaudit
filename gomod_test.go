@@ -578,7 +578,10 @@ func TestGoModHasInvalidDirectiveArgCount(t *testing.T) {
 		{"valid require block", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0\n\texample.com/baz v2.0.0\n)\n", false},
 		{"no-space block-open form still validated", "module example.com/foo\n\ngo 1.24\n\nrequire(\n\texample.com/bar v1.0.0 extra\n)\n", true},
 		{"paren glued directly onto a single-line require", "module example.com/foo\n\ngo 1.24\n\nrequire(example.com/bar v1.0.0)\n", true},
-		{"replace/retract/godebug/module are out of scope, even malformed", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar\n\nretract\n\ngodebug\n", false},
+		{"replace/retract/godebug are out of scope, even malformed", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar\n\nretract\n\ngodebug\n", false},
+		{"module with stray extra token", "module example.com/foo extra\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", true},
+		{"bare module, no argument", "module\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", true},
+		{"quoted module path counts as one argument", "module \"example.com/foo\"\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
 	}
 	for _, c := range cases {
 		if got := goModHasInvalidDirectiveArgCount([]byte(c.src)); got != c.want {
