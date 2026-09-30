@@ -542,11 +542,19 @@ func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) 
 // protocol.<name>.allow config across every git config tier
 // gitConfigCandidates reads (system, global, local, worktree — file order,
 // later tiers overriding earlier ones per protocolAllowFromConfigFile's own
-// precedence), independent of GIT_ALLOW_PROTOCOL (which gitProtocolAllowed
-// checks separately and treats as fully authoritative when set — see its
-// own doc comment). Shared by blockedInsteadOfPrefixCounts (the insteadOf
-// case) and run()'s credential.helper/http.extraHeader scheme filter above,
-// since both need the identical config-file scan.
+// precedence), plus the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/
+// GIT_CONFIG_VALUE_<n> env-var config mechanism (see protocolAllowFromEnv),
+// applied last so it overrides every file tier — matching real git's own
+// documented precedence for that mechanism, verified live: a
+// protocol.ssh.allow=always set in a real config file is still overridden
+// by protocol.ssh.allow=never set via GIT_CONFIG_COUNT/KEY/VALUE, not the
+// other way around (see protocolAllowFromEnv's own doc comment for the
+// live-verified end-to-end divergence this closes). Independent of
+// GIT_ALLOW_PROTOCOL (which gitProtocolAllowed checks separately and treats
+// as fully authoritative when set — see its own doc comment). Shared by
+// blockedInsteadOfPrefixCounts (the insteadOf case) and run()'s
+// credential.helper/http.extraHeader scheme filter above, since both need
+// the identical scan.
 func effectiveProtocolAllow(moduleDir string) map[string]string {
 	protocolAllow := map[string]string{}
 	visitedProto := map[string]bool{}
@@ -554,6 +562,9 @@ func effectiveProtocolAllow(moduleDir string) map[string]string {
 		for k, v := range protocolAllowFromConfigFile(p, moduleDir, visitedProto) {
 			protocolAllow[k] = v
 		}
+	}
+	for k, v := range protocolAllowFromEnv(os.Getenv) {
+		protocolAllow[k] = v
 	}
 	return protocolAllow
 }

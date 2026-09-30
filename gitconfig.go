@@ -834,6 +834,73 @@ func protocolAllowFromGitConfig(data []byte) map[string]string {
 	return out
 }
 
+// protocolAllowFromEnv is protocolAllowFromGitConfig's counterpart for the
+// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var config
+// mechanism insteadOfSchemesFromEnv/privatePrefixesFromEnvInto already read
+// url.insteadof/credential.helper/http.extraheader signals from — see
+// insteadOfSchemesFromEnv's doc comment for why env-set config is a real,
+// live-verified signal source, not just a file-parsing nicety, and
+// effectiveProtocolAllow (main.go) for how this result is merged with the
+// file-based scan.
+//
+// Verified live (2026-09): `GIT_CONFIG_COUNT=2
+// GIT_CONFIG_KEY_0=url.ssh://git@example.com/.insteadof
+// GIT_CONFIG_VALUE_0=https://example.com/
+// GIT_CONFIG_KEY_1=protocol.ssh.allow GIT_CONFIG_VALUE_1=never git
+// ls-remote https://example.com/private/thing` fails outright with "fatal:
+// transport 'ssh' not allowed" — identical to the same protocol.ssh.allow
+// set in a real gitconfig FILE (which suppressProtocolBlockedInsteadOf
+// already handles via protocolAllowFromConfigFile) — and the env-set
+// version wins even over a FILE that says the opposite (protocol.ssh.allow
+// = always in ~/.gitconfig, protocol.ssh.allow=never via
+// GIT_CONFIG_COUNT/KEY/VALUE: the transport is still refused, confirming
+// git-config(1)'s documented precedence — this env mechanism resolves like
+// a trailing set of `-c` overrides applied after every config file, the
+// same precedence privatePrefixesFromEnvInto's own doc comment already
+// established for the credential-helper/insteadOf/extraHeader signals).
+// Yet pre-fix, effectiveProtocolAllow only ever scanned gitConfigCandidates'
+// FILES for protocol.allow/protocol.<name>.allow, never this env-var
+// mechanism at all, so a transport blocked purely this way still let
+// suppressProtocolBlockedInsteadOf's blockedInsteadOfPrefixCounts (and
+// run()'s own credential-helper/extraHeader scheme filter) conclude
+// "allowed", reporting a SUMDB LEAK for a fetch that can never actually
+// complete — the identical "active wrong claim" failure class
+// gitProtocolAllowed/suppressProtocolBlockedInsteadOf themselves exist to
+// close for the file-based case.
+//
+// Both the "protocol.<name>.allow" (three-part key, most specific) and bare
+// "protocol.allow" (two-part key, the default policy for any scheme with no
+// entry of its own — verified live to work identically via this env
+// mechanism) shapes are recognized, mirroring protocolAllowFromGitConfig's
+// own two return-map key shapes ("" for the bare form). splitConfigKey can't
+// be reused for the bare form: it requires a subsection (three dot-separated
+// parts) and returns ok=false for a plain two-part "protocol.allow" key, so
+// that shape is parsed separately here.
+func protocolAllowFromEnv(getenv func(string) string) map[string]string {
+	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
+	if err != nil || count <= 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for i := 0; i < count; i++ {
+		key := getenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
+		value := getenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
+		if section, subsection, name, ok := splitConfigKey(key); ok {
+			if strings.EqualFold(section, "protocol") && strings.EqualFold(name, "allow") {
+				out[strings.ToLower(subsection)] = value
+			}
+			continue
+		}
+		if idx := strings.Index(key, "."); idx >= 0 {
+			section, name := key[:idx], key[idx+1:]
+			if strings.EqualFold(section, "protocol") && strings.EqualFold(name, "allow") {
+				out[""] = value
+			}
+		}
+	}
+	return out
+}
+
 // gitProtocolAllowed reports whether git would permit fetching over the
 // given transport scheme, applying the exact precedence git(1)/
 // git-config(1) document: GIT_ALLOW_PROTOCOL, if set, is fully

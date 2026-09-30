@@ -74,6 +74,133 @@ func TestProtocolAllowFromGitConfig(t *testing.T) {
 	}
 }
 
+// TestProtocolAllowFromEnv is protocolAllowFromGitConfig's own unit test,
+// mirrored for the GIT_CONFIG_COUNT/KEY/VALUE env-var form: both the
+// three-part "protocol.<name>.allow" key and the bare two-part
+// "protocol.allow" key (no subsection at all, git-config(1)'s spelling for
+// the default policy) must resolve into the same map shape
+// protocolAllowFromGitConfig itself produces ("" for the bare form).
+func TestProtocolAllowFromEnv(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "3",
+		"GIT_CONFIG_KEY_0":   "protocol.allow",
+		"GIT_CONFIG_VALUE_0": "never",
+		"GIT_CONFIG_KEY_1":   "protocol.ssh.allow",
+		"GIT_CONFIG_VALUE_1": "always",
+		"GIT_CONFIG_KEY_2":   "protocol.ext.allow",
+		"GIT_CONFIG_VALUE_2": "never",
+	}
+	getenv := func(k string) string { return env[k] }
+	got := protocolAllowFromEnv(getenv)
+	want := map[string]string{"": "never", "ssh": "always", "ext": "never"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestProtocolAllowFromEnvIgnoresUnrelatedKeys checks that only
+// protocol.allow/protocol.<name>.allow keys are picked up, not an unrelated
+// two- or three-part key that happens to share a segment name.
+func TestProtocolAllowFromEnvIgnoresUnrelatedKeys(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "2",
+		"GIT_CONFIG_KEY_0":   "protocol.other",
+		"GIT_CONFIG_VALUE_0": "never",
+		"GIT_CONFIG_KEY_1":   "credential.https://example.com/.helper",
+		"GIT_CONFIG_VALUE_1": "",
+	}
+	getenv := func(k string) string { return env[k] }
+	got := protocolAllowFromEnv(getenv)
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty", got)
+	}
+}
+
+// TestRunSuppressesLeakWhenEnvProtocolAllowBlocksTheInsteadOfTarget is the
+// GIT_CONFIG_COUNT/KEY/VALUE-env-var counterpart to
+// TestRunSuppressesLeakWhenProtocolAllowConfigBlocksTheInsteadOfTarget:
+// protocol.ssh.allow=never set purely via the env-var config mechanism
+// (git-config(1)'s documented "spawn multiple git commands with a common
+// configuration but cannot depend on a configuration file" case), with NO
+// file-based protocol.allow entry at all, must suppress the leak exactly
+// like the file-based form does — verified live (2026-09) that a real
+// `GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=url.ssh://git@github.com/.insteadof
+// GIT_CONFIG_VALUE_0=https://github.com/myorg/
+// GIT_CONFIG_KEY_1=protocol.ssh.allow GIT_CONFIG_VALUE_1=never git
+// ls-remote https://github.com/myorg/internal-tool` fails outright with
+// "fatal: transport 'ssh' not allowed", the identical error the file-based
+// sibling test already covers. Before this fix, effectiveProtocolAllow
+// only ever scanned config FILES for protocol.allow/protocol.<name>.allow,
+// so this exact env-only signal was invisible and the leak was wrongly
+// reported.
+func TestRunSuppressesLeakWhenEnvProtocolAllowBlocksTheInsteadOfTarget(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_KEY_0", "url.ssh://git@github.com/.insteadof")
+	t.Setenv("GIT_CONFIG_VALUE_0", "https://github.com/myorg/")
+	t.Setenv("GIT_CONFIG_KEY_1", "protocol.ssh.allow")
+	t.Setenv("GIT_CONFIG_VALUE_1", "never")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (no leak possible); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak for a structurally-blocked transport: %s", stdout)
+	}
+}
+
+// TestRunEnvProtocolAllowOverridesFileWhichAllows is the precedence
+// regression guard for the fix above: real git lets the env-var config
+// mechanism override a config FILE's opposite setting (verified live: a
+// real ~/.gitconfig with protocol.ssh.allow=always plus
+// GIT_CONFIG_KEY_0=protocol.ssh.allow/GIT_CONFIG_VALUE_0=never still fails
+// with "fatal: transport 'ssh' not allowed") — so effectiveProtocolAllow
+// must apply the env-var scan AFTER (overriding) the file-based one, not
+// merely fall back to it when a file value already exists.
+func TestRunEnvProtocolAllowOverridesFileWhichAllows(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@github.com/"]
+	insteadOf = https://github.com/myorg/
+
+[protocol "ssh"]
+	allow = always
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "protocol.ssh.allow")
+	t.Setenv("GIT_CONFIG_VALUE_0", "never")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (no leak possible); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak for a structurally-blocked transport: %s", stdout)
+	}
+}
+
 func TestGitProtocolAllowedGitAllowProtocolIsAuthoritative(t *testing.T) {
 	getenv := func(k string) string {
 		if k == "GIT_ALLOW_PROTOCOL" {
