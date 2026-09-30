@@ -762,6 +762,153 @@ func goModHasInvalidRetractDirective(data []byte) bool {
 	return false
 }
 
+// replaceDirectiveTokens splits a replace directive's own argument text (or
+// a block-entry line's text) into golang.org/x/mod/modfile's real token
+// stream for this grammar. Unlike countDirectiveArgs's "(" and ")" tokens
+// and retractDirectiveTokens' "[", "]", "," tokens — always their own
+// token even glued directly onto a neighboring word with no whitespace at
+// all — a replace directive's "=>" arrow is NOT special punctuation to the
+// real lexer: confirmed reading golang.org/x/mod/modfile/read.go's isIdent
+// directly, only ' ', '(', ')', '[', ']', '{', '}', ',' are excluded from
+// the identifier character class, so '=' and '>' are ordinary identifier
+// runes exactly like any path character. An arrow glued directly onto an
+// adjacent word with no separating whitespace (e.g. "foo=>bar") is lexed
+// as ONE token, never recognized as the arrow at all. So this tokenizer,
+// unlike the paren/bracket ones, is plain whitespace-and-quote-aware field
+// splitting — the same firstFieldAndRest every other token in this
+// grammar (require/tool/replace paths) already goes through — with no
+// special-casing for "=>" at all.
+func replaceDirectiveTokens(s string) []string {
+	var toks []string
+	for {
+		field, rest := firstFieldAndRest(s)
+		if field == "" {
+			return toks
+		}
+		toks = append(toks, field)
+		s = rest
+	}
+}
+
+// replaceArgInvalid reports whether toks (from replaceDirectiveTokens)
+// violates golang.org/x/mod/modfile's parseReplace grammar (rule.go) in one
+// of its purely-structural, offline-checkable ways — matching
+// retractArgInvalid's own scope: checks token shape and the new-side path's
+// directory-path-ness, not either side's version-string content (see
+// goModHasInvalidReplaceDirective's doc comment for why version validity is
+// a separate, later, network-dependent question this tool deliberately
+// leaves alone, the same carve-out already established for retract).
+//
+//   - The arrow isn't at position 1 (no old-side version) or position 2 (an
+//     old-side version present), or the total token count falls outside
+//     [arrow+2, arrow+3] — real go's own "usage: replace module/path
+//     [v1.2.3] => other/module v1.4\n\t or ... ../local/directory" check.
+//   - No new-side version (arrow+2 tokens total) and the new-side path
+//     isn't a directory path (isDirectoryPath) — the new path must either
+//     carry its own version or look like a local directory. This also
+//     covers the narrower "path@version" shape (a plausible habit carried
+//     over from an ecosystem that writes dependency pins that way): real go
+//     gives that shape a more specific error message
+//     ("replacement module must match format 'path version', not
+//     'path@version'"), but it's still just one way for "not a directory
+//     path and no separate version token" to be true, so no separate check
+//     is needed to also flag it.
+//   - A new-side version IS present (arrow+3 tokens) and the new-side path
+//     IS a directory path — real go never allows a version pin on a local
+//     replacement target.
+func replaceArgInvalid(toks []string) bool {
+	arrow := 2
+	if len(toks) >= 2 && toks[1] == "=>" {
+		arrow = 1
+	}
+	if len(toks) < arrow+2 || len(toks) > arrow+3 || toks[arrow] != "=>" {
+		return true
+	}
+	newPath := toks[arrow+1]
+	if len(toks) == arrow+2 {
+		return !isDirectoryPath(newPath)
+	}
+	return isDirectoryPath(newPath)
+}
+
+// goModHasInvalidReplaceDirective reports whether data contains a `replace`
+// directive line (single-line or block-entry form) the real go command's
+// own strict go.mod parser (modfile.Parse) rejects outright per
+// replaceArgInvalid's grammar — a missing arrow, a doubled arrow, a
+// missing/extra token on either side, a new-side path with neither a
+// version nor a directory-path shape (including the common "path@version"
+// mistake), or a new-side directory path carrying a version it can't have.
+// Live-verified against real go1.24.4, fully offline (GOPROXY=off): a
+// go.mod with a real, otherwise-uncovered private-auth-signaled require
+// plus an unrelated "replace example.com/foo => example.com/bar@v1.0.0"
+// line elsewhere Fatals immediately with "errors parsing go.mod: ...
+// replacement module must match format 'path version', not 'path@version'"
+// — and the pre-fix goprivaudit binary still reported "SUMDB LEAK" for the
+// require line it could still see above the malformed replace, confirmed
+// end-to-end against the actual binary (see
+// TestRunInvalidReplaceDirectiveGoModNoLeak in main_test.go). Same
+// "cannot leak" reasoning as every other malformed-go.mod skip in this
+// file (see goModHasInvalidGoDirective's doc comment): a go.mod real go
+// refuses to parse at all can never resolve a single module, so no sumdb
+// query for anything in it — including an unrelated, otherwise-valid
+// require line sitting elsewhere in the same file — can ever happen.
+//
+// This closes the one verb goModFixedArgCountVerbs' own doc comment named
+// as explicitly out of scope for that simpler check and that — unlike its
+// two retract/godebug companions, both later given their own dedicated
+// grammar check (goModHasInvalidRetractDirective,
+// goModHasInvalidGodebugDirective) — had never been revisited since:
+// recognizing "replace" as a valid top-level verb (goModHasUnknownDirective)
+// is a different claim from validating its own argument grammar, the same
+// drift technique #61 already named for retract/godebug themselves.
+//
+// Deliberately does not validate either side's version-string content
+// (e.g. "replace example.com/foo v1.0.0 => example.com/bar not-a-version"):
+// live-verified that shape instead makes real go attempt to canonicalize
+// the version via its module-fetch machinery ("module lookup disabled by
+// GOPROXY=off" with GOPROXY=off, i.e. a real network-dependent path, not an
+// immediate offline Fatal) — the same "version content is a separate,
+// later question" carve-out goModHasInvalidRetractDirective's own doc
+// comment already establishes for retract's version tokens, just
+// reconfirmed independently for replace's.
+func goModHasInvalidReplaceDirective(data []byte) bool {
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if blockVerb == "replace" && replaceArgInvalid(replaceDirectiveTokens(trimmed)) {
+				return true
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		rest := strings.TrimSpace(trimmed[i:])
+		if rest == "(" {
+			inBlock = true
+			blockVerb = verb
+			continue
+		}
+		if verb == "replace" && replaceArgInvalid(replaceDirectiveTokens(rest)) {
+			return true
+		}
+	}
+	return false
+}
+
 // parseTools extracts package import paths from `tool` directives in a
 // go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
 // names a *package* path, not necessarily a module path — e.g. `tool

@@ -1056,6 +1056,49 @@ godebug nokeyvalue
 	}
 }
 
+// TestRunInvalidReplaceDirectiveGoModNoLeak is the direct regression test
+// for goModHasInvalidReplaceDirective (see gomod.go): a go.mod whose
+// `replace` directive writes its new-side target as "path@version" (a
+// plausible habit carried over from an ecosystem that pins dependencies
+// that way) instead of real go.mod's space-separated "path version" form
+// makes every module-aware go subcommand Fatal parsing go.mod before it
+// resolves a single module, so the otherwise-uncovered private-auth signal
+// below can never actually leak. Verified live before this fix: `go list -m
+// all` (GOPROXY=off) on the equivalent file Fatals immediately with "errors
+// parsing go.mod: go.mod:7: replacement module must match format 'path
+// version', not 'path@version'", while this tool still reported "SUMDB
+// LEAK" for the require line it could still see above the malformed
+// replace line.
+func TestRunInvalidReplaceDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+replace example.com/foo => example.com/bar@v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's replace directive uses \"path@version\" instead of \"path version\" (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunBlockCommentGoWorkNoLeak is the direct end-to-end regression test
 // for goWorkHasUnparseableDirective (see gomod.go): unlike
 // TestRunBlockCommentGoModNoLeak above (a stray block comment in the go.mod

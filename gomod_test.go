@@ -652,6 +652,48 @@ func TestGoModHasInvalidRetractDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasInvalidReplaceDirective covers
+// goModHasInvalidReplaceDirective's live-verified trigger condition: a
+// `replace` directive line (single-line or block-entry form) whose tokens
+// don't match golang.org/x/mod/modfile's own parseReplace grammar — a
+// missing/doubled arrow, a missing/extra token on either side, a new-side
+// path shaped like neither a version-carrying module path nor a directory
+// path, or a directory-path new side carrying a version it can't have — is
+// exactly what makes the real go command's strict go.mod parser
+// (modfile.Parse) Fatal every module-aware go subcommand before resolving a
+// single module, fully offline (GOPROXY=off) — confirmed against real `go
+// list -m all` for every case below (see
+// TestRunInvalidReplaceDirectiveGoModNoLeak in main_test.go for the
+// end-to-end regression). A version token's own syntax is deliberately NOT
+// checked here — live-verified that shape instead sends a real go.mod parse
+// down a later, network-dependent path ("module lookup disabled by
+// GOPROXY=off"), not an immediate offline Fatal, so it must NOT be flagged.
+func TestGoModHasInvalidReplaceDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no replace directive at all", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"valid: no old version, directory target", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => ../local\n", false},
+		{"valid: old version, directory target", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar v1.0.0 => ../local\n", false},
+		{"valid: module target with version", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork v1.0.0\n", false},
+		{"invalid: arrow glued to path with no space, lexes as one token", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar=>../local\n", true},
+		{"bare replace, no arrow at all", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar\n", true},
+		{"doubled arrow", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => fork => other\n", true},
+		{"module target with no version, not a directory path", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork\n", true},
+		{"path@version instead of a space-separated version", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork@v1.0.0\n", true},
+		{"directory target carrying a version", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => ../local v1.0.0\n", true},
+		{"valid replace block", "module example.com/foo\n\ngo 1.24\n\nreplace (\n\texample.com/bar => ../local\n\texample.com/baz => example.com/fork v1.0.0\n)\n", false},
+		{"replace block entry with a bare module target", "module example.com/foo\n\ngo 1.24\n\nreplace (\n\texample.com/bar => ../local\n\texample.com/baz => example.com/fork\n)\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidReplaceDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidReplaceDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`

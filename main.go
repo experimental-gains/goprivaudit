@@ -379,19 +379,22 @@ func run(args []string, stdout, stderr *os.File) int {
 		// goModHasUnknownDirective just above, one level more specific:
 		// recognizing "require"/"exclude"/"tool" as valid verbs doesn't mean
 		// their own argument count was ever validated.
-	case goModHasInvalidRetractDirective(data) || goModHasInvalidGodebugDirective(data):
+	case goModHasInvalidRetractDirective(data) || goModHasInvalidGodebugDirective(data) || goModHasInvalidReplaceDirective(data):
 		// A go.mod containing a `retract` directive (see
-		// goModHasInvalidRetractDirective) or a `godebug` directive (see
-		// goModHasInvalidGodebugDirective) — single-line or block-entry form
+		// goModHasInvalidRetractDirective), a `godebug` directive (see
+		// goModHasInvalidGodebugDirective), or a `replace` directive (see
+		// goModHasInvalidReplaceDirective) — single-line or block-entry form
 		// — whose argument the real go command's own strict go.mod parser
 		// rejects outright makes every module-aware go subcommand Fatal
 		// parsing go.mod itself ("usage: godebug key=value", "expected '['
-		// or version", "unexpected token after version"), before it resolves
-		// a single module. Same "cannot leak" reasoning as
-		// goModHasInvalidDirectiveArgCount just above, one level further
-		// into the same family: recognizing "retract"/"godebug" as valid
-		// top-level verbs (goModHasUnknownDirective) doesn't mean their own
-		// argument grammar was ever validated, the same gap
+		// or version", "unexpected token after version", "usage: replace
+		// module/path [v1.2.3] => other/module v1.4", "replacement module
+		// must match format 'path version', not 'path@version'", etc.),
+		// before it resolves a single module. Same "cannot leak" reasoning
+		// as goModHasInvalidDirectiveArgCount just above, one level further
+		// into the same family: recognizing "retract"/"godebug"/"replace" as
+		// valid top-level verbs (goModHasUnknownDirective) doesn't mean
+		// their own argument grammar was ever validated, the same gap
 		// goModHasInvalidGoDirective/goModHasInvalidToolchainDirective
 		// already closed for "go"/"toolchain".
 	case goflagsBad:
