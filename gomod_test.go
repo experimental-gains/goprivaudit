@@ -776,6 +776,54 @@ func TestGoModHasInvalidReplaceDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasMismatchedPathMajorVersion covers
+// goModHasMismatchedPathMajorVersion's live-verified trigger condition: a
+// `require`/`exclude` directive whose module path's own major-version
+// suffix doesn't match its paired version's major component — real go's
+// module.CheckPathMajor, called unconditionally by modfile's strict
+// require/exclude case — is exactly what makes the real go command's
+// strict go.mod parser (modfile.Parse) Fatal every module-aware go
+// subcommand before resolving a single module, fully offline (GOPROXY=off)
+// — confirmed against real `go list -m all`/`go build` for every "true"
+// case below (see TestRunMismatchedPathMajorVersionGoModNoLeak in
+// main_test.go for the end-to-end regression). A version shorthand real go
+// would need a network proxy Query to expand ("v1", "v1.0", or a
+// non-"+incompatible" build tag like "v1.0.0+meta") is deliberately NOT
+// flagged — live-verified each of those instead Fatals with "module lookup
+// disabled by GOPROXY=off" (a real network attempt), not an immediate
+// offline parse error, even when paired with a path whose major suffix it
+// clearly mismatches — see requireVersionCanonicalMajor's own doc comment.
+func TestGoModHasMismatchedPathMajorVersion(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no version suffix anywhere, consistent v1", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"matching /v2 suffix and major", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v2.0.0\n", false},
+		{"mismatched /v2 suffix, v1 version", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v1.0.0\n", true},
+		{"no suffix, v2 version (needs +incompatible)", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v2.0.0\n", true},
+		{"no suffix, v2.0.0+incompatible is the documented escape hatch", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v2.0.0+incompatible\n", false},
+		{"explicit /v1 suffix is itself a malformed module path", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v1 v1.0.0\n", true},
+		{"leading-zero /v02 suffix is itself a malformed module path", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v02 v2.0.0\n", true},
+		{"gopkg.in .v2 mismatched with v1 version", "module example.com/foo\n\ngo 1.24\n\nrequire gopkg.in/yaml.v2 v1.0.0\n", true},
+		{"gopkg.in .v2 matching v2 version", "module example.com/foo\n\ngo 1.24\n\nrequire gopkg.in/yaml.v2 v2.0.0\n", false},
+		{"gopkg.in .v1 with historical v0.0.0- pseudo-version carve-out", "module example.com/foo\n\ngo 1.24\n\nrequire gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405\n", false},
+		{"bare 'v1' shorthand version needs a network query, not flagged", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v1\n", false},
+		{"major.minor-only 'v1.0' shorthand needs a network query, not flagged", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v1.0\n", false},
+		{"non-incompatible build tag needs a network query, not flagged", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v1.0.0+meta\n", false},
+		{"full triple with prerelease still Fatals offline", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v1.0.0-pre\n", true},
+		{"exclude directive gets the identical check", "module example.com/foo\n\ngo 1.24\n\nexclude example.com/bar/v2 v1.0.0\n", true},
+		{"require block entry gets the identical check", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar/v2 v1.0.0\n)\n", true},
+		{"wrong arg count is left to goModHasInvalidDirectiveArgCount, not flagged here", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar/v2 v1.0.0 extra\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasMismatchedPathMajorVersion([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasMismatchedPathMajorVersion(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestParseReplacesSpecificAndGeneralSameModule covers a go.mod carrying
 // both a version-specific and a version-agnostic replace for the same old
 // path at once — legal go.mod syntax (verified live: `go list -m all`

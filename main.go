@@ -83,6 +83,14 @@
 // goModHasRepeatedSingletonDirective — each of which the real parser treats
 // as a singleton per file and Fatals on a second occurrence regardless of
 // whether either occurrence's own argument is individually well-formed.
+// Both are also skipped when go.mod contains a require/exclude directive
+// whose path's own major-version suffix (a trailing "/v2", "/v3", ..., or
+// gopkg.in's own ".v2" convention) doesn't match its paired version's major
+// component — see goModHasMismatchedPathMajorVersion — which the real
+// parser's module.CheckPathMajor call Fatals on unconditionally and purely
+// offline, the same "cannot leak" reason as every check above, one level
+// past goModHasInvalidDirectiveArgCount: a correct argument *count* doesn't
+// mean those arguments are mutually consistent.
 // Both are also skipped when an ACTIVE go.work file (not the
 // go.mod being audited) itself contains one of these same unparsable
 // shapes — a stray block comment, a malformed go/toolchain/godebug
@@ -439,6 +447,25 @@ func run(args []string, stdout, stderr *os.File) int {
 		// their own argument grammar was ever validated, the same gap
 		// goModHasInvalidGoDirective/goModHasInvalidToolchainDirective
 		// already closed for "go"/"toolchain".
+	case goModHasMismatchedPathMajorVersion(data):
+		// A go.mod containing a `require`/`exclude` directive (single-line
+		// or block-entry form) whose module path's own major-version suffix
+		// (e.g. the "/v2" in "example.com/foo/v2", or gopkg.in's own ".v2"
+		// convention) doesn't match its paired version's major component —
+		// see goModHasMismatchedPathMajorVersion and
+		// requireVersionMajorInvalid — makes every module-aware go
+		// subcommand Fatal parsing go.mod itself ("version \"v1.0.0\"
+		// invalid: should be v2, not v1", "should be v0 or v1, not v2", or
+		// "malformed module path" for a path whose version-suffix shape is
+		// itself broken, e.g. an explicit "/v1" or a leading-zero "/v02"),
+		// before it resolves a single module — module.CheckPathMajor, called
+		// unconditionally by the real parser's own require/exclude case,
+		// purely off the two strings already sitting in the go.mod's raw
+		// bytes, no network access involved. Same "cannot leak" reasoning as
+		// goModHasInvalidDirectiveArgCount above, one level further still:
+		// a require/exclude line carrying exactly the right number of
+		// arguments (that check's own gate) doesn't mean those arguments are
+		// mutually consistent with each other.
 	case goflagsBad:
 		// A GOFLAGS entry the real go command's own validation rejects
 		// outright — a malformed shape (goflagsMalformed), an explicit

@@ -800,6 +800,314 @@ func countDirectiveArgs(s string) int {
 	}
 }
 
+// modulePathVersionSuffix mirrors golang.org/x/mod/module.SplitPathVersion's
+// own extraction of a module path's major-version suffix — the "/v2",
+// "/v3", ... a module at major version 2+ is required to carry on its own
+// path (go.dev/ref/mod, "Major version suffixes") — for every path shape
+// except gopkg.in's own distinct ".vN" convention (see
+// gopkgInVersionSuffix). Returns major=="" and ok==true for a path with no
+// version-shaped suffix at all (the ordinary case: no sumdb-query-blocking
+// Fatal is possible on the path's shape alone). Returns ok==false for a
+// path whose tail LOOKS like an attempted major-version suffix but isn't a
+// well-formed one — a bare "/v1" (invalid: v0/v1 modules never carry an
+// explicit suffix at all), a leading-zero "/v02", or a suffix containing a
+// stray "." — live-verified (go1.26.8, GOPROXY=off) that each of these
+// makes `go build`/`go list -m all` Fatal immediately with `errors parsing
+// go.mod: go.mod:N: require <path>: version "<v>" invalid: malformed
+// module path "<path>"`, regardless of what version is paired with it.
+func modulePathVersionSuffix(path string) (major string, ok bool) {
+	if strings.HasPrefix(path, "gopkg.in/") {
+		return gopkgInVersionSuffix(path)
+	}
+	i := len(path)
+	dot := false
+	for i > 0 && (('0' <= path[i-1] && path[i-1] <= '9') || path[i-1] == '.') {
+		if path[i-1] == '.' {
+			dot = true
+		}
+		i--
+	}
+	if i <= 1 || i == len(path) || path[i-1] != 'v' || path[i-2] != '/' {
+		return "", true
+	}
+	major = path[i-2:]
+	if dot || len(major) <= 2 || major[2] == '0' || major == "/v1" {
+		return "", false
+	}
+	return major, true
+}
+
+// gopkgInVersionSuffix is modulePathVersionSuffix's counterpart for
+// gopkg.in's own distinct major-version convention: a ".vN" suffix (a dot,
+// not a slash) immediately before the path's end or its optional
+// "-unstable" tag — mirroring golang.org/x/mod/module's own splitGopkgIn
+// exactly, including the ".v0" carve-out (gopkg.in, unlike every other
+// host, really does allow an explicit v0) and the "-unstable" tag riding
+// along inside the returned major string untouched (trimmed back off only
+// at comparison time — see requireVersionMajorInvalid, mirroring
+// module.CheckPathMajor's own order of operations). Every gopkg.in path
+// must end in one of these forms at all per go.dev's own gopkg.in
+// documentation; one that doesn't is a different, already-Fatal shape this
+// function reports via ok==false, matching modulePathMajor's own "invalid
+// module path" error for it.
+func gopkgInVersionSuffix(path string) (major string, ok bool) {
+	i := len(path)
+	if strings.HasSuffix(path, "-unstable") {
+		i -= len("-unstable")
+	}
+	for i > 0 && '0' <= path[i-1] && path[i-1] <= '9' {
+		i--
+	}
+	if i <= 1 || path[i-1] != 'v' || path[i-2] != '.' {
+		return "", false
+	}
+	major = path[i-2:]
+	if len(major) <= 2 || (major[2] == '0' && major != ".v0") {
+		return "", false
+	}
+	return major, true
+}
+
+// requireVersionCanonicalMajor reports v's major component ("v1", "v2", ...)
+// IF AND ONLY IF v is in exactly the one shape real go's own fixVersion
+// (cmd/go/internal/modload/init.go, the VersionFixer modload.ReadModFile
+// passes when reading the MAIN module's go.mod) short-circuits without any
+// network access at all: `module.CanonicalVersion(vers) == vers` — i.e. v
+// already specifies a full major.minor.patch triple (not a shorthand like
+// "v1" or "v1.0" that fixVersion would need to expand via a proxy Query to
+// find the latest matching release), with its build metadata, if any, being
+// exactly "+incompatible" (the one build tag module.CanonicalVersion
+// preserves verbatim — every other build tag makes CanonicalVersion strip
+// it, so the comparison against the untouched original fails and fixVersion
+// falls through to its network Query instead). ok=false covers both "v
+// isn't valid semver at all" and "v is valid but not already in this exact
+// fast-path shape" — in either case this file has no way to know, without a
+// network call of its own, whether real go would Fatal offline or just
+// query a proxy, so the conservative, fail-open answer is the same either
+// way: don't flag it.
+//
+// Live-verified (go1.26.8, GOPROXY=off), every case against a go.mod
+// pairing it with a path whose major suffix it clearly mismatches:
+// "v1.0.0" and "v1.0.0-pre" (full triple, with/without prerelease) both
+// Fatal immediately with CheckPathMajor's own error text; "v2.0.0+incompatible"
+// likewise (parses clean against a no-suffix path, per CheckPathMajor's own
+// "+incompatible" carve-out — see requireVersionMajorInvalid); but "v1"
+// (bare major), "v1.0" (major.minor, no patch), and "v1.0.0+meta" (a
+// generic, non-"+incompatible" build tag) each instead fail with "module
+// lookup disabled by GOPROXY=off" — a live network attempt, not an
+// immediate parse Fatal — confirming the exact fast-path/network-path
+// boundary this function draws. Mirrors golang.org/x/mod/semver's own
+// parse/parseInt/parsePrerelease grammar (parseSemverInt/skipSemverPrerelease
+// below) closely enough to make this determination without pulling in the
+// semver package itself, matching this file's established
+// no-golang.org/x/mod-dependency convention for its production (non-test)
+// code (see parseRequires' own doc comment).
+func requireVersionCanonicalMajor(v string) (major string, ok bool) {
+	if len(v) < 2 || v[0] != 'v' {
+		return "", false
+	}
+	s := v[1:]
+	var majorDigits string
+	majorDigits, s, ok = parseSemverInt(s)
+	if !ok || s == "" || s[0] != '.' {
+		return "", false
+	}
+	_, s, ok = parseSemverInt(s[1:])
+	if !ok || s == "" || s[0] != '.' {
+		return "", false
+	}
+	_, s, ok = parseSemverInt(s[1:])
+	if !ok {
+		return "", false
+	}
+	if s != "" && s[0] == '-' {
+		s, ok = skipSemverPrerelease(s)
+		if !ok {
+			return "", false
+		}
+	}
+	if s != "" && s != "+incompatible" {
+		return "", false
+	}
+	return "v" + majorDigits, true
+}
+
+// parseSemverInt mirrors golang.org/x/mod/semver's own parseInt: a run of
+// ASCII digits at the start of s with no leading zero (unless the whole
+// run is the single digit "0"), the same grammar go.mod's own `go`/
+// `toolchain` directive version numbers already follow (see
+// goVersionDirectiveRE).
+func parseSemverInt(s string) (digits, rest string, ok bool) {
+	if s == "" || s[0] < '0' || s[0] > '9' {
+		return "", s, false
+	}
+	i := 1
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if s[0] == '0' && i != 1 {
+		return "", s, false
+	}
+	return s[:i], s[i:], true
+}
+
+// skipSemverPrerelease mirrors golang.org/x/mod/semver's own
+// parsePrerelease: s must start with '-'; what follows, up to the next '+'
+// or end of string, must be one or more dot-separated identifiers, each
+// using only ASCII alphanumerics and '-', with an all-numeric identifier
+// never carrying a leading zero (isBadSemverNum) — per semver's own spec
+// ("Numeric identifiers MUST NOT include leading zeroes").
+func skipSemverPrerelease(s string) (rest string, ok bool) {
+	i := 1
+	start := 1
+	for i < len(s) && s[i] != '+' {
+		c := s[i]
+		isIdentChar := ('A' <= c && c <= 'Z') || ('a' <= c && c <= 'z') || ('0' <= c && c <= '9') || c == '-'
+		if !isIdentChar && c != '.' {
+			return s, false
+		}
+		if c == '.' {
+			if start == i || isBadSemverNum(s[start:i]) {
+				return s, false
+			}
+			start = i + 1
+		}
+		i++
+	}
+	if start == i || isBadSemverNum(s[start:i]) {
+		return s, false
+	}
+	return s[i:], true
+}
+
+func isBadSemverNum(s string) bool {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	return i == len(s) && i > 1 && s[0] == '0'
+}
+
+// requireVersionMajorInvalid reports whether a require/exclude directive's
+// (path, version) pair is exactly the shape golang.org/x/mod/modfile's real
+// strict parser rejects outright via module.CheckPathMajor — called
+// unconditionally on every require/exclude line once its own path and
+// version both parse as individually well-formed strings, entirely
+// independent of any network access (no proxy/sumdb lookup is involved in
+// comparing a path's own major-version suffix against its paired version's
+// major component; both are already sitting in the go.mod's raw bytes, and
+// requireVersionCanonicalMajor's own gate already excludes any version
+// shape that would instead need one). Mirrors module.CheckPathMajor's exact
+// logic: a path with no version suffix at all requires a v0 or v1 (or
+// "+incompatible"-tagged) version; a path with a "/vN" (or gopkg.in ".vN")
+// suffix requires a version whose own major component is exactly "vN"; the
+// one documented historical exception (a gopkg.in ".v1" path paired with a
+// "v0.0.0-"-prefixed pseudo-version, kept for backward compatibility with
+// an old pseudo-version generation bug) is carried over unchanged.
+// Live-verified (go1.26.8, GOPROXY=off): `require example.com/foo/v2
+// v1.0.0` Fatals with `version "v1.0.0" invalid: should be v2, not v1`;
+// `require example.com/bar v2.0.0` (no suffix at all) Fatals with `should
+// be v0 or v1, not v2`, while the identical line with "v2.0.0+incompatible"
+// parses clean; `require gopkg.in/yaml.v2 v1.0.0` Fatals identically to the
+// "/v2" case.
+func requireVersionMajorInvalid(path, version string) bool {
+	pathMajor, ok := modulePathVersionSuffix(path)
+	if !ok {
+		return true
+	}
+	if strings.HasPrefix(pathMajor, ".v") && strings.HasSuffix(pathMajor, "-unstable") {
+		pathMajor = strings.TrimSuffix(pathMajor, "-unstable")
+	}
+	if strings.HasPrefix(version, "v0.0.0-") && pathMajor == ".v1" {
+		return false
+	}
+	m, ok := requireVersionCanonicalMajor(version)
+	if !ok {
+		return false
+	}
+	if pathMajor == "" {
+		return !(m == "v0" || m == "v1" || strings.HasSuffix(version, "+incompatible"))
+	}
+	return m != pathMajor[1:]
+}
+
+// goModHasMismatchedPathMajorVersion reports whether data contains a
+// `require`/`exclude` directive line (single-line or block-entry form, the
+// same two verbs goModFixedArgCountVerbs already requires carry exactly two
+// arguments) whose path and paired version real go's own strict go.mod
+// parser rejects via requireVersionMajorInvalid. Only applies once a line
+// already has exactly path+version (two tokens) — a wrong argument count is
+// goModHasInvalidDirectiveArgCount's own, already-covered Fatal shape, not
+// this one. Same "cannot leak" reasoning as every other malformed-go.mod
+// skip in this file: a go.mod real go refuses to parse at all can never
+// resolve a single module, so no sumdb query for anything in it — including
+// an unrelated, otherwise-valid require line sitting elsewhere in the same
+// file — can ever happen. Confirmed live end-to-end against the actual
+// goprivaudit binary, pre-fix: a go.mod with a real, otherwise-uncovered
+// private-auth-signaled require plus an unrelated "require
+// example.com/foo/v2 v1.0.0" line (a plausible mistake: bumping a module to
+// v2 and forgetting to update the pinned version, or vice versa) was
+// reported "SUMDB LEAK", while `go list -m all`/`go build` on the identical
+// file Fatal immediately and never get far enough to query anything — see
+// TestRunMismatchedPathMajorVersionGoModNoLeak in main_test.go.
+func goModHasMismatchedPathMajorVersion(data []byte) bool {
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if (blockVerb == "require" || blockVerb == "exclude") && requireExcludeLineMajorInvalid(trimmed) {
+				return true
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		rest := strings.TrimSpace(trimmed[i:])
+		if rest == "(" {
+			inBlock = true
+			blockVerb = verb
+			continue
+		}
+		if (verb == "require" || verb == "exclude") && requireExcludeLineMajorInvalid(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// requireExcludeLineMajorInvalid extracts a require/exclude line's (or
+// block entry's) own argument text into a path and version the same way
+// parseRequireLine already does, but — unlike parseRequireLine, which
+// tolerates a missing or extra token since goModHasInvalidDirectiveArgCount
+// handles that shape separately — requires exactly two tokens (path,
+// version, nothing more) before calling requireVersionMajorInvalid at all,
+// matching the real parser's own `len(args) != 2` gate that runs before
+// CheckPathMajor is ever reached.
+func requireExcludeLineMajorInvalid(s string) bool {
+	path, rest := firstFieldAndRest(s)
+	version, rest2 := firstFieldAndRest(rest)
+	if path == "" || version == "" {
+		return false
+	}
+	if extra, _ := firstFieldAndRest(rest2); extra != "" {
+		return false
+	}
+	return requireVersionMajorInvalid(path, version)
+}
+
 // isValidGodebugArg reports whether s (a `godebug` directive's argument
 // text, single-line or block-entry) is the shape golang.org/x/mod/modfile's
 // real strict parser accepts: exactly one token, containing no `"`, “ ` “,
