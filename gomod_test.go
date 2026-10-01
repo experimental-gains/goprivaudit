@@ -1047,6 +1047,34 @@ func TestParseModulePathMissing(t *testing.T) {
 	}
 }
 
+// TestParseModulePathBlockForm covers golang.org/x/mod/modfile's real,
+// live-verified (go1.26.8) acceptance of a parenthesized `module (...)`
+// block — `go list -m` resolves the main module from this form exactly
+// like the single-line form. An earlier version of parseModulePath assumed
+// "module" was never a block-form directive, so it read the opening
+// "module (" line alone and returned the single non-empty garbage token
+// "(" instead of the real path on the line inside the block.
+func TestParseModulePathBlockForm(t *testing.T) {
+	src := "module (\n\texample.com/mymod\n)\n\ngo 1.24.4\n"
+	if got, want := parseModulePath([]byte(src)), "example.com/mymod"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestParseModulePathBlockFormQuoted(t *testing.T) {
+	src := "module (\n\t\"example.com/my mod\"\n)\n\ngo 1.24.4\n"
+	if got, want := parseModulePath([]byte(src)), "example.com/my mod"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+func TestParseModulePathBlockFormEmpty(t *testing.T) {
+	src := "module (\n)\n\ngo 1.24.4\n"
+	if got := parseModulePath([]byte(src)); got != "" {
+		t.Errorf("expected \"\" for an empty module block, got %q", got)
+	}
+}
+
 func TestEffectiveToolModulesUncoveredIncluded(t *testing.T) {
 	got := effectiveToolModules([]string{"example.com/myorg/private/cmd/thing"}, nil, "")
 	want := []string{"example.com/myorg/private/cmd/thing"}

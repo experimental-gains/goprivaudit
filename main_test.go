@@ -2883,6 +2883,55 @@ tool github.com/myorg/mymod2/cmd/mytool
 	}
 }
 
+// TestRunToolDirectiveInMainModuleBlockFormNotFalselyLeaked is
+// TestRunToolDirectiveInMainModuleNotFalselyLeaked's counterpart for a
+// go.mod declaring its module path via the parenthesized `module (...)`
+// block form instead of the ordinary single-line form. parseModulePath
+// used to assume "module" was never a block-form directive (an incorrect
+// claim about golang.org/x/mod/modfile's real grammar — rule.go's block-type
+// switch accepts "module" exactly like require/exclude/replace/retract/
+// tool/ignore/godebug), so it read the opening "module (" line alone and
+// returned the garbage token "(" instead of the real path "example.com/foo"
+// sitting on the next line inside the block. Live-verified against real
+// go1.26.8: `go list -m` on this exact go.mod resolves the main module as
+// "example.com/foo", and `GOPROXY=off GOSUMDB=sum.golang.org go build
+// -buildvcs=false ./...` succeeds fully offline — no sumdb query for the
+// tool path ever happens, exactly like the single-line form. Confirmed live
+// end-to-end against the actual pre-fix goprivaudit binary: this exact
+// go.mod plus this exact credential-helper signal (which would be a real,
+// otherwise-uncovered private-auth signal for any *actual* dependency under
+// github.corp.example.com) was reported "SUMDB LEAK:
+// github.corp.example.com/myorg/myproject/cmd/lint" pre-fix, while the
+// single-line form of the identical go.mod was already correctly silent.
+func TestRunToolDirectiveInMainModuleBlockFormNotFalselyLeaked(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module (
+	example.com/foo
+)
+
+go 1.24.4
+
+tool example.com/foo/cmd/lint
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://example.com"]
+	helper = store
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 for a tool path inside a block-form-declared main module; stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("expected no leak for a main-module-local tool path (never fetched over the network), got: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaSystemGitConfig covers git's lowest-precedence config
 // tier — the system-wide $(prefix)/etc/gitconfig file, relocatable via
 // GIT_CONFIG_SYSTEM — which gitConfigCandidates never read at all before

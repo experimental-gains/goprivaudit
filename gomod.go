@@ -127,20 +127,58 @@ func parseGoVersion(data []byte) string {
 // quoted) would leave a quoted module path's literal quote characters
 // attached.
 //
-// The `module` directive is always a single-line directive, never a
-// `module (...)` block — confirmed against golang.org/x/mod/modfile's own
-// grammar (rule.go): only require/exclude/replace/retract/tool support a
-// parenthesized block form — so this doesn't need parseRequires/
-// parseReplaces' block tracking, the same as parseGoVersion.
+// The `module` directive, unlike `go`/`toolchain`, is NOT always a
+// single-line directive: golang.org/x/mod/modfile's real parser (rule.go)
+// lists "module" among the verbs its block-type switch accepts for a
+// parenthesized `module (...)` form, exactly like require/exclude/replace/
+// retract/tool/ignore/godebug — an earlier version of this doc comment
+// claimed otherwise ("only require/exclude/replace/retract/tool support a
+// parenthesized block form"), which was simply wrong. Live-verified against
+// real go1.26.8: `go list -m` on a go.mod whose only module statement is
+//
+//	module (
+//		example.com/foo
+//	)
+//
+// resolves the main module as "example.com/foo", identical to the
+// single-line form — not a parse error, not an unknown-block-type
+// rejection. Before this fix, parseModulePath read the opening "module ("
+// line alone (cutKeyword matches "module" followed by "("), extracted
+// firstFieldAndRest's first field of the remaining "(" as the "path", and
+// returned the single non-empty, non-module-path string "(" without ever
+// looking at the line(s) inside the block — so effectiveToolModules' "does
+// this tool directive live in the main module" check
+// (`t == modulePath || strings.HasPrefix(t, modulePath+"/")`) could never
+// match any real tool path, and a `tool` directive naming a package inside
+// a block-form-declared main module was wrongly treated as an external
+// dependency needing a GOPRIVATE/GONOSUMDB check — a false SUMDB LEAK for a
+// path go never queries the checksum database for at all, confirmed live
+// end-to-end against the built binary.
 func parseModulePath(data []byte) string {
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	inBlock := false
 	for sc.Scan() {
 		line := stripComment(sc.Text())
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if path, _ := firstFieldAndRest(trimmed); path != "" {
+				return path
+			}
+			continue
+		}
 		if rest, ok := cutKeyword(trimmed, "module"); ok {
+			rest = strings.TrimSpace(rest)
+			if rest == "(" {
+				inBlock = true
+				continue
+			}
 			path, _ := firstFieldAndRest(rest)
 			return path
 		}
