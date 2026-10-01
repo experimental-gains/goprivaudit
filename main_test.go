@@ -1605,6 +1605,93 @@ use ./app
 	}
 }
 
+// TestRunInvalidUseDirectiveGoWorkNoLeak is the direct regression test for
+// run #583's find: a bare "use" line with no directory argument in the
+// ACTIVE go.work file. golang.org/x/mod/modfile's real (*WorkFile).add has
+// a "use" case — `if len(args) != 1 { errorf("usage: %s local/dir", verb) }`
+// — sharing `tool`/`module`/`ignore`'s exact single-fixed-argument grammar
+// (see gomod.go's goModFixedArgCountVerbs and
+// goWorkHasUnparseableDirective's updated doc comment), but
+// goWorkHasUnparseableDirective never checked it before this fix: an earlier
+// version of its doc comment wrongly reasoned "use" needed a content-shape
+// check like replace/retract/godebug and was deliberately left out of scope,
+// when it's actually just an omitted fixed-count check like `module` was
+// (technique #86). Verified live before this fix: `go list -m all`
+// (GOPROXY=off) Fatals immediately with "errors parsing go.work: ...: usage:
+// use local/dir", never resolving a single requirement in app/go.mod, while
+// this tool still reported "SUMDB LEAK" for the real, otherwise-uncovered
+// private-auth-signaled require sitting in it.
+func TestRunInvalidUseDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24.4
+
+use
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work's \"use\" directive has zero arguments (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
+// TestRunInvalidUseDirectiveExtraArgGoWorkNoLeak is
+// TestRunInvalidUseDirectiveGoWorkNoLeak's two-argument sibling: a "use"
+// line naming two directories on one line instead of one. Verified live
+// before this fix: `go list -m all` (GOPROXY=off) on the equivalent file
+// Fatals identically with "usage: use local/dir".
+func TestRunInvalidUseDirectiveExtraArgGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24.4
+
+use ./app ./other
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work's \"use\" directive names two directories on one line (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active

@@ -545,18 +545,36 @@ func TestGoWorkHasUnparseableDirective(t *testing.T) {
 	if got := goWorkHasUnparseableDirective(invalidReplace); !got {
 		t.Errorf("go.work with a malformed replace directive = %v, want true", got)
 	}
+
+	// "use" shares tool/module/ignore's exact single-fixed-argument grammar
+	// (see goModFixedArgCountVerbs' doc comment) — a bare "use" line with no
+	// directory argument Fatals real go parsing go.work, before it resolves
+	// a single requirement in any member module (run #583).
+	invalidUse := writeFile(t, dir, "invaliduse.work", "go 1.24\n\nuse\n")
+	if got := goWorkHasUnparseableDirective(invalidUse); !got {
+		t.Errorf("go.work with a bare use directive (no argument) = %v, want true", got)
+	}
+
+	invalidUseExtraArg := writeFile(t, dir, "invaliduseextraarg.work", "go 1.24\n\nuse ./a ./b\n")
+	if got := goWorkHasUnparseableDirective(invalidUseExtraArg); !got {
+		t.Errorf("go.work with a use directive naming two directories on one line = %v, want true", got)
+	}
 }
 
 // TestGoModHasInvalidDirectiveArgCount covers
 // goModHasInvalidDirectiveArgCount's live-verified trigger condition: a
-// require/exclude/tool directive line (single-line or block-entry form)
-// carrying the wrong number of arguments is exactly what makes
-// golang.org/x/mod/modfile's real parser Fatal every module-aware go
+// require/exclude/tool/module/ignore/use directive line (single-line or
+// block-entry form) carrying the wrong number of arguments is exactly what
+// makes golang.org/x/mod/modfile's real parser Fatal every module-aware go
 // subcommand before resolving a single module — confirmed against real `go
-// list -m all` (see TestRunInvalidDirectiveArgCountGoModNoLeak in
-// main_test.go for the end-to-end regression). A valid go.mod with none of
-// these verbs malformed must NOT be flagged, including one using every
-// verb this function doesn't check at all (replace/retract/godebug/module).
+// list -m all` (see TestRunInvalidDirectiveArgCountGoModNoLeak and
+// TestRunInvalidUseDirectiveGoWorkNoLeak in main_test.go for the end-to-end
+// regressions). A valid go.mod with none of these verbs malformed must NOT
+// be flagged, including one using every verb this function doesn't check at
+// all (replace/retract/godebug). "use" is go.work-only, so its own cases
+// below use go.work-shaped bytes instead of a go.mod one (see
+// goWorkHasUnparseableDirective's doc comment for why this function is
+// reused verbatim for go.work's own "use" check).
 func TestGoModHasInvalidDirectiveArgCount(t *testing.T) {
 	cases := []struct {
 		name string
@@ -587,6 +605,19 @@ func TestGoModHasInvalidDirectiveArgCount(t *testing.T) {
 		{"valid ignore directive", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore testdata\n", false},
 		{"quoted ignore path counts as one argument", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore \"test data\"\n", false},
 		{"ignore block entry with stray extra token", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n\nignore (\n\ttestdata extra\n)\n", true},
+		// "use" is go.work-only (never a valid go.mod verb), but this
+		// function is deliberately generic over raw bytes + the
+		// goModFixedArgCountVerbs map (see goWorkHasUnparseableDirective's
+		// doc comment), so it's exercised directly here against a go.work
+		// shape rather than a go.mod one — mirroring how "require"/"exclude"
+		// above are tested against go.mod shapes even though this same
+		// function also drives the go.work check.
+		{"bare use, no argument", "go 1.24\n\nuse\n", true},
+		{"use with a second directory on the same line", "go 1.24\n\nuse ./a ./b\n", true},
+		{"valid single-line use directive", "go 1.24\n\nuse ./a\n", false},
+		{"quoted use path counts as one argument", "go 1.24\n\nuse \"./spacey dir\"\n", false},
+		{"use block entry with a second directory on the same line", "go 1.24\n\nuse (\n\t./a ./b\n)\n", true},
+		{"valid use block", "go 1.24\n\nuse (\n\t./a\n\t./b\n)\n", false},
 	}
 	for _, c := range cases {
 		if got := goModHasInvalidDirectiveArgCount([]byte(c.src)); got != c.want {

@@ -430,12 +430,12 @@ func hasUnknownTopLevelDirective(data []byte, validVerbs map[string]bool) bool {
 	return false
 }
 
-// goModFixedArgCountVerbs is the subset of goModValidTopLevelVerbs whose
-// entire argument-validity rule, per golang.org/x/mod/modfile's real parser
-// ((*File).add's verb switch, rule.go), is a single fixed required argument
-// count with no further content-shape check beyond that — unlike `go`/
-// `toolchain`, whose argument must ALSO match a version/toolchain-name regex
-// (already covered by goModHasInvalidGoDirective/
+// goModFixedArgCountVerbs was originally the subset of goModValidTopLevelVerbs
+// whose entire argument-validity rule, per golang.org/x/mod/modfile's real
+// parser ((*File).add's verb switch, rule.go), is a single fixed required
+// argument count with no further content-shape check beyond that — unlike
+// `go`/`toolchain`, whose argument must ALSO match a version/toolchain-name
+// regex (already covered by goModHasInvalidGoDirective/
 // goModHasInvalidToolchainDirective), or `replace`/`retract`/`godebug`,
 // whose usage errors depend on token *content* (an "=>" arrow, a "["/"]"
 // version-interval bracket, an embedded quote/comma), not just count, and
@@ -463,12 +463,32 @@ func hasUnknownTopLevelDirective(data []byte, validVerbs map[string]bool) bool {
 // way `replace`/`retract`/`godebug` are), the same drift technique #61's
 // family already found once for retract/godebug and technique #86's family
 // found again for `module`.
+//
+// This map now ALSO carries "use" — go.work's own member-directory directive,
+// never a valid go.mod verb (absent from goModValidTopLevelVerbs entirely),
+// so the "subset of goModValidTopLevelVerbs" framing above is now stale for
+// this one entry; it's kept in the same map purely so
+// goModHasInvalidDirectiveArgCount can be reused verbatim against a go.work
+// file's own bytes, exactly like goModHasInvalidReplaceDirective/
+// goModHasInvalidGodebugDirective already are (see
+// goWorkHasUnparseableDirective's doc comment). (*WorkFile).add's own "use"
+// case (rule.go) is `case "use": if len(args) != 1 { errorf("usage: %s
+// local/dir", verb) } ... parseString(&args[0])` — byte-for-byte the same
+// single-fixed-argument-with-generic-quoting shape as `tool`/`module`/
+// `ignore` above, NOT a content-dependent grammar like `replace`/`retract`/
+// `godebug`. A prior version of this file's goWorkHasUnparseableDirective
+// doc comment incorrectly lumped "use" in with those three as "left alone"
+// because approximating a content-shape rule risks a wrong verdict — but
+// "use" was never actually a content-shape rule, just an omitted fixed-count
+// one, the same "explicit-looking exclusion that was actually just an
+// oversight" trap technique #66/#86 already named for `replace`/`module`.
 var goModFixedArgCountVerbs = map[string]int{
 	"require": 2,
 	"exclude": 2,
 	"tool":    1,
 	"module":  1,
 	"ignore":  1,
+	"use":     1,
 }
 
 // goModHasInvalidDirectiveArgCount reports whether data contains a
@@ -503,6 +523,16 @@ var goModFixedArgCountVerbs = map[string]int{
 // for a malformed `module` line, and again for a malformed `ignore` line —
 // see TestRunInvalidModuleDirectiveArgCountGoModNoLeak and
 // TestRunInvalidIgnoreDirectiveArgCountGoModNoLeak.
+//
+// This function also doubles as the argument-count check for go.work's own
+// "use" directive when goWorkHasUnparseableDirective calls it against a
+// go.work file's bytes instead of a go.mod's — see goModFixedArgCountVerbs'
+// doc comment for why "use" belongs in the same map, and
+// goWorkHasUnparseableDirective's doc comment for why reusing this function
+// verbatim (rather than writing a go.work-specific variant) is safe: none of
+// require/exclude/tool/module/ignore are valid go.work verbs, so they can
+// never appear in a go.work file without goWorkHasUnknownDirective already
+// flagging it first via the same `||` chain.
 //
 // This is the general-across-verbs sibling of goModHasInvalidGoDirective/
 // goModHasInvalidToolchainDirective, extending the same "recognized verb,
@@ -1539,7 +1569,12 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // a block-form "godebug (...)" too, exactly like go.mod's, so
 // goModHasInvalidGodebugDirective's existing scan (which only ever looks for
 // "godebug" lines/blocks in the bytes it's handed, nothing go.mod-specific)
-// applies to a go.work's godebug lines unchanged.
+// applies to a go.work's godebug lines unchanged. goModHasInvalidDirectiveArgCount
+// is reused the same way for go.work's own "use" directive: (*WorkFile).add's
+// "use" case is `if len(args) != 1 { errorf("usage: %s local/dir", verb) }`,
+// a single-fixed-argument shape with no content-dependent grammar at all —
+// see goModFixedArgCountVerbs' doc comment for why "use" belongs in that same
+// map despite never being a valid go.mod verb.
 //
 // This matters for the identical "cannot leak" reason as every other
 // malformed-go.mod skip in main.go's run(): before this fix, none of the
@@ -1587,18 +1622,28 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // like no workspace" fail-open convention goWorkReplaces/goWorkUseDirs
 // already use, since this tool has no better way to tell "not a workspace"
 // from "a workspace file some other problem already made irrelevant".
-// Deliberately does not also check goModHasInvalidDirectiveArgCount: that
-// function's own fixed-arg-count verbs (require/exclude/tool/module/ignore)
-// don't exist in go.work's grammar at all, and go.work's own "use" directive's
-// argument-shape validation is out of scope for the same reason
-// goModHasInvalidDirectiveArgCount's own doc comment already excludes
-// replace/retract/godebug from go.mod's version of this check —
-// approximating a content-shape rule (not just a fixed count) risks a wrong
-// verdict in either direction. "use" is left alone for exactly that reason;
-// "replace" and "godebug" get their own dedicated checks above precisely
-// because goModHasInvalidReplaceDirective/goModHasInvalidGodebugDirective
-// already ARE that safe, content-shape-aware check, reused rather than
-// approximated.
+//
+// Also calls goModHasInvalidDirectiveArgCount against gowork's own bytes, for
+// go.work's "use" directive specifically (run #583's fix) — a bare "use" line
+// with no directory argument, or one naming more than one, Fatals real go
+// identically to the block-form/malformed-replace/malformed-godebug shapes
+// already checked above. An earlier version of this doc comment reasoned
+// "use" belonged alongside replace/retract/godebug as a content-shape
+// grammar this function deliberately leaves unapproximated — that reasoning
+// was simply wrong: (*WorkFile).add's own "use" case
+// (`if len(args) != 1 { errorf(...) }`) is byte-for-byte the same
+// single-fixed-argument shape as `tool`/`module`/`ignore`, which
+// goModHasInvalidDirectiveArgCount already validates exactly this way for
+// go.mod. None of require/exclude/tool/module/ignore (the function's other
+// fixed-arg-count verbs) are valid go.work verbs, so reusing the function
+// verbatim here is safe: a go.work containing any of them would already be
+// caught by goWorkHasUnknownDirective above in the same `||` chain, never by
+// this call. Live-verified against real go1.24.4, GOPROXY=off: both a bare
+// "use" line and a two-argument "use ./a ./b" line Fatal `go list -m all`
+// immediately with "usage: use local/dir", while pre-fix goprivaudit kept
+// auditing the go.mod being audited and reported a false SUMDB LEAK for an
+// otherwise-real, otherwise-uncovered private-auth signal (a git insteadOf
+// rewrite) sitting in it — see TestRunInvalidUseDirectiveGoWorkNoLeak.
 func goWorkHasUnparseableDirective(gowork string) bool {
 	if gowork == "" || gowork == "off" {
 		return false
@@ -1612,7 +1657,8 @@ func goWorkHasUnparseableDirective(gowork string) bool {
 		goModHasInvalidToolchainDirective(data) ||
 		goWorkHasUnknownDirective(data) ||
 		goModHasInvalidReplaceDirective(data) ||
-		goModHasInvalidGodebugDirective(data)
+		goModHasInvalidGodebugDirective(data) ||
+		goModHasInvalidDirectiveArgCount(data)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of
