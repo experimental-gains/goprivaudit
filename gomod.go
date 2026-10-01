@@ -353,15 +353,35 @@ func goModHasUnknownDirective(data []byte) bool {
 
 // goWorkValidTopLevelVerbs is the complete, fixed set of go.work top-level
 // directive keywords golang.org/x/mod/modfile's real parser
-// ((*WorkFile).add's verb switch, rule.go) recognizes: go, toolchain, use,
-// and replace — a DIFFERENT, narrower set than goModValidTopLevelVerbs
-// (go.work has no module/require/exclude/retract/tool/ignore/godebug
-// directives at all; "use" instead is unique to go.work). Verified live:
-// a go.work containing a `require ...` line — perfectly valid in a go.mod —
-// Fatals with "unknown directive: require" parsing go.work, confirming the
-// two grammars really are distinct sets, not one a subset of the other.
+// ((*WorkFile).add's verb switch, rule.go) recognizes: go, toolchain,
+// godebug, use, and replace — a DIFFERENT, narrower set than
+// goModValidTopLevelVerbs (go.work has no module/require/exclude/retract/
+// tool/ignore directives at all; "use" instead is unique to go.work).
+// "godebug" is NOT go.mod-only, despite an earlier version of this comment
+// claiming it was: (*WorkFile).add has its own "godebug" case (identical
+// `len(args) != 1 || strings.ContainsAny(args[0], "\"`',")` shape to the
+// go.mod one), and ParseWork's own LineBlock switch accepts a block-form
+// "godebug (...)" too, exactly like go.mod's. Live-verified against real
+// go1.24.4/go1.26.8, fully offline (GOPROXY=off): a go.work with a
+// single-line `godebug default=go1.24` and `use ./app` parses and resolves
+// clean (reaches "module lookup disabled by GOPROXY=off" — i.e. it got all
+// the way to the fetch attempt, never Fataling parsing go.work at all) —
+// pre-fix, this tool's own `goWorkHasUnknownDirective` treated that
+// perfectly valid line as an unrecognized verb, so `run()` wrongly
+// concluded the go.work "would make go Fatal before resolving anything"
+// and silently skipped the entire audit, suppressing a real `SUMDB LEAK`
+// finding for an otherwise-uncovered private-auth-signaled require in the
+// very same workspace member's go.mod (confirmed end-to-end against the
+// actual built binary: identical go.mod+git-insteadOf fixture reports
+// "SUMDB LEAK" with no go.work, or with a go.work missing the godebug
+// line, and wrongly "no issues found" once the valid godebug line is
+// added — see TestRunGodebugDirectiveGoWorkStillLeaks). Verified
+// separately that a go.work containing a `require ...` line — perfectly
+// valid in a go.mod — still Fatals with "unknown directive: require"
+// parsing go.work, confirming the two grammars really are distinct sets,
+// not one a subset of the other.
 var goWorkValidTopLevelVerbs = map[string]bool{
-	"go": true, "toolchain": true, "use": true, "replace": true,
+	"go": true, "toolchain": true, "godebug": true, "use": true, "replace": true,
 }
 
 // goWorkHasUnknownDirective is goModHasUnknownDirective's go.work
@@ -1492,19 +1512,19 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // (modfile.ParseWork, what cmd/go actually calls to read a go.work, mirrored
 // by modload.ReadWorkFile) Fatals on outright: a stray "/*" block comment, a
 // malformed `go`/`toolchain` directive argument, a top-level line whose
-// verb isn't one of go.work's own four recognized directives (go, toolchain,
-// use, replace — see goWorkValidTopLevelVerbs), or a malformed `replace`
-// directive. Every one of these checks already exists for go.mod itself
-// (goModHasBlockComment, goModHasInvalidGoDirective,
+// verb isn't one of go.work's own five recognized directives (go, toolchain,
+// godebug, use, replace — see goWorkValidTopLevelVerbs), or a malformed
+// `replace`/`godebug` directive. Every one of these checks already exists
+// for go.mod itself (goModHasBlockComment, goModHasInvalidGoDirective,
 // goModHasInvalidToolchainDirective,
 // goModHasUnknownDirective/goWorkHasUnknownDirective,
-// goModHasInvalidReplaceDirective) — this just re-applies the
-// grammar-generic ones (block comment and the go/toolchain directive shape
-// checks don't care which file type they're reading) plus the
-// go.work-specific unknown-verb variant, plus replace's own argument-grammar
-// check, to gowork's own bytes instead.
+// goModHasInvalidReplaceDirective, goModHasInvalidGodebugDirective) — this
+// just re-applies the grammar-generic ones (block comment and the
+// go/toolchain directive shape checks don't care which file type they're
+// reading) plus the go.work-specific unknown-verb variant, plus replace's
+// and godebug's own argument-grammar checks, to gowork's own bytes instead.
 //
-// The replace check is safe to reuse verbatim, unlike
+// The replace and godebug checks are both safe to reuse verbatim, unlike
 // goModHasInvalidDirectiveArgCount below: goWorkReplaces' own doc comment
 // already established that "go.work supports ... 'replace' directives — the
 // replace syntax is identical to go.mod's" (golang.org/x/mod/modfile parses
@@ -1512,6 +1532,14 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // goModHasInvalidReplaceDirective's structural checks (arrow position/count,
 // new-side directory-path-vs-version shape) apply to a go.work's replace
 // lines exactly as written for go.mod's, no go.work-specific variant needed.
+// (*WorkFile).add's own "godebug" case in rule.go is byte-for-byte identical
+// to (*File).add's — `len(args) != 1 ||
+// strings.ContainsAny(args[0], "\"`',")`, then `strings.Cut(args[0], "=")`
+// failing when there's no "=" — and ParseWork's own LineBlock switch accepts
+// a block-form "godebug (...)" too, exactly like go.mod's, so
+// goModHasInvalidGodebugDirective's existing scan (which only ever looks for
+// "godebug" lines/blocks in the bytes it's handed, nothing go.mod-specific)
+// applies to a go.work's godebug lines unchanged.
 //
 // This matters for the identical "cannot leak" reason as every other
 // malformed-go.mod skip in main.go's run(): before this fix, none of the
@@ -1522,19 +1550,37 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // single requirement, while this tool still ran its own audit against the
 // go.mod and reported a SUMDB LEAK for a checksum-database query that
 // structurally cannot happen. Confirmed live end-to-end against the actual
-// goprivaudit binary for all four shapes (block comment, invalid `go`
-// directive, an unrecognized verb — e.g. "uses" typo'd for "use" — and now a
+// goprivaudit binary for all these shapes (block comment, invalid `go`
+// directive, an unrecognized verb — e.g. "uses" typo'd for "use" — a
 // malformed replace, e.g. "replace example.com/foo => example.com/bar@v1.0.0"
-// — the common "path@version" habit already covered on the go.mod side):
-// `go list -m all`/`go build` both Fatal immediately with "errors parsing
+// — and a malformed godebug, e.g. a bare "godebug nokeyvalue" with no "="):
+// `go list -m all`/`go build` all Fatal immediately with "errors parsing
 // go.work: ...", yet pre-fix goprivaudit still reported "SUMDB LEAK" for a
 // real, otherwise-uncovered private-auth-signaled require in the workspace
 // member's own go.mod. This is the same "a checklist built for one file
 // format doesn't automatically extend to a second file sharing the same
 // reference-implementation grammar" gap the block-comment/go/toolchain/
-// unknown-verb checks above already closed once (when they were first added
-// to this function) — replace's own go.mod-side grammar check was added
-// later, and this function was never revisited to pick it up until now.
+// unknown-verb/replace checks above already closed once each (when they
+// were first added to this function) — godebug's own go.mod-side grammar
+// check predates this function's own git history, and this function was
+// never revisited to pick it up until now, the same drift pattern as
+// replace's own addition one run earlier.
+//
+// Note the mirror-image failure mode this specific fix closes, distinct
+// from every other check in this function: adding "godebug" was NOT just
+// "another Fatal-shape to recognize" — until goWorkValidTopLevelVerbs itself
+// also learned "godebug" is a real, valid go.work verb (a separate, prior
+// gap in the SAME verb set this function's unknown-verb check reads), a
+// perfectly well-formed `godebug default=go1.24` line in an otherwise-valid
+// go.work was itself misclassified as the unknown-verb Fatal shape, making
+// this function wrongly report true (unparseable) for a go.work real go
+// parses and resolves fine — silently SUPPRESSING a real SUMDB LEAK finding
+// rather than producing a false one. Confirmed live end-to-end: the exact
+// same go.mod+git-insteadOf fixture reports "SUMDB LEAK" with no go.work (or
+// with a go.work missing the godebug line) and wrongly "no issues found"
+// once a valid `godebug default=go1.24` line is added, pre-fix — see
+// TestRunGodebugDirectiveGoWorkStillLeaks and
+// TestRunInvalidGodebugDirectiveGoWorkNoLeak.
 //
 // gowork == ""/"off" (no active workspace) and an unreadable go.work (e.g.
 // stale GOWORK) both report false — the same "missing/unreadable go.work is
@@ -1542,15 +1588,17 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // already use, since this tool has no better way to tell "not a workspace"
 // from "a workspace file some other problem already made irrelevant".
 // Deliberately does not also check goModHasInvalidDirectiveArgCount: that
-// function's own fixed-arg-count verbs (require/exclude/tool) don't exist in
-// go.work's grammar at all, and go.work's own "use" directive's argument-shape
-// validation is out of scope for the same reason goModHasInvalidDirectiveArgCount's
-// own doc comment already excludes replace/retract/godebug from go.mod's
-// version of this check — approximating a content-shape rule (not just a
-// fixed count) risks a wrong verdict in either direction. "use" is left
-// alone for exactly that reason; "replace" gets its own dedicated check
-// above precisely because goModHasInvalidReplaceDirective already IS that
-// safe, content-shape-aware check, reused rather than approximated.
+// function's own fixed-arg-count verbs (require/exclude/tool/module/ignore)
+// don't exist in go.work's grammar at all, and go.work's own "use" directive's
+// argument-shape validation is out of scope for the same reason
+// goModHasInvalidDirectiveArgCount's own doc comment already excludes
+// replace/retract/godebug from go.mod's version of this check —
+// approximating a content-shape rule (not just a fixed count) risks a wrong
+// verdict in either direction. "use" is left alone for exactly that reason;
+// "replace" and "godebug" get their own dedicated checks above precisely
+// because goModHasInvalidReplaceDirective/goModHasInvalidGodebugDirective
+// already ARE that safe, content-shape-aware check, reused rather than
+// approximated.
 func goWorkHasUnparseableDirective(gowork string) bool {
 	if gowork == "" || gowork == "off" {
 		return false
@@ -1563,7 +1611,8 @@ func goWorkHasUnparseableDirective(gowork string) bool {
 		goModHasInvalidGoDirective(data) ||
 		goModHasInvalidToolchainDirective(data) ||
 		goWorkHasUnknownDirective(data) ||
-		goModHasInvalidReplaceDirective(data)
+		goModHasInvalidReplaceDirective(data) ||
+		goModHasInvalidGodebugDirective(data)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of

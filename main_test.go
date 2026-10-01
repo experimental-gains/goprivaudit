@@ -1505,6 +1505,106 @@ replace example.com/foo => example.com/bar@v1.0.0
 	}
 }
 
+// TestRunGodebugDirectiveGoWorkStillLeaks is the direct regression test for
+// a real-world-testing find: a well-formed `godebug key=value` line in an
+// active go.work was, before this fix, misclassified by
+// goWorkHasUnknownDirective as an unrecognized top-level verb (godebug was
+// missing from goWorkValidTopLevelVerbs, even though golang.org/x/mod/modfile's
+// real (*WorkFile).add has its own "godebug" case, byte-identical in shape to
+// go.mod's). That false "unknown directive" verdict made
+// goWorkHasUnparseableDirective wrongly conclude the go.work would make go
+// Fatal before resolving anything, so run() silently skipped the whole
+// audit — suppressing a real SUMDB LEAK finding, the mirror image of every
+// other goWorkHasUnparseableDirective bug fixed so far (which all
+// over-reported a leak that couldn't happen; this one under-reported one
+// that could). Verified live before this fix: `go list -m all`
+// (GOPROXY=off) against this exact go.work+go.mod reaches "module lookup
+// disabled by GOPROXY=off" — i.e. it parses and resolves fine, never
+// Fataling on go.work at all — while this tool reported "no issues found"
+// instead of the real, otherwise-uncovered private-auth-signaled require's
+// leak.
+func TestRunGodebugDirectiveGoWorkStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24.4
+
+godebug default=go1.24
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should still report the real leak when the active go.work merely has a well-formed godebug directive (real go parses and resolves this fine, never Fatals), got: %s", stdout)
+	}
+}
+
+// TestRunInvalidGodebugDirectiveGoWorkNoLeak is
+// TestRunInvalidReplaceDirectiveGoWorkNoLeak's sibling for a malformed
+// `godebug` directive living in the ACTIVE go.work file instead of the
+// go.mod being audited. go.work's godebug syntax is identical to go.mod's
+// (see goModHasInvalidGodebugDirective's doc comment and
+// goWorkHasUnparseableDirective's updated doc comment: both are parsed
+// through golang.org/x/mod/modfile's same "godebug" case shape), so the
+// same "no `=` in the argument" mistake is just as much a parse-time Fatal
+// one file up. Verified live before this fix: `go list -m all`
+// (GOPROXY=off) Fatals immediately with "errors parsing go.work: ...:
+// usage: godebug key=value", never resolving a single requirement in
+// app/go.mod.
+func TestRunInvalidGodebugDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24.4
+
+godebug nokeyvalue
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work's godebug directive has no \"=\" (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
 // TestRunVendorModeInsideWorkspaceStillLeaks is the direct regression test
 // for the bug found in the 49th real-world-testing pass: the vendor/
 // auto-default (see vendorModeActive) must NOT apply inside an active

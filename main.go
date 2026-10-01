@@ -80,10 +80,11 @@
 // parser Fatals on before resolving anything, for the identical "cannot
 // leak" reason. Both are also skipped when an ACTIVE go.work file (not the
 // go.mod being audited) itself contains one of these same unparsable
-// shapes — a stray block comment, a malformed go/toolchain directive, or an
-// unrecognized top-level verb under go.work's own, narrower set of
-// recognized directives (go, toolchain, use, replace) — see
-// goWorkHasUnparseableDirective: go.work shares go.mod's strict parser, so
+// shapes — a stray block comment, a malformed go/toolchain/godebug
+// directive, or an unrecognized top-level verb under go.work's own,
+// narrower set of recognized directives (go, toolchain, godebug, use,
+// replace) — see goWorkHasUnparseableDirective: go.work shares go.mod's
+// strict parser, so
 // the identical "Fatals before resolving anything" reasoning applies one
 // file up, and this tool's own go.mod-side checks alone never noticed a
 // broken go.work at all.
