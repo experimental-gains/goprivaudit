@@ -932,6 +932,165 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunRepeatedGoDirectiveGoModNoLeak is the direct regression test for
+// goModHasRepeatedSingletonDirective (see gomod.go): a go.mod carrying TWO
+// "go" directive lines, each individually well-formed on its own ("go 1.21"
+// and "go 1.22", both matching goVersionDirectiveRE), makes every
+// module-aware go subcommand Fatal parsing go.mod before it resolves a
+// single module, so the otherwise-uncovered private-auth signal below can
+// never actually leak. Verified live before this fix: `go list -m all`
+// (GOPROXY=off) on the equivalent file Fatals immediately with "go.mod:N:
+// repeated go statement" — a different Fatal shape from
+// goModHasInvalidGoDirective's own coverage (a single malformed argument),
+// since neither "go 1.21" nor "go 1.22" is itself invalid — while this tool
+// still reported "SUMDB LEAK" for the require line it could still see below
+// both directives.
+func TestRunRepeatedGoDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.21
+
+go 1.22
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod has two individually well-formed \"go\" directives (go itself would Fatal parsing go.mod with \"repeated go statement\" before any query), got: %s", stdout)
+	}
+}
+
+// TestRunRepeatedToolchainDirectiveGoModNoLeak is
+// TestRunRepeatedGoDirectiveGoModNoLeak's "toolchain" sibling: two
+// individually well-formed "toolchain" lines. Verified live before this
+// fix: `go list -m all` on the equivalent file Fatals identically with
+// "repeated toolchain statement".
+func TestRunRepeatedToolchainDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.21
+
+toolchain go1.21.0
+
+toolchain go1.22.0
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod has two individually well-formed \"toolchain\" directives (go itself would Fatal parsing go.mod with \"repeated toolchain statement\" before any query), got: %s", stdout)
+	}
+}
+
+// TestRunRepeatedModuleDirectiveGoModNoLeak is
+// TestRunRepeatedGoDirectiveGoModNoLeak's "module" sibling: two separate
+// single-line "module" directives. Verified live before this fix: `go list
+// -m all` on the equivalent file Fatals identically with "repeated module
+// statement".
+func TestRunRepeatedModuleDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+module example.com/other
+
+go 1.21
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod has two separate \"module\" directives (go itself would Fatal parsing go.mod with \"repeated module statement\" before any query), got: %s", stdout)
+	}
+}
+
+// TestRunRepeatedGoDirectiveGoWorkNoLeak is
+// TestRunRepeatedGoDirectiveGoModNoLeak's go.work-level sibling, mirroring
+// goWorkHasUnparseableDirective's own call to
+// goModHasRepeatedSingletonDirective with goWorkSingletonVerbs:
+// golang.org/x/mod/modfile's (*WorkFile).add carries the identical "repeated
+// go statement" singleton guard as go.mod's own (*File).add. Verified live
+// before this fix: `go list -m all` from the member module, with the active
+// go.work shown below, Fatals immediately with "errors parsing go.work:
+// go.work:3: repeated go statement", before resolving a single one of the
+// member's own requires.
+func TestRunRepeatedGoDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.21
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.21
+
+go 1.22
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work has two individually well-formed \"go\" directives (go itself would Fatal parsing go.work with \"repeated go statement\" before any query), got: %s", stdout)
+	}
+}
+
 // TestRunUnknownDirectiveGoModNoLeak is the direct regression test for
 // goModHasUnknownDirective (see gomod.go): a go.mod containing a top-level
 // line whose first token isn't a real go.mod directive keyword — here,

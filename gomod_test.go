@@ -426,6 +426,39 @@ func TestGoModHasInvalidToolchainDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasRepeatedSingletonDirective covers
+// goModHasRepeatedSingletonDirective's live-verified trigger condition: a
+// second "go", "toolchain", or "module" statement anywhere in a go.mod is
+// exactly what makes golang.org/x/mod/modfile's real parser Fatal with
+// "repeated go statement" / "repeated toolchain statement" / "repeated
+// module statement" before resolving a single module — confirmed against
+// real `go list -m all`, even when BOTH occurrences are individually
+// well-formed on their own (see TestRunRepeatedGoDirectiveGoModNoLeak in
+// main_test.go for the end-to-end regression). Every other go.mod verb may
+// legally repeat and must not be flagged.
+func TestGoModHasRepeatedSingletonDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"single go directive", "module example.com/foo\n\ngo 1.21\n", false},
+		{"repeated go directive, both individually valid", "module example.com/foo\n\ngo 1.21\n\ngo 1.22\n", true},
+		{"repeated toolchain directive, both individually valid", "module example.com/foo\n\ngo 1.21\n\ntoolchain go1.21.0\n\ntoolchain go1.22.0\n", true},
+		{"repeated module directive", "module example.com/foo\nmodule example.com/bar\n\ngo 1.21\n", true},
+		{"single-line module plus a block-form module", "module example.com/foo\n\ngo 1.21\n\nmodule (\n\texample.com/bar\n)\n", true},
+		{"single block-form module only", "module (\n\texample.com/foo\n)\n\ngo 1.21\n", false},
+		{"two paths inside one module block", "module (\n\texample.com/foo\n\texample.com/bar\n)\n\ngo 1.21\n", true},
+		{"repeated require is legal", "module example.com/foo\n\ngo 1.21\n\nrequire example.com/bar v1.0.0\n\nrequire example.com/baz v1.0.0\n", false},
+		{"repeated retract is legal", "module example.com/foo\n\ngo 1.21\n\nretract v1.0.0\n\nretract v1.1.0\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasRepeatedSingletonDirective([]byte(c.src), goModSingletonVerbs); got != c.want {
+			t.Errorf("%s: goModHasRepeatedSingletonDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestGoModHasUnknownDirective covers goModHasUnknownDirective's
 // live-verified trigger condition: a top-level line whose first token isn't
 // one of the real parser's recognized go.mod directive keywords (module,

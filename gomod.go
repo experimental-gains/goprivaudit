@@ -327,6 +327,114 @@ func goModHasInvalidToolchainDirective(data []byte) bool {
 	return false
 }
 
+// singletonDirectiveVerbs is a set of go.mod/go.work top-level directive
+// keywords golang.org/x/mod/modfile's real parser treats as singleton per
+// file: reading rule.go's (*File).add and (*WorkFile).add directly, "go"
+// and "toolchain" each start with an unconditional `if f.Go != nil
+// { errorf("repeated go statement") }`-shaped guard (ditto "toolchain" and,
+// go.mod-only, "module") that fires the INSTANT a second occurrence of that
+// verb appears anywhere in the file — checked before that second
+// occurrence's own argument grammar is validated at all, and regardless of
+// whether either occurrence is itself individually well-formed. This is a
+// distinct Fatal shape from every other check in this family
+// (goModHasInvalidGoDirective/goModHasInvalidToolchainDirective validate a
+// single occurrence's own argument; this instead catches two or more
+// occurrences that could each individually pass those checks). Every other
+// go.mod/go.work directive (require, exclude, replace, retract, tool,
+// ignore, godebug, use) is accumulated into a slice instead by the real
+// parser and may legally repeat as many times as desired.
+//
+// goModSingletonVerbs/goWorkSingletonVerbs (immediately below) instantiate
+// this per file format: go.work has no "module" directive at all (an
+// unrecognized verb there, already caught by goWorkHasUnknownDirective), so
+// it isn't included in goWorkSingletonVerbs.
+var goModSingletonVerbs = map[string]bool{"go": true, "toolchain": true, "module": true}
+var goWorkSingletonVerbs = map[string]bool{"go": true, "toolchain": true}
+
+// goModHasRepeatedSingletonDirective reports whether data contains more
+// than one occurrence of a verb in singletonVerbs — a second "go",
+// "toolchain", or (go.mod only) "module" statement anywhere in the file —
+// which makes the real go command's own strict parser (modfile.Parse /
+// modfile.ParseWork) Fatal with "repeated go statement" / "repeated
+// toolchain statement" / "repeated module statement" before resolving a
+// single module, even when every individual occurrence's own argument is
+// perfectly valid on its own (e.g. two individually well-formed "go 1.21"
+// and "go 1.22" lines). Live-verified against real go1.26.8, fully offline
+// (GOPROXY=off): a go.mod with "go 1.21" followed later by "go 1.22" (both
+// matching goVersionDirectiveRE on their own) Fatals immediately with
+// "go.mod:N: repeated go statement", and the identical shape reproduces for
+// a doubled "toolchain go1.21.0"/"toolchain go1.22.0" pair ("repeated
+// toolchain statement") and a doubled "module" directive ("repeated module
+// statement") — confirmed end-to-end against the actual goprivaudit binary,
+// pre-fix: a go.mod with a real, otherwise-uncovered private-auth-signaled
+// require plus a duplicated "go" directive was reported "SUMDB LEAK", while
+// `go list -m all`/`go build` on the identical file Fatal immediately and
+// never get far enough to query anything. The same Fatal shape was
+// independently confirmed for go.work's own "go"/"toolchain" directives
+// (`golang.org/x/mod/modfile`'s (*WorkFile).add carries the identical
+// `f.Go != nil`/`f.Toolchain != nil` guards), which is why this function
+// takes singletonVerbs as a parameter rather than hard-coding go.mod's own
+// set — see goWorkHasUnparseableDirective's doc comment for how it's
+// reused against a go.work file's own bytes with goWorkSingletonVerbs.
+//
+// A "module" directive's block form ("module (\n\texample.com/foo\n)")
+// counts each non-empty line inside the block as its own occurrence, not
+// the block as a whole — matching the real parser, which dispatches every
+// block-entry line through the identical (*File).add call as a top-level
+// single-line directive of the same verb (see goModHasUnknownDirective's
+// own doc comment for the identical block-entry-dispatch convention): two
+// module paths inside one `module (...)` block, or one single-line "module"
+// directive followed by a separate "module (...)" block (or vice versa),
+// both genuinely Fatal with "repeated module statement" too — live-verified
+// both shapes independently. "go"/"toolchain" are never valid block-form
+// verbs at all (rule.go's own block-type switch doesn't list them), so a
+// stray "go (" is simply not counted as an occurrence here — a different,
+// already out-of-scope malformed shape ("unknown block type: go"), not a
+// hole in this function's own repeated-statement coverage.
+func goModHasRepeatedSingletonDirective(data []byte, singletonVerbs map[string]bool) bool {
+	counts := map[string]int{}
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			if singletonVerbs[blockVerb] {
+				counts[blockVerb]++
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		rest := strings.TrimSpace(trimmed[i:])
+		if rest == "(" {
+			inBlock = true
+			blockVerb = verb
+			continue
+		}
+		if singletonVerbs[verb] {
+			counts[verb]++
+		}
+	}
+	for _, c := range counts {
+		if c > 1 {
+			return true
+		}
+	}
+	return false
+}
+
 // goModValidTopLevelVerbs is the complete, fixed set of go.mod top-level
 // directive keywords golang.org/x/mod/modfile's real parser
 // ((*File).add's verb switch, rule.go) recognizes for the main module:
@@ -1682,6 +1790,18 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // auditing the go.mod being audited and reported a false SUMDB LEAK for an
 // otherwise-real, otherwise-uncovered private-auth signal (a git insteadOf
 // rewrite) sitting in it — see TestRunInvalidUseDirectiveGoWorkNoLeak.
+//
+// Also calls goModHasRepeatedSingletonDirective against gowork's own bytes
+// with goWorkSingletonVerbs ("go"/"toolchain" — go.work has no "module"
+// directive at all): golang.org/x/mod/modfile's (*WorkFile).add carries the
+// identical `f.Go != nil`/`f.Toolchain != nil`-shaped singleton guards as
+// go.mod's own (*File).add, so a go.work with two individually well-formed
+// "go"/"toolchain" lines Fatals with "repeated go statement"/"repeated
+// toolchain statement" exactly like its go.mod counterpart — see
+// goModHasRepeatedSingletonDirective's own doc comment for the live
+// verification (reproduced separately for go.work, not just assumed to
+// carry over) and TestRunRepeatedGoDirectiveGoWorkNoLeak for the end-to-end
+// regression.
 func goWorkHasUnparseableDirective(gowork string) bool {
 	if gowork == "" || gowork == "off" {
 		return false
@@ -1696,7 +1816,8 @@ func goWorkHasUnparseableDirective(gowork string) bool {
 		goWorkHasUnknownDirective(data) ||
 		goModHasInvalidReplaceDirective(data) ||
 		goModHasInvalidGodebugDirective(data) ||
-		goModHasInvalidDirectiveArgCount(data)
+		goModHasInvalidDirectiveArgCount(data) ||
+		goModHasRepeatedSingletonDirective(data, goWorkSingletonVerbs)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of

@@ -78,10 +78,16 @@
 // see goModHasInvalidDirectiveArgCount — a missing version, a stray extra
 // token, or a tool line naming more than one package, all of which the real
 // parser Fatals on before resolving anything, for the identical "cannot
-// leak" reason. Both are also skipped when an ACTIVE go.work file (not the
+// leak" reason. Both are also skipped when go.mod contains more than one
+// "go", "toolchain", or "module" statement — see
+// goModHasRepeatedSingletonDirective — each of which the real parser treats
+// as a singleton per file and Fatals on a second occurrence regardless of
+// whether either occurrence's own argument is individually well-formed.
+// Both are also skipped when an ACTIVE go.work file (not the
 // go.mod being audited) itself contains one of these same unparsable
 // shapes — a stray block comment, a malformed go/toolchain/godebug
-// directive, or an unrecognized top-level verb under go.work's own,
+// directive, a repeated go/toolchain statement, or an unrecognized
+// top-level verb under go.work's own,
 // narrower set of recognized directives (go, toolchain, godebug, use,
 // replace) — see goWorkHasUnparseableDirective: go.work shares go.mod's
 // strict parser, so
@@ -382,6 +388,17 @@ func run(args []string, stdout, stderr *os.File) int {
 		// Same "cannot leak" reasoning as goModHasInvalidGoDirective just
 		// above, for the sibling directive that shares its exact
 		// len(args)!=1-then-regex validation shape in the real parser.
+	case goModHasRepeatedSingletonDirective(data, goModSingletonVerbs):
+		// A go.mod containing more than one "go", "toolchain", or "module"
+		// statement — each individually well-formed or not — makes every
+		// module-aware go subcommand Fatal parsing go.mod itself ("repeated
+		// go statement" / "repeated toolchain statement" / "repeated module
+		// statement"), before it resolves a single module (see
+		// goModHasRepeatedSingletonDirective). A different Fatal shape from
+		// goModHasInvalidGoDirective/goModHasInvalidToolchainDirective just
+		// above: those catch one occurrence's own bad argument, this catches
+		// two-or-more occurrences that can each individually pass those
+		// checks.
 	case goModHasUnknownDirective(data):
 		// A go.mod containing any top-level line whose first token isn't
 		// one of the real parser's recognized directive keywords (see
