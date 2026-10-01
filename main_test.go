@@ -3370,3 +3370,193 @@ require gitlab.corp.example.com/team/privaterepo v1.2.3
 		t.Errorf("stdout missing expected leak finding: %s", stdout)
 	}
 }
+
+// TestRunGoSumCoveredModuleNoLeak is the regression test for the bug
+// filterGoSumCovered fixes: a go.mod whose private-auth-signaled require is
+// already fully pinned in the committed go.sum (both the content-hash line
+// and the "/go.mod" hash line, for the exact required version) cannot
+// trigger a new GOSUMDB query for that module on an ordinary subsequent
+// `go build`/`go test` — live-verified (go1.24.4): with a real go.sum
+// carrying both lines for a module, GOSUMDB pointed at an unreachable host,
+// and a completely empty GOMODCACHE, `go build` still succeeds, under both
+// the default -mod=readonly and an explicit -mod=mod. Before this fix,
+// goprivaudit reported SUMDB LEAK unconditionally for any uncovered
+// private-auth signal, regardless of go.sum's own contents — an active
+// wrong claim for the extremely common case of a go.mod/go.sum pair already
+// committed together.
+func TestRunGoSumCoveredModuleNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "go.sum", `github.com/myorg/internal-tool v1.2.3 h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdee=
+github.com/myorg/internal-tool v1.2.3/go.mod h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdef=
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 once go.sum already covers the module; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean once go.sum covers the module, got: %s", stdout)
+	}
+}
+
+// TestRunGoSumMissingGoModHashStillLeaks confirms goSumCoversModule's
+// "both lines, not just one" requirement end to end: a go.sum carrying only
+// the content-hash line (no "/go.mod" line) for the module does NOT
+// suppress the finding — live-verified that a real `go build` in this exact
+// shape still attempts (and, with GOSUMDB unreachable, fails) a genuine
+// GOSUMDB lookup for the missing half.
+func TestRunGoSumMissingGoModHashStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "go.sum", `github.com/myorg/internal-tool v1.2.3 h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdee=
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; a go.sum missing the /go.mod hash line should still leak; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGoSumWrongVersionStillLeaks confirms the go.sum coverage check is
+// keyed on the exact required version, not just the module path: a go.sum
+// entry for a different version of the same module (e.g. left over from an
+// earlier require bump) does not suppress the finding for the version
+// go.mod actually requires now, since `go` would still need a fresh
+// checksum for that version.
+func TestRunGoSumWrongVersionStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "go.sum", `github.com/myorg/internal-tool v1.2.2 h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdee=
+github.com/myorg/internal-tool v1.2.2/go.mod h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdef=
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; go.sum pinning a different version should still leak for the required one; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGoSumCoversReplacedModuleTargetStillLeaks confirms
+// filterGoSumCovered's deliberate scoping (see its own doc comment): a
+// module-path replace's effective path is never matched against go.sum's
+// coverage, even when go.sum happens to carry a complete entry for that
+// exact replacement path/version, because this tool's replaceTarget never
+// records the replacement's own pinned version independently of the
+// original require's — so a coincidental match here must not be trusted.
+func TestRunGoSumCoversReplacedModuleTargetStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v1.2.3
+
+replace github.com/myorg/internal-tool => github.com/myorg/internal-tool-fork v1.2.3
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	writeFile(t, dir, "go.sum", `github.com/myorg/internal-tool-fork v1.2.3 h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdee=
+github.com/myorg/internal-tool-fork v1.2.3/go.mod h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdef=
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; a replaced module's effective path should not be matched against go.sum coverage; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool-fork") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGoSumSamePathVersionReplaceStillLeaks covers the sharpest edge of
+// filterGoSumCovered's replace scoping: a replace directive that keeps the
+// SAME module path but pins a different version (a real, valid go.mod
+// shape — e.g. pointing at a privately-patched release of the same import
+// path) means the module list's path collides with the original require's
+// own path, even though the version `go` actually resolves is the
+// replace's, not the plain require's. A go.sum entry left over for the
+// pre-replace version must not be mistaken for covering the real one.
+func TestRunGoSumSamePathVersionReplaceStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v1.2.3
+
+replace github.com/myorg/internal-tool => github.com/myorg/internal-tool v1.2.3-patched
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	// Only the pre-replace version's go.sum entry exists; the replace
+	// target's own effective version (v1.2.3-patched) has no entry at all.
+	writeFile(t, dir, "go.sum", `github.com/myorg/internal-tool v1.2.3 h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdee=
+github.com/myorg/internal-tool v1.2.3/go.mod h1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdef=
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; a same-path version-bumping replace must not be matched against the pre-replace version's go.sum entry; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}

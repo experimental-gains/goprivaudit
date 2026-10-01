@@ -112,6 +112,18 @@
 // file up, and this tool's own go.mod-side checks alone never noticed a
 // broken go.work at all.
 //
+// Unlike every skip above (each all-or-nothing for the whole audit), one
+// check narrows the SUMDB LEAK finding per module rather than skipping the
+// audit outright: a require whose exact required version is already fully
+// pinned in moduleDir's own go.sum — both the module's content hash line
+// and its go.mod hash line (see goSumCoversModule) — cannot trigger a new
+// GOSUMDB query for that module on an ordinary subsequent build, under
+// either the default -mod=readonly or an explicit -mod=mod, regardless of
+// GOPRIVATE/GONOSUMDB coverage. See filterGoSumCovered's own doc comment
+// for why go.sum (a file checked into the repo alongside go.mod, unlike the
+// local module cache) is a reliable source for this, not a guess the way
+// GOPROXY=off below is.
+//
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
 // like GOSUMDB=off/vendor mode above. Verified live (2026-09): with
@@ -526,7 +538,15 @@ func run(args []string, stdout, stderr *os.File) int {
 		// reads everything off the committed vendor/ directory instead of
 		// the network, rather than because sumdb checking was turned off.
 	default:
-		r = audit(modules, prefixes, splitPatterns(gonosumdb))
+		// filterGoSumCovered drops any module whose exact required version
+		// is already fully pinned in moduleDir's own go.sum: unlike every
+		// skip case above (which is all-or-nothing for the whole audit),
+		// this is a per-module refinement — go.sum coverage is itself a
+		// real, checked-in "cannot leak" source, distinct from the
+		// unreliable, machine-local-state guesses this package's own doc
+		// comment already rules out for GOPROXY=off. See its own doc
+		// comment for why it's safe to apply unconditionally here.
+		r = audit(filterGoSumCovered(modules, requires, replaces, moduleDir), prefixes, splitPatterns(gonosumdb))
 	}
 	printReport(stdout, r, sumdbName(gosumdb))
 	if !r.Clean() {
