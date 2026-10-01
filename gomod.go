@@ -23,6 +23,25 @@ type requireEntry struct {
 // go.mod grammar (no golang.org/x/mod dependency) — require blocks have a
 // simple enough shape that a line scanner is sufficient.
 func parseRequires(data []byte) []requireEntry {
+	return parseModuleVersionDirectives(data, "require")
+}
+
+// parseExcludes extracts module paths and versions from exclude directives
+// in a go.mod file's contents, using the identical "<path> <version>"
+// grammar (single-line or block form) that parseRequires already reads for
+// require directives — see filterExcludedRequires for why these are needed
+// at all.
+func parseExcludes(data []byte) []requireEntry {
+	return parseModuleVersionDirectives(data, "exclude")
+}
+
+// parseModuleVersionDirectives extracts module paths and versions from
+// every single-line or block-form directive in data whose verb is keyword
+// (e.g. "require" or "exclude" — both share the exact same "<path>
+// <version>" grammar, modulo keyword). It intentionally does not parse the
+// full go.mod grammar (no golang.org/x/mod dependency) — these directives
+// have a simple enough shape that a line scanner is sufficient.
+func parseModuleVersionDirectives(data []byte, keyword string) []requireEntry {
 	var modules []requireEntry
 	inBlock := false
 	sc := bufio.NewScanner(strings.NewReader(string(data)))
@@ -44,7 +63,7 @@ func parseRequires(data []byte) []requireEntry {
 			continue
 		}
 
-		if rest, ok := cutKeyword(trimmed, "require"); ok {
+		if rest, ok := cutKeyword(trimmed, keyword); ok {
 			rest = strings.TrimSpace(rest)
 			if rest == "(" {
 				inBlock = true
@@ -2050,6 +2069,73 @@ func isDirectoryPath(path string) bool {
 	return path == "." || path == ".." ||
 		strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") ||
 		filepath.IsAbs(path)
+}
+
+// filterExcludedRequires drops any require entry whose exact (path,
+// version) pair is named by an `exclude` directive elsewhere in the same
+// go.mod, matching real go's own build-list behavior: per `go help
+// exclude`/the module reference, an excluded version is removed from
+// consideration entirely, as if the require naming it didn't exist.
+// Verified live (go1.24.4): a go.mod reading
+//
+//	require example.com/excluded v1.0.0
+//	exclude example.com/excluded v1.0.0
+//
+// makes `go list -m all` print "go: dropping requirement on excluded
+// version example.com/excluded v1.0.0" and resolve the build list as if
+// that require line were never written at all — confirmed with
+// GOPROXY=off and the module's host completely unreachable, so no fetch,
+// no proxy query, and no checksum-database lookup is ever attempted for
+// it. A `require`/`exclude` pair for the SAME version is exactly what this
+// tool needs to recognize, since every other signal it tracks (an
+// insteadOf rewrite, a credential helper, go.sum coverage, ...) is keyed
+// off the require's own (path, version), and a require that real go drops
+// before ever resolving a version can never generate a real sumdb query —
+// the identical "cannot leak" reasoning run()'s GOSUMDB=off/vendor-mode/
+// malformed-go.mod skips already apply, just scoped to one require entry
+// instead of the whole audit.
+//
+// Also verified live that this holds even when a `replace` directive (both
+// a version-specific "replace example.com/excluded v1.0.0 => ../other" and
+// a version-agnostic "replace example.com/excluded => ../other") ALSO
+// targets the exact same excluded version: `go build` still Fatals with
+// "module example.com/excluded provides package ... and is replaced but
+// not required" the moment the package is imported — i.e. exclude wins
+// outright, dropping the requirement regardless of any replace naming it,
+// not just when no replace is present. So this filtering must happen
+// before resolveEffectiveModules' own replace resolution (which this
+// function's caller, run(), now does), not as a refinement layered on top
+// of its output: a require entry excluded this way contributes NEITHER its
+// own path NOR its replacement target to the effective module list, since
+// real go fetches neither.
+//
+// Deliberately narrow: only a require whose OWN version is named by an
+// exclude for the same path is dropped. A go.mod naming the same module
+// path at two different require versions (legal, if unusual, go.mod
+// syntax) — where only one of the two happens to match an exclude — only
+// has that one entry dropped; the other require line (and whatever
+// version it names) is left for the ordinary audit path, since this tool
+// doesn't attempt to replicate real go's full minimal-version-selection
+// algorithm for picking a next-highest non-excluded version the way
+// `cmd/go/internal/modload` does. That can only miss a real suppression
+// opportunity for the untouched entry, not introduce a false "no issues
+// found".
+func filterExcludedRequires(requires []requireEntry, excludes []requireEntry) []requireEntry {
+	if len(excludes) == 0 {
+		return requires
+	}
+	excluded := make(map[requireEntry]bool, len(excludes))
+	for _, e := range excludes {
+		excluded[e] = true
+	}
+	out := make([]requireEntry, 0, len(requires))
+	for _, r := range requires {
+		if excluded[r] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // resolveEffectiveModules applies replace directives to a list of required

@@ -70,6 +70,84 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunExcludedExactVersionNoLeak covers a require directive whose exact
+// (path, version) is also named by an `exclude` directive in the same
+// go.mod. Verified live (go1.24.4): with this exact go.mod shape and
+// GOPROXY=off against a completely unreachable host, `go list -m all`
+// prints "go: dropping requirement on excluded version
+// git.corp.example.com/myorg/privatelib v1.0.0" and succeeds — the
+// requirement is dropped from the build list entirely, before any
+// network fetch, proxy query, or checksum-database lookup is ever
+// attempted. Also verified live that this holds even with a version- or
+// path-matching `replace` directive present for the same old (path,
+// version): `go build` still Fatals with "... is replaced but not
+// required" the moment the package is imported, confirming exclude wins
+// outright over replace rather than being rescued by it. Before this
+// fix, goprivaudit ignored `exclude` entirely and reported a SUMDB LEAK
+// for exactly this module — an active false positive on a require real
+// go never resolves, let alone queries sum.golang.org for.
+func TestRunExcludedExactVersionNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.corp.example.com/myorg/privatelib v1.0.0
+
+exclude git.corp.example.com/myorg/privatelib v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "git@git.corp.example.com:myorg/"]
+	insteadOf = https://git.corp.example.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (excluded version should never be flagged); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should report no leak for an excluded-exact-version require: %s", stdout)
+	}
+}
+
+// TestRunExcludedDifferentVersionStillLeaks is
+// TestRunExcludedExactVersionNoLeak's companion: an exclude directive
+// naming a DIFFERENT (but major-version-compatible) version of the same
+// module path must not suppress the finding — only an EXACT (path,
+// version) match drops a require, matching real go's own build-list
+// behavior (see filterExcludedRequires's doc comment).
+func TestRunExcludedDifferentVersionStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.corp.example.com/myorg/privatelib v1.0.0
+
+exclude git.corp.example.com/myorg/privatelib v1.5.0
+`)
+	writeFile(t, dir, ".git/config", `[url "git@git.corp.example.com:myorg/"]
+	insteadOf = https://git.corp.example.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.corp.example.com/myorg/privatelib") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaCredentialHelper covers the real-world case
 // `gh auth setup-git` sets up: no insteadOf rewrite at all, no netrc file
 // — just an org-scoped git credential helper for a plain HTTPS URL, which

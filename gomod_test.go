@@ -998,6 +998,86 @@ func TestResolveEffectiveModulesGeneralReplaceAppliesWhenNoVersionMatches(t *tes
 	}
 }
 
+func TestParseExcludes(t *testing.T) {
+	src := `module example.com/foo
+
+go 1.21
+
+exclude (
+	github.com/pkg/errors v0.9.0
+	example.com/myorg/private v0.0.0-20230101000000-abcdef123456
+)
+
+exclude golang.org/x/sync v0.4.0
+`
+	got := parseExcludes([]byte(src))
+	want := []requireEntry{
+		{path: "github.com/pkg/errors", version: "v0.9.0"},
+		{path: "example.com/myorg/private", version: "v0.0.0-20230101000000-abcdef123456"},
+		{path: "golang.org/x/sync", version: "v0.4.0"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestParseExcludesNone(t *testing.T) {
+	if got := parseExcludes([]byte("module example.com/foo\n\nrequire example.com/bar v1.0.0\n")); got != nil {
+		t.Errorf("expected no excludes, got %v", got)
+	}
+}
+
+// TestFilterExcludedRequiresDropsExactVersionMatch covers the core bug: a
+// require directive whose exact (path, version) is also named by an
+// exclude directive must be dropped entirely, matching real go's own
+// build-list behavior — verified live (go1.24.4, GOPROXY=off, the
+// module's host completely unreachable): `go list -m all` against exactly
+// this go.mod shape prints "go: dropping requirement on excluded version
+// example.com/excluded v1.0.0" and succeeds (exit 0) without ever
+// attempting a network fetch, proxy query, or checksum-database lookup for
+// it — so a require this tool still treated as "will be fetched" (and
+// potentially flagged as a SUMDB LEAK) pre-fix was an active false
+// positive on a module real go never resolves at all.
+func TestFilterExcludedRequiresDropsExactVersionMatch(t *testing.T) {
+	requires := []requireEntry{
+		{path: "example.com/excluded", version: "v1.0.0"},
+		{path: "example.com/kept", version: "v1.0.0"},
+	}
+	excludes := []requireEntry{
+		{path: "example.com/excluded", version: "v1.0.0"},
+	}
+	got := filterExcludedRequires(requires, excludes)
+	want := []requireEntry{{path: "example.com/kept", version: "v1.0.0"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestFilterExcludedRequiresKeepsNonMatchingVersion covers the companion
+// case: an exclude directive naming a DIFFERENT version of the same
+// module path must not touch the require at all — verified live that `go
+// list -m all` still resolves (and would fetch/verify) the require's own
+// version normally when the only exclude present names some other
+// version, since module.CheckPathMajor/the build list only ever drops the
+// EXACT excluded version, never anything else sharing its path.
+func TestFilterExcludedRequiresKeepsNonMatchingVersion(t *testing.T) {
+	requires := []requireEntry{{path: "example.com/foo", version: "v1.0.0"}}
+	excludes := []requireEntry{{path: "example.com/foo", version: "v1.5.0"}}
+	got := filterExcludedRequires(requires, excludes)
+	want := []requireEntry{{path: "example.com/foo", version: "v1.0.0"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+func TestFilterExcludedRequiresNoExcludes(t *testing.T) {
+	requires := []requireEntry{{path: "example.com/foo", version: "v1.0.0"}}
+	got := filterExcludedRequires(requires, nil)
+	if !reflect.DeepEqual(got, requires) {
+		t.Errorf("got %v, want %v", got, requires)
+	}
+}
+
 func TestGoWorkReplacesEmptyGowork(t *testing.T) {
 	if got := goWorkReplaces(""); got != nil {
 		t.Errorf("expected nil for empty gowork path, got %v", got)

@@ -227,7 +227,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		gowork = goEnv(moduleDir, "GOWORK")
 	}
 
-	requires := parseRequires(data)
+	requires := filterExcludedRequires(parseRequires(data), parseExcludes(data))
 	replaces := mergeReplaces(parseReplaces(data), goWorkReplaces(gowork))
 	modules := resolveEffectiveModules(requires, replaces)
 	modules = append(modules, effectiveToolModules(parseTools(data), requires, parseModulePath(data))...)
