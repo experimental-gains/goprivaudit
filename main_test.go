@@ -1706,6 +1706,97 @@ replace example.com/foo => example.com/bar@v1.0.0
 	}
 }
 
+// TestRunConflictingReplaceDirectiveGoModNoLeak is the direct regression
+// test for goModHasConflictingReplaceDirective: a go.mod with two
+// individually well-formed `replace` directives for the same old module
+// path/version naming two different new-side targets makes every
+// module-aware go subcommand Fatal immediately with "go: conflicting
+// replacements for github.com/myorg/internal-tool:
+// \n\texample.com/bar@v1.0.0\n\tgithub.com/privorg/baz@v1.0.0" — verified
+// live (go1.26.8, GOPROXY=off; `go list -m all`/`go build`/`go mod
+// download` all agree) — before resolving a single module. Before this
+// fix, this tool's own best-effort addReplace/resolveEffectiveModules
+// machinery silently applied "last replace wins", picking
+// github.com/privorg/baz as the effective module to audit — which has its
+// own uncovered private-auth signal (a git insteadOf rewrite for
+// github.com/privorg/, with no matching GOPRIVATE entry) — and wrongly
+// reported "SUMDB LEAK: github.com/privorg/baz ..." even though real go
+// never queries anything for it, since the build Fatals on the
+// conflicting-replacements error first, every time.
+func TestRunConflictingReplaceDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+replace github.com/myorg/internal-tool => example.com/bar v1.0.0
+replace github.com/myorg/internal-tool => github.com/privorg/baz v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:privorg/"]
+	insteadOf = https://github.com/privorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod has two conflicting replace directives for the same old path/version (go itself would Fatal with \"conflicting replacements\" before any query), got: %s", stdout)
+	}
+}
+
+// TestRunConflictingReplaceDirectiveGoWorkNoLeak is
+// TestRunConflictingReplaceDirectiveGoModNoLeak's go.work-side counterpart:
+// the identical "go: conflicting replacements for ...:\n\t...\n\t..."
+// Fatal applies when the conflicting pair sits in an active go.work file's
+// own replace list instead of the go.mod being audited (live-verified,
+// go1.26.8, GOPROXY=off, `go list -m all` run from inside a `use`d member
+// module) — see goWorkHasConflictingReplaceDirective.
+func TestRunConflictingReplaceDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./app
+
+replace github.com/myorg/internal-tool => example.com/bar v1.0.0
+replace github.com/myorg/internal-tool => github.com/privorg/baz v1.0.0
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:privorg/"]
+	insteadOf = https://github.com/privorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work has two conflicting replace directives for the same old path/version (go itself would Fatal with \"conflicting replacements\" before any query), got: %s", stdout)
+	}
+}
+
 // TestRunGodebugDirectiveGoWorkStillLeaks is the direct regression test for
 // a real-world-testing find: a well-formed `godebug key=value` line in an
 // active go.work was, before this fix, misclassified by

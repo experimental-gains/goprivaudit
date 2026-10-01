@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -773,6 +774,67 @@ func TestGoModHasInvalidReplaceDirective(t *testing.T) {
 		if got := goModHasInvalidReplaceDirective([]byte(c.src)); got != c.want {
 			t.Errorf("%s: goModHasInvalidReplaceDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
 		}
+	}
+}
+
+// TestGoModHasConflictingReplaceDirective covers
+// goModHasConflictingReplaceDirective's live-verified trigger condition: two
+// individually well-formed `replace` directives for the same old module
+// path/version naming two different new-side targets, which real go's own
+// toReplaceMap Fatals on unconditionally and purely offline (confirmed
+// against real `go list -m all`/`go build`/`go mod download`, GOPROXY=off —
+// see TestRunConflictingReplaceDirectiveGoModNoLeak in main_test.go for the
+// end-to-end regression, including the case where the losing-but-audited
+// target under this tool's own pre-fix "last replace wins" convention had
+// its own uncovered private-auth signal).
+func TestGoModHasConflictingReplaceDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no replace directive at all", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"single replace, no conflict possible", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork v1.0.0\n", false},
+		{"two replaces, different old paths", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork v1.0.0\nreplace example.com/baz => example.com/other v1.0.0\n", false},
+		{"two replaces, same old version-specific path, different targets", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\nreplace example.com/bar v1.0.0 => example.com/other v1.0.0\n", true},
+		{"two replaces, same old path with no version (general), different targets", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork v1.0.0\nreplace example.com/bar => example.com/other v1.0.0\n", true},
+		{"two replaces, identical old and new (true duplicate, not a conflict)", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\n", false},
+		{"two replaces, same new path but different new version", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\nreplace example.com/bar v1.0.0 => example.com/fork v2.0.0\n", true},
+		{"general and version-specific replace for same path, no conflict (different keys)", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork v1.0.0\nreplace example.com/bar v1.0.0 => example.com/other v1.0.0\n", false},
+		{"conflict inside a replace block", "module example.com/foo\n\ngo 1.24\n\nreplace (\n\texample.com/bar v1.0.0 => example.com/fork v1.0.0\n\texample.com/bar v1.0.0 => example.com/other v1.0.0\n)\n", true},
+		{"conflict across one single-line and one block entry", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\n\nreplace (\n\texample.com/bar v1.0.0 => example.com/other v1.0.0\n)\n", true},
+		{"malformed replace line is skipped, not treated as a conflict source", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar\n\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasConflictingReplaceDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasConflictingReplaceDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoWorkHasConflictingReplaceDirective covers
+// goWorkHasConflictingReplaceDirective: the identical conflicting-replace
+// Fatal applies to a go.work file's own replace list too (live-verified —
+// see TestRunConflictingReplaceDirectiveGoWorkNoLeak in main_test.go).
+func TestGoWorkHasConflictingReplaceDirective(t *testing.T) {
+	if got := goWorkHasConflictingReplaceDirective(""); got {
+		t.Errorf("empty gowork path: got %v, want false", got)
+	}
+	if got := goWorkHasConflictingReplaceDirective("off"); got {
+		t.Errorf(`gowork="off": got %v, want false`, got)
+	}
+	if got := goWorkHasConflictingReplaceDirective(filepath.Join(t.TempDir(), "nonexistent.work")); got {
+		t.Errorf("unreadable gowork: got %v, want false", got)
+	}
+
+	dir := t.TempDir()
+	gowork := filepath.Join(dir, "go.work")
+	src := "go 1.24\n\nuse ./mod1\n\nreplace example.com/bar v1.0.0 => example.com/fork v1.0.0\nreplace example.com/bar v1.0.0 => example.com/other v1.0.0\n"
+	if err := os.WriteFile(gowork, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := goWorkHasConflictingReplaceDirective(gowork); !got {
+		t.Errorf("conflicting go.work replace: got %v, want true", got)
 	}
 }
 

@@ -91,6 +91,15 @@
 // offline, the same "cannot leak" reason as every check above, one level
 // past goModHasInvalidDirectiveArgCount: a correct argument *count* doesn't
 // mean those arguments are mutually consistent.
+// Both are also skipped when go.mod (or an active go.work file) contains
+// two individually well-formed `replace` directives for the same old
+// module path/version that name two different new-side targets — see
+// goModHasConflictingReplaceDirective/goWorkHasConflictingReplaceDirective —
+// which the real go command Fatals on unconditionally ("conflicting
+// replacements for ...") before resolving anything, the same "cannot leak"
+// reason as goModHasMismatchedPathMajorVersion just above: this tool's own
+// best-effort "last replace wins" convention (used for every ordinary,
+// non-conflicting go.mod) picks a target real go never actually reaches.
 // Both are also skipped when an ACTIVE go.work file (not the
 // go.mod being audited) itself contains one of these same unparsable
 // shapes — a stray block comment, a malformed go/toolchain/godebug
@@ -447,6 +456,22 @@ func run(args []string, stdout, stderr *os.File) int {
 		// their own argument grammar was ever validated, the same gap
 		// goModHasInvalidGoDirective/goModHasInvalidToolchainDirective
 		// already closed for "go"/"toolchain".
+	case goModHasConflictingReplaceDirective(data) || goWorkHasConflictingReplaceDirective(gowork):
+		// Two (individually well-formed) `replace` directives for the same
+		// old module path/version naming two different new-side targets —
+		// see goModHasConflictingReplaceDirective — make every module-aware
+		// go subcommand Fatal immediately with "go: conflicting
+		// replacements for module@version:\n\ttarget1\n\ttarget2", before
+		// resolving a single module, whether the conflicting pair lives in
+		// the go.mod being audited or in an active go.work file's own
+		// replace list (goWorkHasConflictingReplaceDirective). Same "cannot
+		// leak" reasoning as every other malformed/inconsistent-go.mod (or
+		// go.work) skip above: this tool's own best-effort
+		// resolveEffectiveModules/addReplace machinery resolves the
+		// conflict by keeping whichever replace was written last — a
+		// reasonable default for the ordinary, non-conflicting case
+		// addReplace exists to handle, but exactly backwards here, since
+		// real go never reaches that target (or anything else) at all.
 	case goModHasMismatchedPathMajorVersion(data):
 		// A go.mod containing a `require`/`exclude` directive (single-line
 		// or block-entry form) whose module path's own major-version suffix

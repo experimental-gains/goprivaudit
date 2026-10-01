@@ -1454,6 +1454,149 @@ func goModHasInvalidReplaceDirective(data []byte) bool {
 	return false
 }
 
+// goModHasConflictingReplaceDirective reports whether data contains two
+// (otherwise individually well-formed) `replace` directives — single-line
+// or block-entry form, any mix — for the same old module path and old
+// version (a bare "replace foo => X", with no version on the old side,
+// counts as old version "" — matching every required version of foo, per
+// selectReplace's own precedence rule) that name two different new-side
+// targets (new path, or new path *and* new version — a module-type
+// replacement's own version matters here even though it's otherwise
+// irrelevant to the GOPRIVATE/GONOSUMDB path-only check this tool runs,
+// since two replacements differing only by new-side version still count as
+// "different" to the real parser).
+//
+// Live-verified (go1.26.8, GOPROXY=off): a go.mod with
+//
+//	replace example.com/foo v1.0.0 => example.com/bar v1.0.0
+//	replace example.com/foo v1.0.0 => example.com/baz v1.0.0
+//
+// makes `go list -m all`/`go build`/`go mod download` all Fatal immediately
+// with "go: conflicting replacements for example.com/foo@v1.0.0:\n\t
+// example.com/bar@v1.0.0\n\texample.com/baz@v1.0.0" — before resolving a
+// single module, GOPROXY=off or not — while the pre-fix goprivaudit binary
+// silently applied "last replace for a given old path/version wins" (see
+// addReplace) and audited whichever target happened to be written last.
+// Confirmed end-to-end against the actual binary with a go.mod carrying
+// exactly this conflicting pair, where the *last* replace's target
+// (github.com/privorg/baz) has its own uncovered private-auth signal (a git
+// insteadOf rewrite for github.com/privorg/, no matching GOPRIVATE entry):
+// the pre-fix binary reported "SUMDB LEAK: github.com/privorg/baz ..." even
+// though real go never queries anything for it — the build Fatals on the
+// conflicting-replacements error first, every time, regardless of which
+// replace is written last. Same "cannot leak" reasoning as every other
+// malformed/inconsistent-go.mod skip in this file (see
+// goModHasMismatchedPathMajorVersion's doc comment): a build that Fatals
+// before resolving a single module can never leak anything to sum.golang.org,
+// no matter which of the conflicting targets this tool's own best-effort
+// "last one wins" convention happens to pick for its own, unrelated
+// resolveEffectiveModules/addReplace machinery.
+//
+// Does NOT flag two replaces for the same old path/version that happen to
+// name the *identical* new-side target (live-verified separately: that
+// exact shape makes `go list -m all` proceed past the conflicting-
+// replacements check entirely, failing later only for the unrelated reason
+// that go.sum has no entry yet) — only a genuine mismatch between the two
+// new-side targets triggers the real Fatal this function mirrors.
+//
+// Deliberately re-scans data from scratch with its own tiny
+// oldKey->newTarget map rather than reusing parseReplaces/addReplace's own
+// map (which already discards the losing target the moment it sees a
+// second entry for the same key, via its own "last one wins" overwrite) —
+// recovering that discarded information by threading a parallel "was this
+// overwritten with a different value" flag through addReplace would
+// complicate the one piece of code every other check in this file already
+// depends on for its happy-path resolution, for a single-purpose skip this
+// self-contained re-scan gets just as correctly and far more safely.
+func goModHasConflictingReplaceDirective(data []byte) bool {
+	type target struct {
+		path    string
+		version string
+	}
+	seen := map[string]target{}
+	inBlock := false
+	blockVerb := ""
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		var verb, rest string
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+				continue
+			}
+			verb, rest = blockVerb, trimmed
+		} else {
+			i := 0
+			for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+				i++
+			}
+			verb = trimmed[:i]
+			rest = strings.TrimSpace(trimmed[i:])
+			if rest == "(" {
+				inBlock = true
+				blockVerb = verb
+				continue
+			}
+		}
+		if verb != "replace" {
+			continue
+		}
+		toks := replaceDirectiveTokens(rest)
+		if replaceArgInvalid(toks) {
+			// Malformed shape: goModHasInvalidReplaceDirective already
+			// Fatals this independently of any conflict, so this function
+			// doesn't need to (and, since toks' own shape is unreliable
+			// here, safely can't) reason about it further.
+			continue
+		}
+		arrow := 2
+		if toks[1] == "=>" {
+			arrow = 1
+		}
+		oldVersion := ""
+		if arrow == 2 {
+			oldVersion = toks[1]
+		}
+		key := toks[0] + "\x00" + oldVersion
+		newVersion := ""
+		if len(toks) == arrow+3 {
+			newVersion = toks[arrow+2]
+		}
+		t := target{path: toks[arrow+1], version: newVersion}
+		if prev, ok := seen[key]; ok && prev != t {
+			return true
+		}
+		seen[key] = t
+	}
+	return false
+}
+
+// goWorkHasConflictingReplaceDirective is goModHasConflictingReplaceDirective
+// applied to an active go.work file's own replace directives instead of the
+// go.mod being audited: go.work's replace grammar is identical to go.mod's
+// (see goWorkReplaces' doc comment), and real go applies this exact same
+// conflicting-replacements Fatal to a go.work file's own Replace list too —
+// live-verified (go1.26.8): a go.work containing the same conflicting pair
+// shown in goModHasConflictingReplaceDirective's doc comment, with `use`
+// naming the audited module directly, makes `go list -m all` run from
+// inside that module Fatal with the identical "conflicting replacements for
+// ...\n\t...\n\t..." error, before resolving a single one of its requires.
+func goWorkHasConflictingReplaceDirective(gowork string) bool {
+	if gowork == "" || gowork == "off" {
+		return false
+	}
+	data, err := os.ReadFile(gowork)
+	if err != nil {
+		return false
+	}
+	return goModHasConflictingReplaceDirective(data)
+}
+
 // parseTools extracts package import paths from `tool` directives in a
 // go.mod file's contents (Go 1.24+; see `go help tool`). A `tool` line
 // names a *package* path, not necessarily a module path — e.g. `tool
