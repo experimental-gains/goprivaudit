@@ -1,6 +1,31 @@
 package main
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
+
+// githubRepoPattern captures exactly the "github.com/owner/repo" prefix of a
+// module path — the VCS repo root cmd/go's own vcsPaths table resolves for
+// any github.com-hosted import path, discarding everything past it,
+// including a major-version suffix like "/v2" or a monorepo subdirectory
+// (confirmed against go1.24.4's vendored golang.org/x/mod/internal/vcs
+// source: the github.com entry's regexp is anchored to exactly two path
+// segments after the host). Scoped deliberately to github.com only, mirroring
+// goproxycheck's own githubRepoPattern/githubRepoRoot (run #476's twin fix,
+// ported here — see govcsAllowsGit's doc comment): it's the one host this
+// tool can state with certainty always resolves to a fixed two-segment root
+// without a live go-import discovery request, which this offline tool can't
+// make. Every other host's modules are matched against their own full
+// import path unchanged, the same conservative, unchanged-by-default scope
+// goproxycheck's port uses.
+var githubRepoPattern = regexp.MustCompile(`^github\.com/([^/]+)/([^/]+)`)
+
+// githubRepoRoot returns modulePath's "github.com/owner/repo" prefix, or ""
+// if modulePath isn't github.com-hosted.
+func githubRepoRoot(modulePath string) string {
+	return githubRepoPattern.FindString(modulePath)
+}
 
 // govcsRule is a single GOVCS entry: a pattern (a GOPRIVATE-style glob
 // prefix pattern, or the special literal "public"/"private") paired with
@@ -94,12 +119,41 @@ var defaultGovcsRules = []govcsRule{
 // on ITS OWN malformed-environment error, before resolving anything — a
 // different "cannot leak" skip this package doesn't attempt to
 // special-case (see parseGovcsRules).
+//
+// Matches patterns (both the GOPRIVATE-derived public/private classification
+// and any explicit, non-public/private GOVCS entry) against
+// githubRepoRoot(modulePath) when modulePath is github.com-hosted, not
+// modulePath itself: real cmd/go's checkGOVCS (internal/vcs/vcs.go) always
+// classifies and matches against the VCS-resolved repo root (see
+// githubRepoPattern's doc comment), so a GOPRIVATE/GOVCS pattern more
+// specific than that root — naming a "/v2"-suffixed or monorepo-nested
+// import path exactly, rather than just the bare owner/repo — can match
+// modulePath directly while never matching the truncated root real go
+// actually checks it against. Live-verified (2026-10-02, go1.24.4): with
+// GOVCS="github.com/googleapis/gax-go/v2:off" (naming the exact import path
+// of a real module that lives in an actual "v2" subdirectory of its repo)
+// and no GOPRIVATE coverage, `go mod download -x
+// github.com/googleapis/gax-go/v2@v2.12.0` performs a completely ordinary
+// git clone (root "github.com/googleapis/gax-go" doesn't match the
+// "/v2"-suffixed pattern) and goes on to query
+// `sum.golang.org/lookup/github.com/googleapis/gax-go/v2@v2.12.0` — a real
+// leak. Before this fix, govcsAllowsGit matched the ":off" rule against the
+// full modulePath directly, reported git as disallowed, and
+// filterGovcsDisallowed silently dropped this exact module from the SUMDB
+// LEAK audit — a false negative on a real, uncovered private-auth signal.
+// Scoped to github.com only, matching githubRepoPattern's own scope: every
+// other host keeps matching against modulePath unchanged, same as before
+// this fix.
 func govcsAllowsGit(modulePath, govcs, goprivate string) bool {
 	rules, ok := parseGovcsRules(govcs)
 	if !ok {
 		return true
 	}
-	private := matchesAnyPattern(modulePath, splitPatterns(goprivate))
+	matchPath := modulePath
+	if root := githubRepoRoot(modulePath); root != "" {
+		matchPath = root
+	}
+	private := matchesAnyPattern(matchPath, splitPatterns(goprivate))
 	for _, rule := range append(rules, defaultGovcsRules...) {
 		matched := false
 		switch rule.pattern {
@@ -108,7 +162,7 @@ func govcsAllowsGit(modulePath, govcs, goprivate string) bool {
 		case "private":
 			matched = private
 		default:
-			matched = matchesPrefixPattern(rule.pattern, modulePath)
+			matched = matchesPrefixPattern(rule.pattern, matchPath)
 		}
 		if !matched {
 			continue

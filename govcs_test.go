@@ -138,6 +138,42 @@ func TestGovcsAllowsGitMalformedFailsOpen(t *testing.T) {
 	}
 }
 
+// TestGovcsAllowsGitPatternPastGithubRepoRoot is the direct unit-level
+// regression test for the githubRepoRoot fix: an explicit GOVCS pattern
+// naming a github.com module's full import path (its real "/v2"
+// subdirectory included) must not be treated as matching, since real
+// cmd/go's checkGOVCS always classifies against the two-segment VCS repo
+// root, never the full path. See govcsAllowsGit's doc comment for the live
+// verification this mirrors.
+func TestGovcsAllowsGitPatternPastGithubRepoRoot(t *testing.T) {
+	if !govcsAllowsGit("github.com/googleapis/gax-go/v2", "github.com/googleapis/gax-go/v2:off", "") {
+		t.Error("expected a GOVCS pattern naming the full module path (past the real repo root) to NOT block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternAtGithubRepoRoot is the companion proving the
+// fix doesn't overreach: a GOVCS pattern naming exactly the module's real
+// VCS repo root (no "/v2" suffix) must still block it.
+func TestGovcsAllowsGitPatternAtGithubRepoRoot(t *testing.T) {
+	if govcsAllowsGit("github.com/googleapis/gax-go/v2", "github.com/googleapis/gax-go:off", "") {
+		t.Error("expected a GOVCS pattern naming the real repo root to block git")
+	}
+}
+
+// TestGovcsAllowsGitNonGithubHostUnaffected proves the githubRepoRoot
+// truncation is scoped to github.com only: a non-github.com module with an
+// extra path segment past its first two components still matches an
+// explicit pattern naming its own full path exactly, unchanged from before
+// this fix — this tool has no way to resolve an arbitrary host's real VCS
+// repo root offline, so it deliberately keeps matching those hosts'
+// patterns against the full import path, same as every other
+// non-public/private GOVCS pattern already does.
+func TestGovcsAllowsGitNonGithubHostUnaffected(t *testing.T) {
+	if govcsAllowsGit("example.com/owner/repo/v2", "example.com/owner/repo/v2:off", "") {
+		t.Error("expected a non-github.com GOVCS pattern matching the full path to still block git")
+	}
+}
+
 func TestFilterGovcsDisallowed(t *testing.T) {
 	modules := []string{"github.com/myorg/internal-tool", "example.com/other/mod"}
 
