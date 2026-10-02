@@ -883,6 +883,15 @@ func TestGoModHasInvalidReplaceDirective(t *testing.T) {
 		{"directory target carrying a version", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => ../local v1.0.0\n", true},
 		{"valid replace block", "module example.com/foo\n\ngo 1.24\n\nreplace (\n\texample.com/bar => ../local\n\texample.com/baz => example.com/fork v1.0.0\n)\n", false},
 		{"replace block entry with a bare module target", "module example.com/foo\n\ngo 1.24\n\nreplace (\n\texample.com/bar => ../local\n\texample.com/baz => example.com/fork\n)\n", true},
+		// Single-line replace with "(" glued directly onto the verb and ")"
+		// glued onto the last token — NOT real block form (the rest of the
+		// directive sits on the same line, not on separate lines after a
+		// lone "("), so real go's lexer still splits the glued "(" and ")"
+		// off as their own one-character tokens, inflating this to 6 tokens
+		// total. Live-verified (go1.24.4, GOPROXY=off): Fatals with "usage:
+		// replace module/path [v1.2.3] => other/module v1.4 ... or ...
+		// ../local/directory" — see replaceDirectiveTokens' doc comment.
+		{"invalid: glued parens around an otherwise-valid single-line replace", "module example.com/foo\n\ngo 1.24\n\nreplace(example.com/bar => example.com/fork v1.0.0)\n", true},
 	}
 	for _, c := range cases {
 		if got := goModHasInvalidReplaceDirective([]byte(c.src)); got != c.want {

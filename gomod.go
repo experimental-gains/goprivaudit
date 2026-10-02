@@ -1436,29 +1436,70 @@ func goModHasInvalidRetractDirective(data []byte) bool {
 
 // replaceDirectiveTokens splits a replace directive's own argument text (or
 // a block-entry line's text) into golang.org/x/mod/modfile's real token
-// stream for this grammar. Unlike countDirectiveArgs's "(" and ")" tokens
-// and retractDirectiveTokens' "[", "]", "," tokens — always their own
-// token even glued directly onto a neighboring word with no whitespace at
-// all — a replace directive's "=>" arrow is NOT special punctuation to the
-// real lexer: confirmed reading golang.org/x/mod/modfile/read.go's isIdent
-// directly, only ' ', '(', ')', '[', ']', '{', '}', ',' are excluded from
-// the identifier character class, so '=' and '>' are ordinary identifier
-// runes exactly like any path character. An arrow glued directly onto an
-// adjacent word with no separating whitespace (e.g. "foo=>bar") is lexed
-// as ONE token, never recognized as the arrow at all. So this tokenizer,
-// unlike the paren/bracket ones, is plain whitespace-and-quote-aware field
-// splitting — the same firstFieldAndRest every other token in this
-// grammar (require/tool/replace paths) already goes through — with no
-// special-casing for "=>" at all.
+// stream for this grammar: like countDirectiveArgs's "(" and ")" tokens and
+// retractDirectiveTokens' "[", "]", "," tokens, "(" and ")" are ALWAYS their
+// own single-character token to the real lexer, even glued directly onto a
+// neighboring word with no whitespace at all (confirmed reading
+// golang.org/x/mod/modfile/read.go's isIdent directly: only ' ', '(', ')',
+// '[', ']', '{', '}', ',' are excluded from the identifier character class,
+// the exact same set countDirectiveArgs's own doc comment already cites).
+// This matters for a replace directive specifically because a single-line
+// (not real block-form) directive can still carry a stray "(" or ")" glued
+// onto an adjacent token — e.g. "replace(example.com/foo => example.com/bar
+// v1.0.0)", where "replace(" isn't recognized as a block opener at all
+// (nothing on this line is JUST "(" with the rest on later lines) — and real
+// go's lexer still splits that leading "(" and trailing ")" off as their own
+// tokens, inflating the token count exactly the way countDirectiveArgs
+// already documents for an analogous "require(...)" shape. Live-verified
+// (go1.24.4, GOPROXY=off): `replace(example.com/foo => example.com/bar
+// v1.0.0)` on one line Fatals with "usage: replace module/path [v1.2.3] =>
+// other/module v1.4 ... or ... ../local/directory" — the same arg-count
+// mismatch error a doubled arrow or missing token produces — because real go
+// sees 6 tokens ("(", "example.com/foo", "=>", "example.com/bar", "v1.0.0",
+// ")"), not the 4 a plain whitespace split would suggest. Before this fix,
+// this tokenizer's plain firstFieldAndRest loop glued the "(" onto
+// "example.com/foo" and the ")" onto "v1.0.0" as ordinary field content,
+// producing exactly 4 tokens that replaceArgInvalid's own arrow-position
+// check then accepted as well-formed (old path "(example.com/foo", arrow at
+// position 1, new path+version "example.com/bar"/"v1.0.0)") — so
+// goModHasInvalidReplaceDirective reported false (looks fine) for a go.mod
+// real go refuses to parse at all, letting run()'s SUMDB-leak audit run
+// normally and report a real finding for an unrelated require line sitting
+// elsewhere in the same file, even though real go never gets far enough to
+// query anything for it either. A replace directive's "=>" arrow itself is
+// still NOT special punctuation this way — '=' and '>' are ordinary
+// identifier runes, so an arrow glued onto an adjacent word with no
+// separating whitespace at all (e.g. "foo=>bar") still lexes as one token,
+// unaffected by this fix — only "(" and ")" get their own always-separate
+// handling here, mirroring countDirectiveArgs/retractDirectiveTokens.
 func replaceDirectiveTokens(s string) []string {
 	var toks []string
 	for {
-		field, rest := firstFieldAndRest(s)
-		if field == "" {
+		s = strings.TrimSpace(s)
+		if s == "" {
 			return toks
 		}
-		toks = append(toks, field)
-		s = rest
+		if s[0] == '(' || s[0] == ')' {
+			toks = append(toks, s[:1])
+			s = s[1:]
+			continue
+		}
+		if s[0] == '"' || s[0] == '`' {
+			if tok, consumed, ok := leadingQuotedString(s); ok {
+				toks = append(toks, tok)
+				s = s[consumed:]
+				continue
+			}
+		}
+		i := 0
+		for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '(' && s[i] != ')' {
+			i++
+		}
+		if i == 0 {
+			i = 1
+		}
+		toks = append(toks, s[:i])
+		s = s[i:]
 	}
 }
 
