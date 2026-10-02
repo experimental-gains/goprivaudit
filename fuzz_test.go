@@ -110,39 +110,39 @@ func FuzzOverlyBroadPatternConsistency(f *testing.F) {
 // FuzzIsDirectoryPath diffs isDirectoryPath (gomod.go) against
 // golang.org/x/mod/modfile.IsDirectoryPath, the real go.mod parser's own
 // function for the exact same question — isDirectoryPath's doc comment
-// already claims to mirror it (bare "."/".." plus the "./"/"../"/absolute
-// forms), but that claim had never actually been checked against the real
-// thing, only against a handful of hand-picked cases in
-// TestIsDirectoryPath. Unlike gitconfig.go's real-git-subprocess oracle,
-// this one's a direct importable function — x/mod is already a dependency
-// (see pattern.go's fuzz targets above) — so no subprocess or corpus
-// generation is needed, just the diff.
+// already claims to mirror it, but that claim had never actually been
+// checked against the real thing, only against a handful of hand-picked
+// cases in TestIsDirectoryPath. Unlike gitconfig.go's real-git-subprocess
+// oracle, this one's a direct importable function — x/mod is already a
+// dependency (see pattern.go's fuzz targets above) — so no subprocess or
+// corpus generation is needed, just the diff.
+//
+// No exclusions: an earlier version of this fuzz target carved out every
+// drive-letter-prefixed input ("C:..." generally, not just backslash
+// forms), reasoning that modfile.Parse rejects any Windows-style new-side
+// replace path outright on a non-Windows host so the exact value
+// isDirectoryPath computes for one could never matter. That reasoning only
+// holds for inputs containing a backslash (parseReplace's own separate
+// "appears to be Windows path" check only fires on one) — a drive-letter
+// path using forward slashes, e.g. "C:/local/fork", contains no backslash,
+// so that separate rejection never fires and real go accepts it as an
+// ordinary directory-path replace with no version needed. The blanket
+// drive-letter exclusion hid exactly that gap from this fuzzer; now that
+// isDirectoryPath ports x/mod's IsDirectoryPath in full (see its own doc
+// comment for the live, cross-checked-against-modfile.Parse divergence
+// this closed), every input — including every Windows-style shape — is
+// compared directly against the real oracle with no carve-out at all.
 func FuzzIsDirectoryPath(f *testing.F) {
 	seeds := []string{
 		".", "..", "./foo", "../foo", "../../foo", "/abs/path",
 		"...", "..foo", ".foo", "foo/..", "foo/.", "github.com/foo/bar",
 		"", "/", "//", "./", "../", "...//foo", "C:\\foo", `.\foo`,
+		"C:/local/fork", "C:foo", "c:", ":", "1:foo", `\foo`, `..\foo`,
 	}
 	for _, s := range seeds {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, path string) {
-		// Windows-style forms (a "C:" drive prefix, a backslash right
-		// after a leading "."/".." component, or a bare leading
-		// backslash) are excluded, matching isDirectoryPath's own doc
-		// comment (".\", "..\", bare "\", a drive letter"): confirmed
-		// live above, for all three shapes, that modfile.Parse itself
-		// rejects any go.mod replace line whose target takes this form
-		// ("replacement directory appears to be Windows path (on a
-		// non-windows system)"), on this tool's own Linux host, before
-		// isDirectoryPath ever runs on it — this tool's own callers can
-		// never observe that input.
-		if len(path) >= 2 && path[1] == ':' {
-			return // drive-letter form, e.g. "C:\foo"
-		}
-		if strings.HasPrefix(path, "\\") || strings.HasPrefix(path, ".\\") || strings.HasPrefix(path, "..\\") {
-			return
-		}
 		got := isDirectoryPath(path)
 		want := modfile.IsDirectoryPath(path)
 		if got != want {

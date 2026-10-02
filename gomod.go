@@ -2159,24 +2159,52 @@ func addReplace(out map[string][]replaceEntry, entry string) {
 	out[oldPath] = append(entries, e)
 }
 
-// isDirectoryPath mirrors golang.org/x/mod/modfile.IsDirectoryPath: a
-// replacement without a version must be a directory path, and the real
-// go tool's own grammar (verified live: `replace foo => ..` builds and
-// `go list -m all` resolves it straight off disk, no network call) treats
-// the bare "." and ".." forms as directory paths too, not just "./" and
-// "../" — a plain HasPrefix("./"/"../")-or-IsAbs check misses exactly
-// those two bare forms, misclassifying a purely local replace as a
-// network-fetched module path (and, via resolveEffectiveModules, sending
-// the literal string "." or ".." to be checked against GOPRIVATE/
-// GONOSUMDB in its place) even though `go` never queries anything for it.
-// Windows-style forms (".\", "..\", bare "\", a drive letter) are in the
-// real x/mod check too, but a go.mod containing one fails to parse at all
-// on a non-Windows host (modfile.Parse rejects it explicitly), so this
-// tool — which only ever runs on Linux — doesn't need to recognize them.
+// isDirectoryPath mirrors golang.org/x/mod/modfile.IsDirectoryPath
+// (rule.go) byte-for-byte, including its Windows-style forms, rather than
+// the narrower "bare '.'/'..' plus './'/'../'/absolute" subset an earlier
+// version of this function implemented. That earlier version's own doc
+// comment argued the Windows forms (".\", "..\", bare "\", a drive letter)
+// were safe to skip because "a go.mod containing one fails to parse at all
+// on a non-Windows host" — true for the backslash-containing forms (real
+// go's own parseReplace, immediately after its own IsDirectoryPath check
+// passes, separately Fatals with "replacement directory appears to be
+// Windows path (on a non-windows system)" the instant filepath.Separator
+// is '/' and the new-side path contains a backslash — so whichever way
+// isDirectoryPath itself answers for ".\foo"/"..\foo"/"\foo", the overall
+// go.mod still fails to parse either way) — but NOT for a drive-letter path
+// using forward slashes, e.g. "C:/local/fork": that shape contains no
+// backslash at all, so the separate Windows-path Fatal never fires, and
+// real go's own IsDirectoryPath recognizes it as a directory path with no
+// version required. Verified directly against golang.org/x/mod/modfile.Parse
+// (the exact parser cmd/go itself uses): `replace example.com/foo =>
+// C:/local/fork` (no version) parses with zero error. Separately verified
+// live end-to-end with real go1.24.4: `go list -m all`/`go build` against
+// that exact replace both Fatal with "reading C:/local/fork/go.mod: ... no
+// such file or directory" / "replacement directory C:/local/fork does not
+// exist" — a module-RESOLUTION-time error (the directory doesn't exist on
+// this machine), not a go.mod PARSE error; GOPROXY=off the whole time,
+// confirming no network/proxy/sumdb query was ever attempted for it either
+// way. So the earlier version's blanket "Windows forms can't reach
+// isDirectoryPath" claim was wrong for exactly this one shape: pre-fix,
+// replaceArgInvalid(for a go.mod containing this exact line, no version)
+// computed !isDirectoryPath("C:/local/fork") = !false = true — wrongly
+// concluding the go.mod doesn't even parse — which made
+// goModHasInvalidReplaceDirective report true and skip run()'s ENTIRE
+// SUMDB-leak audit for the whole file, silently suppressing a real,
+// otherwise-uncovered private-auth-signaled require sitting anywhere else
+// in that same go.mod — confirmed end-to-end against the actual
+// goprivaudit binary: a go.mod with this replace line plus an unrelated,
+// git-insteadOf-signaled, GOPRIVATE-uncovered require reported "no issues
+// found" pre-fix, while the identical go.mod minus only that one replace
+// line correctly reported SUMDB LEAK. A false negative suppressing a real
+// leak, not just a missed check — the same "active wrong claim" severity
+// class as every false-positive fix in this family, just reached by
+// wrongly skipping the audit outright instead of wrongly running it.
 func isDirectoryPath(path string) bool {
-	return path == "." || path == ".." ||
-		strings.HasPrefix(path, "./") || strings.HasPrefix(path, "../") ||
-		filepath.IsAbs(path)
+	return path == "." || strings.HasPrefix(path, "./") || strings.HasPrefix(path, `.\`) ||
+		path == ".." || strings.HasPrefix(path, "../") || strings.HasPrefix(path, `..\`) ||
+		strings.HasPrefix(path, "/") || strings.HasPrefix(path, `\`) ||
+		len(path) >= 2 && ('A' <= path[0] && path[0] <= 'Z' || 'a' <= path[0] && path[0] <= 'z') && path[1] == ':'
 }
 
 // filterExcludedRequires drops any require entry whose exact (path,

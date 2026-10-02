@@ -2115,6 +2115,71 @@ use ./app
 	}
 }
 
+// TestRunWindowsDriveLetterReplaceStillLeaks is the direct regression test
+// for a real-world-testing find in the same false-negative family as
+// TestRunGodebugDirectiveGoWorkStillLeaks: a `replace` directive whose
+// new-side target is a Windows drive-letter directory path written with
+// forward slashes (e.g. "C:/local/fork", no version) was, before this fix,
+// misclassified by isDirectoryPath as NOT a directory path at all — it only
+// recognized the bare "."/".."  forms, "./"/"../"-prefixed forms, and
+// absolute Unix paths, missing golang.org/x/mod/modfile.IsDirectoryPath's
+// own drive-letter clause entirely. That made replaceArgInvalid wrongly
+// conclude the line has neither a version nor a directory-path target
+// (real go's rule: a replace with no new-side version MUST be a directory
+// path), so goModHasInvalidReplaceDirective reported true and run()
+// silently skipped the whole SUMDB-leak audit — suppressing a real finding
+// for an entirely unrelated require elsewhere in the same go.mod.
+//
+// Verified directly against golang.org/x/mod/modfile.Parse (the exact
+// parser cmd/go itself uses): `replace example.com/other => C:/local/fork`
+// parses with zero error. Separately verified live end-to-end with real
+// go1.24.4, GOPROXY=off: `go list -m all`/`go build` against that exact
+// replace both Fatal trying to READ the (nonexistent, since it's a Windows
+// path on a Linux host) local directory — "reading C:/local/fork/go.mod:
+// ... no such file or directory" / "replacement directory C:/local/fork
+// does not exist" — a module-resolution-time error, not a go.mod
+// parse-time one, and never touching the network either way. So the real
+// go.mod here parses and resolves fine enough to still reach (and fail
+// locally on) example.com/other's own replace target, while
+// example.com/private's completely unrelated, otherwise-uncovered
+// private-auth-signaled require should still be flagged — pre-fix, it
+// wasn't, reported "no issues found" instead.
+func TestRunWindowsDriveLetterReplaceStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require (
+	example.com/private v1.0.0
+	example.com/other v0.0.0
+)
+
+replace example.com/other => C:/local/fork
+`)
+	writeFile(t, dir, ".git/config", `[url "git@example.com:"]
+	insteadOf = https://example.com/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: example.com/private") {
+		t.Errorf("stdout should still report example.com/private's real leak when an unrelated replace directive's new-side target is a Windows drive-letter directory path (real go parses and resolves this fine, never Fatals parsing go.mod itself), got: %s", stdout)
+	}
+	if strings.Contains(stdout, "example.com/other") {
+		t.Errorf("stdout should NOT flag example.com/other: its replace target is a genuine local-directory replace real go never queries a checksum database for, got: %s", stdout)
+	}
+}
+
 // TestRunInvalidGodebugDirectiveGoWorkNoLeak is
 // TestRunInvalidReplaceDirectiveGoWorkNoLeak's sibling for a malformed
 // `godebug` directive living in the ACTIVE go.work file instead of the

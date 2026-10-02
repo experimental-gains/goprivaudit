@@ -805,6 +805,55 @@ func TestGoModHasInvalidRetractDirective(t *testing.T) {
 // checked here — live-verified that shape instead sends a real go.mod parse
 // down a later, network-dependent path ("module lookup disabled by
 // GOPROXY=off"), not an immediate offline Fatal, so it must NOT be flagged.
+// TestIsDirectoryPath covers isDirectoryPath against the exact shapes its
+// doc comment discusses: the earlier, narrower implementation agreed with
+// real go on every one of these except the Windows drive-letter-with-
+// forward-slashes case, which it wrongly classified as NOT a directory
+// path (see FuzzIsDirectoryPath and TestGoModHasInvalidReplaceDirective's
+// "Windows drive-letter directory target" case for the end-to-end
+// consequence this had on goModHasInvalidReplaceDirective).
+func TestIsDirectoryPath(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{".", true},
+		{"..", true},
+		{"./foo", true},
+		{"../foo", true},
+		{"/abs/path", true},
+		{"example.com/foo", false},
+		{"..foo", false},
+		{".foo", false},
+		{"", false},
+		// Windows forms: a drive letter needs no backslash to count as a
+		// directory path in real go (golang.org/x/mod/modfile.IsDirectoryPath),
+		// and forward slashes don't trigger parseReplace's separate
+		// "appears to be Windows path" rejection the way a backslash does —
+		// this is the shape the pre-fix isDirectoryPath got wrong.
+		{"C:/local/fork", true},
+		{"C:foo", true},
+		{"c:", true},
+		// Backslash-prefixed forms are directory paths too (per real go),
+		// even though any go.mod actually containing one fails to parse on
+		// this tool's Linux-only host for an unrelated reason (parseReplace's
+		// own Windows-path Fatal) — isDirectoryPath still needs to answer
+		// true for these to match the real oracle byte-for-byte.
+		{`.\foo`, true},
+		{`..\foo`, true},
+		{`\foo`, true},
+		// Not a drive letter: a bare colon with no preceding ASCII letter,
+		// or a digit instead of a letter, doesn't qualify.
+		{":", false},
+		{"1:foo", false},
+	}
+	for _, c := range cases {
+		if got := isDirectoryPath(c.path); got != c.want {
+			t.Errorf("isDirectoryPath(%q) = %v, want %v", c.path, got, c.want)
+		}
+	}
+}
+
 func TestGoModHasInvalidReplaceDirective(t *testing.T) {
 	cases := []struct {
 		name string
@@ -814,6 +863,17 @@ func TestGoModHasInvalidReplaceDirective(t *testing.T) {
 		{"no replace directive at all", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
 		{"valid: no old version, directory target", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => ../local\n", false},
 		{"valid: old version, directory target", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar v1.0.0 => ../local\n", false},
+		// Windows drive-letter directory target using forward slashes, no
+		// version, no backslash anywhere — see isDirectoryPath's doc comment
+		// for the live cross-check against golang.org/x/mod/modfile.Parse
+		// (zero error) and real go1.24.4 (Fatals only once it tries to read
+		// the nonexistent directory off disk, never while parsing go.mod
+		// itself, and never touching the network). Pre-fix, isDirectoryPath
+		// didn't recognize this shape at all, so replaceArgInvalid wrongly
+		// concluded the line has neither a version nor a directory-path
+		// target and this function reported true — silently skipping the
+		// whole SUMDB-leak audit for a go.mod real go parses just fine.
+		{"valid: no old version, Windows drive-letter directory target (forward slashes)", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => C:/local/fork\n", false},
 		{"valid: module target with version", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar => example.com/fork v1.0.0\n", false},
 		{"invalid: arrow glued to path with no space, lexes as one token", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar=>../local\n", true},
 		{"bare replace, no arrow at all", "module example.com/foo\n\ngo 1.24\n\nreplace example.com/bar\n", true},
