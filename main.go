@@ -177,6 +177,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	sumdbOverride := fs.String("sumdb", "", "override GOSUMDB instead of reading it from `go env`")
 	goflagsOverride := fs.String("goflags", "", "override GOFLAGS instead of reading it from `go env`")
 	proxyOverride := fs.String("proxy", "", "override GOPROXY instead of reading it from `go env`")
+	govcsOverride := fs.String("govcs", "", "override GOVCS instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -187,7 +188,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet := false, false, false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet := false, false, false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -202,6 +203,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			goflagsSet = true
 		case "proxy":
 			proxySet = true
+		case "govcs":
+			govcsSet = true
 		}
 	})
 
@@ -363,6 +366,11 @@ func run(args []string, stdout, stderr *os.File) int {
 		goproxy = goEnv(moduleDir, "GOPROXY")
 	}
 	_ = goproxy
+
+	govcs := *govcsOverride
+	if !govcsSet {
+		govcs = goEnv(moduleDir, "GOVCS")
+	}
 
 	var r Report
 	switch {
@@ -538,15 +546,24 @@ func run(args []string, stdout, stderr *os.File) int {
 		// reads everything off the committed vendor/ directory instead of
 		// the network, rather than because sumdb checking was turned off.
 	default:
-		// filterGoSumCovered drops any module whose exact required version
-		// is already fully pinned in moduleDir's own go.sum: unlike every
-		// skip case above (which is all-or-nothing for the whole audit),
-		// this is a per-module refinement — go.sum coverage is itself a
-		// real, checked-in "cannot leak" source, distinct from the
-		// unreliable, machine-local-state guesses this package's own doc
-		// comment already rules out for GOPROXY=off. See its own doc
-		// comment for why it's safe to apply unconditionally here.
-		r = audit(filterGoSumCovered(modules, requires, replaces, moduleDir), prefixes, splitPatterns(gonosumdb))
+		// filterGovcsDisallowed drops any module GOVCS disallows fetching
+		// via a direct (non-proxy) git invocation: real go Fatals with
+		// "GOVCS disallows using git for ..." the instant it needs one,
+		// before ever computing a hash to send to the checksum database —
+		// see its own doc comment for why this is the same "cannot leak"
+		// shape as suppressProtocolBlockedInsteadOf's GIT_ALLOW_PROTOCOL
+		// check, just reached via GOVCS's independent, go-level gate on
+		// which VCS commands may run at all. filterGoSumCovered drops any
+		// module whose exact required version is already fully pinned in
+		// moduleDir's own go.sum: unlike every skip case above (which is
+		// all-or-nothing for the whole audit), both of these are
+		// per-module refinements — go.sum coverage and a GOVCS block are
+		// each a real, locally-checkable "cannot leak" source, distinct
+		// from the unreliable, machine-local-state guesses this package's
+		// own doc comment already rules out for GOPROXY=off. See each
+		// function's own doc comment for why it's safe to apply
+		// unconditionally here.
+		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs), requires, replaces, moduleDir), prefixes, splitPatterns(gonosumdb))
 	}
 	printReport(stdout, r, sumdbName(gosumdb))
 	if !r.Clean() {

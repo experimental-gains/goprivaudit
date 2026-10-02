@@ -67,6 +67,19 @@ vendoring is a separate, opt-in mechanism (`go work vendor`, one `vendor/` at
 the workspace root, always paired with an explicit `-mod=vendor`), which
 `goprivaudit` still honors as an explicit override either way.
 
+A module is also excluded from the SUMDB LEAK check specifically (not the
+whole audit) when `GOVCS` disallows a direct `git` fetch for it. Per `go
+help vcs`, a module proxy fetch is "always permitted" regardless of GOVCS —
+only a *direct* VCS fetch is restricted — so a module GOVCS blocks `git`
+for can never reach the one fetch path an insteadOf rewrite/credential
+helper/extraHeader/netrc entry authenticates in the first place. This is a
+real, documented hardening pattern (`go help vcs` itself recommends
+`GOVCS=*:off`-style restrictions to force every fetch through a trusted
+proxy instead of running arbitrary VCS commands against untrusted
+servers), not a contrived one: a leftover insteadOf rewrite from before
+that hardening was adopted no longer indicates a live leak once GOVCS
+blocks the fetch it was written for.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
@@ -136,6 +149,7 @@ Flags, mainly for testing/CI overrides:
 -sumdb string    override GOSUMDB instead of reading it from `go env`
 -goflags string  override GOFLAGS instead of reading it from `go env`
 -proxy string    override GOPROXY instead of reading it from `go env`
+-govcs string    override GOVCS instead of reading it from `go env`
 ```
 
 ## Use with pre-commit

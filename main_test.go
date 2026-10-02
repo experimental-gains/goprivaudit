@@ -180,6 +180,78 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunGovcsBlockingGitSuppressesLeak covers a real, documented hardening
+// pattern (`go help vcs`): an org sets GOVCS to disallow direct `git`
+// access for a host (here narrowly, "github.com:off" — the same effect a
+// blanket "*:off" has, scoped to prove pattern matching, not just the
+// wildcard case) specifically so every fetch is forced through a trusted
+// proxy instead. Verified live (go1.24.4): `GOVCS='*:off' go mod download`
+// against a module authenticated exactly like TestRunFindsLeakViaCredentialHelper
+// Fatals immediately with "GOVCS disallows using git for public ..." —
+// before `go` ever attempts the credential-helper-authenticated fetch this
+// tool's SUMDB LEAK finding assumes happens, so no hash is ever computed to
+// send to the checksum database. Before this fix, goprivaudit ignored
+// GOVCS entirely and still reported a leak for a fetch real go refuses to
+// even attempt.
+func TestRunGovcsBlockingGitSuppressesLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com/myorg"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "github.com:off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should report no leak when GOVCS disallows git for this host: %s", stdout)
+	}
+}
+
+// TestRunGovcsAllowingGitStillLeaks is
+// TestRunGovcsBlockingGitSuppressesLeak's companion, proving the fix
+// doesn't overreach: a GOVCS entry that explicitly lists "git" as allowed
+// for the module's own host (rather than merely not mentioning it) must
+// not be mistaken for a block — the exact same scenario still leaks.
+func TestRunGovcsAllowingGitStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://github.com/myorg"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "github.com:git",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
 // TestRunFindsLeakViaRelativeGitdirIncludeIf covers a real, commonly
 // recommended dotfiles pattern this tool missed before expandGitdirPattern
 // learned to resolve a "./"-prefixed gitdir pattern relative to the
