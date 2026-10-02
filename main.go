@@ -178,6 +178,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	goflagsOverride := fs.String("goflags", "", "override GOFLAGS instead of reading it from `go env`")
 	proxyOverride := fs.String("proxy", "", "override GOPROXY instead of reading it from `go env`")
 	govcsOverride := fs.String("govcs", "", "override GOVCS instead of reading it from `go env`")
+	goversionOverride := fs.String("goversion", "", "override GOVERSION instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -188,7 +189,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet := false, false, false, false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet, goversionSet := false, false, false, false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -205,6 +206,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			proxySet = true
 		case "govcs":
 			govcsSet = true
+		case "goversion":
+			goversionSet = true
 		}
 	})
 
@@ -372,6 +375,18 @@ func run(args []string, stdout, stderr *os.File) int {
 		govcs = goEnv(moduleDir, "GOVCS")
 	}
 
+	// localGoVersion is the toolchain that would actually run against
+	// moduleDir, including any GOTOOLCHAIN switch moduleDir's own
+	// go.mod/go.work already triggers — needed only by
+	// goModHasIgnoreDirectiveTooOld (see its own doc comment for why an
+	// `ignore` directive's validity, unlike every other go.mod verb this
+	// package checks, depends on which toolchain binary is actually
+	// selected, not just on the file's own contents).
+	localGoVersion := *goversionOverride
+	if !goversionSet {
+		localGoVersion = goEnv(moduleDir, "GOVERSION")
+	}
+
 	var r Report
 	switch {
 	case goWorkHasUnparseableDirective(gowork):
@@ -447,6 +462,17 @@ func run(args []string, stdout, stderr *os.File) int {
 		// just above, one level more general: that check only ever catches a
 		// malformed *argument* to a recognized "go" line, not an entirely
 		// unrecognized verb anywhere else in the file.
+	case goModHasIgnoreDirectiveTooOld(data, localGoVersion):
+		// A go.mod containing a top-level `ignore` directive that the
+		// toolchain actually selected to run it (see
+		// goModHasIgnoreDirectiveTooOld) doesn't recognize at all — `ignore`
+		// is IN goModValidTopLevelVerbs (correct for a modern-enough
+		// toolchain), so goModHasUnknownDirective alone doesn't catch this
+		// — makes every module-aware go subcommand Fatal with "unknown
+		// directive: ignore" parsing go.mod itself, before it resolves a
+		// single module. Same "cannot leak" reasoning as
+		// goModHasUnknownDirective just above, for a verb whose own
+		// recognition is toolchain-version-gated rather than universal.
 	case goModHasInvalidDirectiveArgCount(data):
 		// A go.mod containing a require/exclude/tool directive (single-line
 		// or block-entry form) with the wrong number of arguments — see

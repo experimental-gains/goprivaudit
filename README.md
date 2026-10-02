@@ -80,6 +80,17 @@ servers), not a contrived one: a leftover insteadOf rewrite from before
 that hardening was adopted no longer indicates a live leak once GOVCS
 blocks the fetch it was written for.
 
+The whole audit is also skipped when a go.mod's `ignore` directive is
+newer than the toolchain that would actually process it. `ignore` (`go
+help modules`) was only added to `golang.org/x/mod/modfile`'s grammar
+starting go1.25 — a go.mod carrying one, whose own `go` directive stays
+below 1.25 and whose selected toolchain is also below 1.25 (the common
+case when a contributor on a newer local Go adds `ignore` via `go mod
+edit -ignore=...`, which does not bump the `go` line), makes every
+module-aware `go` subcommand Fatal with "unknown directive: ignore"
+before resolving anything. Verified live: go1.24.4 Fatals on exactly
+this shape while go1.25.14/go1.26.0 both parse it fine.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
@@ -150,6 +161,7 @@ Flags, mainly for testing/CI overrides:
 -goflags string  override GOFLAGS instead of reading it from `go env`
 -proxy string    override GOPROXY instead of reading it from `go env`
 -govcs string    override GOVCS instead of reading it from `go env`
+-goversion string  override GOVERSION instead of reading it from `go env`
 ```
 
 ## Use with pre-commit

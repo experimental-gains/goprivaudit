@@ -497,6 +497,60 @@ func TestGoModHasUnknownDirective(t *testing.T) {
 	}
 }
 
+// TestGoModHasIgnoreDirective covers goModHasIgnoreDirective's own,
+// narrower presence-only scan: just whether an `ignore` directive appears
+// at the top level at all, single-line or block form, the same
+// block-tracking conventions goModHasUnknownDirective's own test above
+// already exercises for the general case.
+func TestGoModHasIgnoreDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no ignore directive", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"single-line ignore", "module example.com/foo\n\ngo 1.24\n\nignore ./testdata\n", true},
+		{"no-space block-open form", "module example.com/foo\n\ngo 1.24\n\nignore(\n\t./testdata\n)\n", true},
+		{"block form", "module example.com/foo\n\ngo 1.24\n\nignore (\n\t./testdata\n\t./fixtures\n)\n", true},
+		{"ignore-looking line inside an unrelated block isn't a top-level verb", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\tignore v1.0.0\n)\n", false},
+		{"ignore after a valid block closes", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0\n)\n\nignore ./testdata\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasIgnoreDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasIgnoreDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoModHasIgnoreDirectiveTooOld is the direct unit test for
+// goModHasIgnoreDirectiveTooOld (see its own doc comment for the
+// live-verified go1.24.4-vs-go1.25.14/go1.26.0 divergence this models):
+// `ignore` only Fatals as an unknown directive when BOTH the file's own
+// `go` line AND the locally-selected toolchain are below the version
+// golang.org/x/mod/modfile first learned the verb (1.25).
+func TestGoModHasIgnoreDirectiveTooOld(t *testing.T) {
+	const withIgnore124 = "module example.com/foo\n\ngo 1.21\n\nignore ./testdata\n"
+	cases := []struct {
+		name       string
+		src        string
+		localGoVer string
+		want       bool
+	}{
+		{"no ignore directive at all, old local toolchain", "module example.com/foo\n\ngo 1.21\n", "go1.24.4", false},
+		{"ignore present, go directive below 1.25, local toolchain below 1.25", withIgnore124, "go1.24.4", true},
+		{"ignore present, go directive below 1.25, local toolchain at 1.25", withIgnore124, "go1.25.0", false},
+		{"ignore present, go directive below 1.25, local toolchain above 1.25", withIgnore124, "go1.26.8", false},
+		{"ignore present, go directive already at 1.25, old local toolchain", "module example.com/foo\n\ngo 1.25.0\n\nignore ./testdata\n", "go1.24.4", false},
+		{"ignore present, no go directive at all, old local toolchain", "module example.com/foo\n\nignore ./testdata\n", "go1.24.4", true},
+		{"ignore present, old go directive, unresolvable local toolchain fails open", withIgnore124, "", false},
+	}
+	for _, c := range cases {
+		if got := goModHasIgnoreDirectiveTooOld([]byte(c.src), c.localGoVer); got != c.want {
+			t.Errorf("%s: goModHasIgnoreDirectiveTooOld(%q, %q) = %v, want %v", c.name, c.src, c.localGoVer, got, c.want)
+		}
+	}
+}
+
 // TestGoWorkHasUnknownDirective covers goWorkHasUnknownDirective's own,
 // narrower valid-verb set (go, toolchain, use, replace) — distinct from
 // goModHasUnknownDirective's go.mod set, confirmed live: a go.work

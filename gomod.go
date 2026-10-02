@@ -516,6 +516,114 @@ func goModHasUnknownDirective(data []byte) bool {
 	return hasUnknownTopLevelDirective(data, goModValidTopLevelVerbs)
 }
 
+// goModHasIgnoreDirective reports whether data's go.mod contains a
+// top-level `ignore` directive at all (single-line "ignore path" form or
+// the parenthesized block form) — just presence, the same scan
+// hasUnknownTopLevelDirective already drives for the general
+// unknown-verb case, specialized to stop and report true the instant
+// "ignore" itself is the verb, rather than checking it against a validity
+// set. Used only by goModHasIgnoreDirectiveTooOld, which needs this one
+// verb's presence in isolation, not a general-purpose unknown-verb scan.
+func goModHasIgnoreDirective(data []byte) bool {
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		if verb == "ignore" {
+			return true
+		}
+		if strings.TrimSpace(trimmed[i:]) == "(" {
+			inBlock = true
+		}
+	}
+	return false
+}
+
+// goModHasIgnoreDirectiveTooOld reports whether data's go.mod contains a
+// top-level `ignore` directive (see goModHasIgnoreDirective) that the go
+// toolchain actually processing this file cannot recognize at all —
+// making every module-aware go subcommand Fatal with "errors parsing
+// go.mod: go.mod:N: unknown directive: ignore" before resolving a single
+// module. The same "cannot leak" shape goModHasUnknownDirective already
+// covers for every verb outside goModValidTopLevelVerbs — except `ignore`
+// IS (correctly, for a modern-enough toolchain) in that set, so
+// goModHasUnknownDirective alone can't catch this.
+//
+// `ignore` is a real go.mod directive, but a relatively new one: confirmed
+// absent from golang.org/x/mod/modfile as vendored into go1.24.4's own
+// cmd/go (no "ignore" case anywhere in its verb switch — only
+// module/go/toolchain/require/exclude/replace/retract/tool/godebug) and
+// present starting go1.25.14/go1.26.0 (read directly from each
+// toolchain's own vendored modfile/rule.go). Whether a given go.mod's
+// `ignore` line actually parses depends on which toolchain binary ends up
+// running it, governed by GOTOOLCHAIN (default "auto"): the effective
+// version is max(the locally installed/selected go version, whatever
+// this go.mod's own `go`/`toolchain` directive requires) — go never
+// downgrades, and only attempts to download a newer toolchain when the
+// file's own stated requirement exceeds what's already installed/selected.
+//
+// So this only fires when BOTH halves of that max are below 1.25:
+//   - the file's own `go` directive requires less than 1.25 (an absent
+//     `go` line — parseGoVersion returns "" — counts as unsatisfied too,
+//     matching goVersionAtLeast's existing empty-string convention), AND
+//   - localGoVersion (the toolchain that's actually installed/selected,
+//     meant to be `go env GOVERSION` run in the module's own directory —
+//     the same live-ask-go pattern goflagsRejectedByGo already uses for a
+//     fact this package can't enumerate any other way) is ALSO below
+//     1.25.
+//
+// If the file's own `go` directive already requires >=1.25,
+// GOTOOLCHAIN=auto either runs an already-sufficient local toolchain or
+// downloads one — and if that download fails for lack of network, go
+// Fatals on ITS OWN toolchain-fetch error instead, a different but
+// equally real "cannot leak" case this function deliberately leaves
+// alone rather than double-counting. An unresolvable localGoVersion
+// (empty, matching goEnv's own failure convention) fails open here too,
+// the same convention this package's other goEnv-derived checks already
+// use for an environment fact it can't pin down.
+//
+// Live-verified (2026-10): a from-scratch go.mod reading only `module
+// example.com/ignoretest`, `go 1.21`, and `ignore "testdata"` makes
+// `go env GOVERSION`/`go list -m all` (run with GOPROXY=off, GOTOOLCHAIN
+// left at its default "auto") Fatal instantly with "go.mod:5: unknown
+// directive: ignore" under a real go1.24.4 installation, zero network
+// access — even though `go mod edit -ignore=testdata` (run moments
+// earlier with a real go1.26.8 toolchain) is exactly how that file was
+// produced in the first place: `go mod edit -ignore=` does NOT bump the
+// file's own `go` line to cover a directive it just added. Before this
+// fix, goprivaudit's goModHasUnknownDirective treated `ignore`
+// unconditionally as a valid verb and ran its normal SUMDB-leak audit on
+// a file like this, misreporting a leak for a query real go, right here,
+// never reaches.
+func goModHasIgnoreDirectiveTooOld(data []byte, localGoVersion string) bool {
+	if !goModHasIgnoreDirective(data) {
+		return false
+	}
+	if goVersionAtLeast(parseGoVersion(data), 1, 25) {
+		return false
+	}
+	local := strings.TrimPrefix(strings.TrimSpace(localGoVersion), "go")
+	if local == "" {
+		return false
+	}
+	return !goVersionAtLeast(local, 1, 25)
+}
+
 // goWorkValidTopLevelVerbs is the complete, fixed set of go.work top-level
 // directive keywords golang.org/x/mod/modfile's real parser
 // ((*WorkFile).add's verb switch, rule.go) recognizes: go, toolchain,
