@@ -1188,6 +1188,95 @@ func TestPrivatePrefixesFromEnvEmptyOrMissingCount(t *testing.T) {
 	}
 }
 
+// TestGitConfigCount covers gitConfigCount's strtoul-mirroring parse rules
+// directly — see its own doc comment for the live-verified git 2.47.3
+// behavior each case reproduces.
+func TestGitConfigCount(t *testing.T) {
+	cases := []struct {
+		raw       string
+		wantCount int
+		wantOK    bool
+	}{
+		{"", 0, false},
+		{"0", 0, false},
+		{"not-a-number", 0, false},
+		{"1", 1, true},
+		// A leading space or tab: real git's strtoul-based parser (config.c's
+		// git_env_ulong) skips these before reading the digits, so a real
+		// `git` subprocess still applies the entries — see
+		// TestPrivatePrefixesFromEnvCountWithLeadingWhitespace for the
+		// end-to-end regression this fixes. A bare strconv.Atoi (this
+		// function's pre-fix form) rejected any leading whitespace outright.
+		{" 1", 1, true},
+		{"\t1", 1, true},
+		{" \t 3", 3, true},
+		{"01", 1, true},
+		{"+1", 1, true},
+		// Trailing garbage (including trailing whitespace) is NOT skipped by
+		// strtoul — real git dies with "bogus count in GIT_CONFIG_COUNT"
+		// before applying anything, a genuine "cannot leak" case, so ok must
+		// stay false here exactly as it already was pre-fix. See
+		// TestPrivatePrefixesFromEnvCountWithTrailingGarbageIsNotASignal for
+		// the end-to-end case this guards against overcorrecting.
+		{"1 ", 0, false},
+		{"1x", 0, false},
+		// Negative overflows to a huge unsigned count in real strtoul, which
+		// git's own range check rejects ("too many entries in
+		// GIT_CONFIG_COUNT") — another real die, so this must stay ok=false
+		// too, matching the pre-fix `count <= 0` guard.
+		{"-1", 0, false},
+	}
+	for _, c := range cases {
+		env := map[string]string{"GIT_CONFIG_COUNT": c.raw}
+		count, ok := gitConfigCount(func(k string) string { return env[k] })
+		if count != c.wantCount || ok != c.wantOK {
+			t.Errorf("gitConfigCount(%q) = (%d, %v), want (%d, %v)", c.raw, count, ok, c.wantCount, c.wantOK)
+		}
+	}
+}
+
+// TestPrivatePrefixesFromEnvCountWithLeadingWhitespace is a regression test
+// for the bug gitConfigCount's own doc comment describes: pre-fix,
+// privatePrefixesFromEnvInto used a bare strconv.Atoi(getenv(
+// "GIT_CONFIG_COUNT")), which rejects GIT_CONFIG_COUNT=" 1" (a leading
+// space) as a parse error and silently treated it the same as
+// GIT_CONFIG_COUNT being unset — discarding a real insteadOf signal a live
+// `git` subprocess (verified against git 2.47.3) still applies. This must
+// resolve identically to the equivalent unpadded "1" form
+// (TestPrivatePrefixesFromEnv above).
+func TestPrivatePrefixesFromEnvCountWithLeadingWhitespace(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   " 1",
+		"GIT_CONFIG_KEY_0":   "url.https://x-access-token@github.example.com/.insteadof",
+		"GIT_CONFIG_VALUE_0": "https://github.example.com/",
+	}
+	got := privatePrefixesFromEnv(func(k string) string { return env[k] })
+	want := []string{"github.example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// TestPrivatePrefixesFromEnvCountWithTrailingGarbageIsNotASignal is the
+// mirror-image correctness case for the fix above: trailing whitespace
+// after the digits (unlike leading whitespace) is NOT something real git's
+// strtoul-based parser skips — a real `git`/`go get` subprocess given
+// GIT_CONFIG_COUNT="1 " dies immediately with "bogus count in
+// GIT_CONFIG_COUNT" before applying GIT_CONFIG_KEY_0/VALUE_0 at all, a
+// genuine "cannot leak" case. This must keep reporting no signal, proving
+// the leading-whitespace fix above didn't overcorrect into trimming
+// trailing garbage too.
+func TestPrivatePrefixesFromEnvCountWithTrailingGarbageIsNotASignal(t *testing.T) {
+	env := map[string]string{
+		"GIT_CONFIG_COUNT":   "1 ",
+		"GIT_CONFIG_KEY_0":   "url.https://x-access-token@github.example.com/.insteadof",
+		"GIT_CONFIG_VALUE_0": "https://github.example.com/",
+	}
+	if got := privatePrefixesFromEnv(func(k string) string { return env[k] }); got != nil {
+		t.Errorf("got %v, want nil", got)
+	}
+}
+
 func TestPrivatePrefixesFromConfigFileIncludeCycleTerminates(t *testing.T) {
 	dir := t.TempDir()
 	a := writeFile(t, dir, "a.gitconfig", `[include]

@@ -541,6 +541,45 @@ func scanConfigSignals(data []byte, slots *[]*prefixSlot, credSlots, httpSlots m
 	}
 }
 
+// gitConfigCount parses the GIT_CONFIG_COUNT environment variable the way
+// real git's own git_env_ulong (config.c's git_config_from_parameters,
+// which every GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n> reader in this file
+// mirrors) does: via strtoul, which skips leading ASCII whitespace before
+// the digits but does NOT skip anything after them. ok is false for a
+// missing/empty value, one with no digits at all, or a non-positive count
+// — the same "nothing to apply" outcome this file's three callers already
+// treated a bare strconv.Atoi failure as.
+//
+// Verified live (git 2.47.3): GIT_CONFIG_COUNT=" 1" (a leading space) with
+// GIT_CONFIG_KEY_0/GIT_CONFIG_VALUE_0 set still applies that entry — `git
+// config -l` lists it, and a real `git ls-remote` against an insteadOf
+// rewrite set this way genuinely rewrites the fetch URL — while
+// GIT_CONFIG_COUNT="1 " (trailing space instead) makes git die immediately
+// with "error: bogus count in GIT_CONFIG_COUNT" / "fatal: unable to parse
+// command-line config", exit 128, before looking at GIT_CONFIG_KEY_0 at
+// all: a real "cannot leak" case no different from the already-handled
+// missing/non-numeric one, since no git subprocess (and so no `go get`
+// invoking one) ever gets past parsing its own command-line config.
+//
+// Before this fix, every one of this file's three readers used a bare
+// strconv.Atoi(getenv("GIT_CONFIG_COUNT")), which — unlike strtoul — treats
+// ANY leading whitespace as a parse error, so GIT_CONFIG_COUNT=" 1" (a
+// single leading space: a very plausible shape for a value assembled by a
+// wrapper script or template, e.g. `GIT_CONFIG_COUNT="$prefix $n"` with an
+// empty $prefix) was silently read the same as GIT_CONFIG_COUNT being
+// unset entirely — discarding a real, live-verified insteadOf/
+// credential.helper/http.extraHeader/protocol.allow signal real git does
+// apply. A false "no issues found" on a genuine, uncovered private-auth
+// signal — the dangerous direction this tool exists to catch.
+func gitConfigCount(getenv func(string) string) (count int, ok bool) {
+	s := strings.TrimLeft(getenv("GIT_CONFIG_COUNT"), " \t\n\v\f\r")
+	n, err := strconv.Atoi(s)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // privatePrefixesFromEnv scans the GIT_CONFIG_COUNT / GIT_CONFIG_KEY_<n> /
 // GIT_CONFIG_VALUE_<n> environment variables (git-config(1)'s documented,
 // file-free way to inject config: "useful for cases where you want to spawn
@@ -589,8 +628,8 @@ func privatePrefixesFromEnv(getenv func(string) string) []string {
 // concatenate architecture couldn't reflect (see
 // TestRunFindsLeakCredentialHelperResetAcrossTiers).
 func privatePrefixesFromEnvInto(getenv func(string) string, slots *[]*prefixSlot, credSlots, httpSlots map[string]*prefixSlot) {
-	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
-	if err != nil || count <= 0 {
+	count, ok := gitConfigCount(getenv)
+	if !ok {
 		// Per git-config(1): a missing or non-numeric GIT_CONFIG_COUNT is
 		// the same as GIT_CONFIG_COUNT=0 (git itself treats a genuinely
 		// invalid count as a fatal error rather than "0", but this tool
@@ -775,8 +814,8 @@ func insteadOfSchemes(data []byte) map[string][]string {
 // signal from — see its doc comment for why env-set config is a real,
 // live-verified signal source, not just a file-parsing nicety.
 func insteadOfSchemesFromEnv(getenv func(string) string) map[string][]string {
-	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
-	if err != nil || count <= 0 {
+	count, ok := gitConfigCount(getenv)
+	if !ok {
 		return nil
 	}
 	out := map[string][]string{}
@@ -877,8 +916,8 @@ func protocolAllowFromGitConfig(data []byte) map[string]string {
 // parts) and returns ok=false for a plain two-part "protocol.allow" key, so
 // that shape is parsed separately here.
 func protocolAllowFromEnv(getenv func(string) string) map[string]string {
-	count, err := strconv.Atoi(getenv("GIT_CONFIG_COUNT"))
-	if err != nil || count <= 0 {
+	count, ok := gitConfigCount(getenv)
+	if !ok {
 		return nil
 	}
 	out := map[string]string{}
