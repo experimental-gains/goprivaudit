@@ -1,6 +1,7 @@
 package main
 
 import (
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
@@ -457,14 +458,55 @@ require git.privatecorp.internal/team/widgets v1.2.3
 	}
 }
 
-// TestRunRespectsNETRCEnvOverride covers the NETRC env var, which both
-// go's own auth package and this tool's netrcPath honor in place of
-// $HOME/.netrc.
-func TestRunRespectsNETRCEnvOverride(t *testing.T) {
+// TestRunIgnoresNETRCEnvVar covers the fix: real git's subprocess HTTPS
+// fetch (what netrcPath models, per its own doc comment) authenticates via
+// libcurl's CURLOPT_NETRC with no CURLOPT_NETRC_FILE ever set, so curl's
+// Curl_parsenetrc always takes its netrcfile-unset path, which never reads
+// a NETRC env var at all — live-verified (2026-10) that a real `git`
+// subprocess fetch sends no Authorization header when NETRC points at a
+// file with real credentials and $HOME/.netrc doesn't exist. An earlier
+// version of netrcPath wrongly honored NETRC (mirroring cmd/go's own
+// auth.netrcPath, the wrong reference — that function resolves the path for
+// GOAUTH=netrc, a different consumer), so a NETRC override pointing away
+// from $HOME/.netrc fabricated a private-auth signal real git never acts
+// on. This must NOT report a leak: the require below has no real
+// private-auth signal, since $HOME/.netrc (what git actually reads) is
+// empty.
+func TestRunIgnoresNETRCEnvVar(t *testing.T) {
 	dir := t.TempDir()
 	netrcFile := writeFile(t, dir, "custom-netrc", "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n")
 	t.Setenv("HOME", t.TempDir()) // no ~/.netrc
 	t.Setenv("NETRC", netrcFile)
+
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.privatecorp.internal/team/widgets v1.2.3
+`)
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod, "-private", "", "-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (NETRC must not be consulted); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak sourced only from a NETRC-pointed file: %s", stdout)
+	}
+}
+
+// TestRunUsesHomeNetrcRegardlessOfNETRCEnvVar is the mirror-image case of
+// TestRunIgnoresNETRCEnvVar: a real private-auth signal sitting at
+// $HOME/.netrc (what git actually reads) must still be found even when an
+// unrelated NETRC env var happens to be set, pointing at a file with no
+// matching entry at all — confirming the fix didn't just stop reading
+// NETRC, but correctly falls through to $HOME/.netrc every time.
+func TestRunUsesHomeNetrcRegardlessOfNETRCEnvVar(t *testing.T) {
+	dir := t.TempDir()
+	home := t.TempDir()
+	writeFile(t, home, ".netrc", "machine git.privatecorp.internal\nlogin builder\npassword s3cr3t\n")
+	t.Setenv("HOME", home)
+	unrelated := writeFile(t, dir, "unrelated-netrc", "machine other.example.com\nlogin x\npassword y\n")
+	t.Setenv("NETRC", unrelated)
 
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
 
@@ -507,5 +549,21 @@ func TestNetrcPathIgnoresLegacyUnderscoreNetrcOnNonWindows(t *testing.T) {
 	want := home + "/.netrc"
 	if got := netrcPath(); got != want {
 		t.Errorf("netrcPath() = %q, want %q (should ignore _netrc on GOOS=%s)", got, want, runtime.GOOS)
+	}
+}
+
+// TestNetrcPathIgnoresNETRCEnvVar directly unit-tests netrcPath's removal of
+// NETRC-env-var support: real curl's Curl_parsenetrc (lib/netrc.c) never
+// reads a NETRC env var on the path git's subprocess fetch actually takes
+// (it never sets CURLOPT_NETRC_FILE), so netrcPath must resolve to
+// $HOME/.netrc regardless of what NETRC is set to.
+func TestNetrcPathIgnoresNETRCEnvVar(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("NETRC", "/some/unrelated/path/that/does/not/exist")
+
+	want := filepath.Join(home, ".netrc")
+	if got := netrcPath(); got != want {
+		t.Errorf("netrcPath() = %q, want %q (NETRC env var must be ignored)", got, want)
 	}
 }

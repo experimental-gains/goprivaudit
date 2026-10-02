@@ -8,25 +8,58 @@ import (
 	"strings"
 )
 
-// netrcPath resolves the netrc file `go` itself would read, mirroring
-// cmd/go/internal/auth.netrcPath exactly: an explicit NETRC env var wins,
-// otherwise it's $HOME/.netrc, except on Windows where $HOME/_netrc is
-// preferred if it exists (falling back to $HOME/.netrc otherwise).
+// netrcPath resolves the netrc file this tool's own consumer of netrc data —
+// `git`, invoked as a subprocess for a direct VCS fetch, via libcurl's
+// CURLOPT_NETRC — would actually read (see privatePrefixesFromNetrc's own
+// doc comment for why that is the right consumer to model here, not `go`'s
+// own GOAUTH=netrc HTTP client).
+//
+// This deliberately does NOT mirror cmd/go/internal/auth.netrcPath, an
+// earlier version of this function did, which is wrong for the same reason
+// runs #471/#483 (see privatePrefixesFromNetrc) already corrected the
+// completeness rule and the tokenizer: auth.netrcPath is cmd/go's own path
+// resolver for ITS netrc reader, not git's. Reading libcurl's real
+// Curl_parsenetrc (lib/netrc.c, installed curl 8.14.1, matching the version
+// fetched and read for the fixes above) directly shows two real divergences
+// git's subprocess fetch — which never sets CURLOPT_NETRC_FILE, so it always
+// takes Curl_parsenetrc's netrcfile-unset path — actually exercises:
+//
+//  1. There is no NETRC environment variable at all in curl's resolution.
+//     Live-verified (2026-10): with NETRC pointing at a file containing
+//     real credentials for a host and no $HOME/.netrc, a real `git`
+//     subprocess HTTPS fetch against that host sent no Authorization header
+//     whatsoever — git silently ignored NETRC and found nothing at
+//     $HOME/.netrc. Conversely, with the same credentials placed at
+//     $HOME/.netrc instead (NETRC unset), the identical fetch authenticated
+//     successfully. A prior version of this function honored NETRC and had
+//     a regression test (TestRunRespectsNETRCEnvOverride) actively pinning
+//     that wrong behavior — the dangerous direction for a security tool:
+//     a NETRC override pointing away from $HOME/.netrc made a real,
+//     in-use private-auth signal at $HOME/.netrc invisible to this tool
+//     entirely (false negative, a missed leak), while a NETRC override
+//     pointing at an unused file could also fabricate a signal real git
+//     never acts on.
+//  2. On Windows, curl tries $HOME/.netrc FIRST and falls back to the
+//     legacy $HOME/_netrc only if parsenetrc reports the primary file
+//     missing (`Curl_parsenetrc`, the `#ifdef _WIN32` fallback block) — the
+//     exact opposite priority from auth.netrcPath (and this function's own
+//     prior version), which preferred _netrc over .netrc whenever both
+//     existed.
 func netrcPath() string {
-	if env := os.Getenv("NETRC"); env != "" {
-		return env
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
+	primary := filepath.Join(home, ".netrc")
 	if runtime.GOOS == "windows" {
-		legacy := filepath.Join(home, "_netrc")
-		if _, err := os.Stat(legacy); err == nil {
-			return legacy
+		if _, err := os.Stat(primary); err != nil {
+			legacy := filepath.Join(home, "_netrc")
+			if _, err := os.Stat(legacy); err == nil {
+				return legacy
+			}
 		}
 	}
-	return filepath.Join(home, ".netrc")
+	return primary
 }
 
 // privatePrefixesFromNetrc parses netrc-format data for "machine" entries
