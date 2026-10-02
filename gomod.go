@@ -1309,18 +1309,44 @@ func goModHasInvalidGodebugDirective(data []byte) bool {
 
 // retractDirectiveTokens splits a retract directive's own argument text (or
 // a block-entry line's text) into golang.org/x/mod/modfile's real token
-// stream for this grammar: "[", "]", and "," are always their own
+// stream for this grammar: "[", "]", "," are always their own
 // single-character tokens, even glued directly onto a version with no
 // separating whitespace at all — live-verified: real go accepts
 // "retract[v1.0.0,v1.0.1]" with zero spaces anywhere, tokenizing it
 // identically to the spaced-out form — exactly the same real-lexer
 // convention countDirectiveArgs already documents for "(" and ")".
-// Anything else is a bracket/comma/whitespace-delimited word, standing in
-// for parseVersionInterval's own "version" token: this only needs the
-// token count and shape (see retractArgInvalid), not whether a version
-// token is itself a syntactically valid semver string — that's a separate,
-// later, network-dependent question (see goModHasInvalidRetractDirective's
-// doc comment) out of scope here.
+//
+// "(" and ")" get the identical always-separate-token treatment, for the
+// identical reason replaceDirectiveTokens' doc comment already gives for
+// the sibling `replace` directive: real go's lexer (read.go's isIdent)
+// excludes '(' and ')' from the identifier character class regardless of
+// what's glued onto either side, on a single-line (not block-form)
+// directive. Before this fix, retractDirectiveTokens' default branch only
+// stopped a word scan at whitespace/'['/']'/',', so a glued-paren retract
+// like "retract(v1.0.0)" — real go treats the very first token after the
+// verb as "(", which parseVersionInterval rejects immediately with
+// "expected '[' or version" since a version interval can never start with
+// "(" — instead produced the single malformed word token "(v1.0.0)",
+// which retractArgInvalid's own toks[0]=="(" check (written for exactly
+// this real-go Fatal, but until now unreachable: nothing upstream of it
+// ever produced a standalone "(" token) never saw, so the directive was
+// wrongly accepted as well-formed. Live-verified (go1.24.4, GOPROXY=off):
+// `retract(v1.0.0)` on one line Fatals with "errors parsing go.mod:
+// go.mod:N: expected '[' or version" — the identical "cannot leak" shape
+// goModHasInvalidReplaceDirective's own glued-paren fix (run #636)
+// documents for `replace`, just never carried over to retract's own
+// tokenizer at the time. Confirmed end-to-end against the built binary:
+// pre-fix, a go.mod with a real, otherwise-uncovered private-auth-signaled
+// require plus an unrelated "retract(v1.0.0)" line was reported "SUMDB
+// LEAK", while `go list -m all` on the identical file never gets far
+// enough to query anything.
+//
+// Anything else is a bracket/paren/comma/whitespace-delimited word,
+// standing in for parseVersionInterval's own "version" token: this only
+// needs the token count and shape (see retractArgInvalid), not whether a
+// version token is itself a syntactically valid semver string — that's a
+// separate, later, network-dependent question (see
+// goModHasInvalidRetractDirective's doc comment) out of scope here.
 func retractDirectiveTokens(s string) []string {
 	var toks []string
 	for {
@@ -1329,12 +1355,12 @@ func retractDirectiveTokens(s string) []string {
 			return toks
 		}
 		switch s[0] {
-		case '[', ']', ',':
+		case '[', ']', ',', '(', ')':
 			toks = append(toks, s[:1])
 			s = s[1:]
 		default:
 			i := 0
-			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '[' && s[i] != ']' && s[i] != ',' {
+			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '[' && s[i] != ']' && s[i] != ',' && s[i] != '(' && s[i] != ')' {
 				i++
 			}
 			if i == 0 {

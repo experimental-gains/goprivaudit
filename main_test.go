@@ -1629,6 +1629,51 @@ retract
 	}
 }
 
+// TestRunGluedParenRetractDirectiveGoModNoLeak is the end-to-end regression
+// test for retractDirectiveTokens' glued-paren fix (see gomod.go): a
+// single-line `retract(v1.0.0)` directive — the parenthesis glued directly
+// onto the version with no separating whitespace, not a real block form —
+// makes every module-aware go subcommand Fatal parsing go.mod before it
+// resolves a single module, so the otherwise-uncovered private-auth signal
+// below can never actually leak. Verified live before this fix: `go list -m
+// all` (GOPROXY=off) on the equivalent file Fatals immediately with "errors
+// parsing go.mod: go.mod:7: expected '[' or version" (real go's lexer always
+// splits a glued "(" off as its own token, and a version interval can never
+// start with one), while this tool's pre-fix retractDirectiveTokens glued
+// the "(" onto "v1.0.0" as ordinary word content instead, so
+// goModHasInvalidRetractDirective never recognized the directive as
+// malformed and the tool still reported "SUMDB LEAK" for the require line
+// sitting above it.
+func TestRunGluedParenRetractDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.24
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+
+retract(v1.0.0)
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's retract directive has a glued-on paren (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunInvalidGodebugDirectiveGoModNoLeak is the direct regression test
 // for goModHasInvalidGodebugDirective (see gomod.go): a go.mod whose
 // `godebug` directive argument has no "=" at all makes every module-aware go

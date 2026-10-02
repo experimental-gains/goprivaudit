@@ -781,6 +781,9 @@ func TestGoModHasInvalidRetractDirective(t *testing.T) {
 		{"extra token after a complete bracketed interval", "module example.com/foo\n\ngo 1.24\n\nretract [v1.0.0,v1.9.9] extra\n", true},
 		{"valid retract block", "module example.com/foo\n\ngo 1.24\n\nretract (\n\tv1.0.0\n\t[v1.2.0,v1.2.9]\n)\n", false},
 		{"retract block entry with a stray extra token", "module example.com/foo\n\ngo 1.24\n\nretract (\n\tv1.0.0\n\tv1.2.3 extra\n)\n", true},
+		{"glued paren on a single-line retract directive", "module example.com/foo\n\ngo 1.24\n\nretract(v1.0.0)\n", true},
+		{"glued paren with a space before it", "module example.com/foo\n\ngo 1.24\n\nretract (v1.0.0)\n", true},
+		{"glued paren inside a retract block entry", "module example.com/foo\n\ngo 1.24\n\nretract (\n\t(v1.0.0)\n)\n", true},
 	}
 	for _, c := range cases {
 		if got := goModHasInvalidRetractDirective([]byte(c.src)); got != c.want {
