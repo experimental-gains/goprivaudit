@@ -2803,9 +2803,9 @@ func resolveLocalPath(baseDir, path string) string {
 }
 
 // goWorkLocalReplaceTargets collects every local-directory replace target
-// reachable from a go.work workspace without following any require chain:
-// go.work's own replace directives (resolved relative to its own
-// directory) plus each `use`d member module's own go.mod replace
+// reachable from a go.work workspace without following any require chain
+// past one hop: go.work's own replace directives (resolved relative to its
+// own directory) plus each `use`d member module's own go.mod replace
 // directives (resolved relative to that member's own directory, per
 // go.mod's normal replace-path resolution rule — verified live the same
 // way isDirectoryPath's doc comment already did for a go.mod-level
@@ -2814,34 +2814,93 @@ func resolveLocalPath(baseDir, path string) string {
 // directory that isn't itself `use`d can still be part of the workspace's
 // build graph if some `use`d member's go.mod replaces a require with it.
 //
-// Deliberately stops at one hop: it doesn't recurse into a replacement
-// target's own go.mod looking for a *second* local replace that reaches
-// moduleDir transitively. That chain is real but far rarer than a single
-// member replacing a public path with a local sibling (this function's
-// main target), and detecting it fully would mean re-implementing a
-// chunk of modload's own local-replace-chain resolution — out of scope
-// here the same way hasconfig: resolution was ruled out for includeIf
-// (see includeIfMatches' doc comment for that precedent). Missing this
-// deeper chain can only make moduleOutsideWorkspace over-report exclusion
-// for that one narrow shape, not under-report it elsewhere.
+// Only counts a replace whose own path is actually required, at a version
+// the replace covers (selectReplace's existing version-specific-beats-
+// general precedence, with a go.work entry overlaid on the member's own
+// per mergeReplaces — the identical resolution the rest of this file
+// already applies to moduleDir's own replaces, just reused here for each
+// `use`d member instead). A replace naming a path nothing requires at all,
+// or requires only at a different version the replace doesn't cover, never
+// actually applies — real go simply ignores it, so the local directory it
+// names never enters the build graph. Live-verified (go1.24.4/go1.26.8,
+// GOPROXY=off): with `use ./a` and a go.work-level
+// `replace example.com/b => ./b` but NO `require example.com/b` anywhere in
+// a's go.mod, `go list -m all`/`go build .`/`go list .` run from b itself
+// still Fatal with the identical "current directory is contained in a
+// module that is not one of the workspace modules listed in go.work" error
+// an entirely unrelated directory gets — proof b never joined the build
+// list at all, unlike the matched-require case
+// (TestRunModuleOutsideUseListButReachableViaMemberReplaceStillLeaks)
+// where a real `go list -m all` resolves it. The identical Fatal
+// reappears when a's go.mod DOES require example.com/b, but at a version
+// the replace doesn't cover (e.g. the replace is pinned to "v1.0.0" but
+// the require asks for "v0.5.0"): `go list -m all` then tries, and fails,
+// to actually fetch the unreplaced v0.5.0 from the network instead. Before
+// this fix, this function unconditionally collected every local replace
+// target regardless of whether anything required its path at a covered
+// version, so moduleOutsideWorkspace treated a directory named only by a
+// stale, no-longer-applicable replace (left behind after removing the
+// require it used to pair with, a common real-world edit) as reachable —
+// continuing the ordinary SUMDB-leak audit on a go.mod no standard build
+// command run from that directory can ever actually resolve, an active
+// wrong claim of the same "cannot leak" shape every other skip in this
+// file closes.
+//
+// Still deliberately stops at one hop: it doesn't recurse into a
+// replacement target's own go.mod looking for a *second* local replace
+// that reaches moduleDir transitively. That chain is real but far rarer
+// than a single member replacing a public path with a local sibling (this
+// function's main target), and detecting it fully would mean
+// re-implementing a chunk of modload's own local-replace-chain resolution
+// — out of scope here the same way hasconfig: resolution was ruled out for
+// includeIf (see includeIfMatches' doc comment for that precedent).
+// Missing this deeper chain can only make moduleOutsideWorkspace
+// over-report exclusion for that one narrow shape, not under-report it
+// elsewhere.
 func goWorkLocalReplaceTargets(goworkAbs string, useDirs []string) []string {
+	workDir := filepath.Dir(goworkAbs)
+	var goworkReplaces map[string][]replaceEntry
+	if data, err := os.ReadFile(goworkAbs); err == nil {
+		goworkReplaces = resolveLocalReplaceTargets(parseReplaces(data), workDir)
+	}
+
 	var out []string
-	collect := func(data []byte, baseDir string) {
-		for _, entries := range parseReplaces(data) {
-			for _, e := range entries {
-				if e.target.isLocal {
-					out = append(out, resolveLocalPath(baseDir, e.target.path))
-				}
+	for _, d := range useDirs {
+		data, err := os.ReadFile(filepath.Join(d, "go.mod"))
+		if err != nil {
+			continue
+		}
+		merged := mergeReplaces(resolveLocalReplaceTargets(parseReplaces(data), d), goworkReplaces)
+		for _, r := range parseRequires(data) {
+			if target, ok := selectReplace(merged[r.path], r.version); ok && target.isLocal {
+				out = append(out, target.path)
 			}
 		}
 	}
-	if data, err := os.ReadFile(goworkAbs); err == nil {
-		collect(data, filepath.Dir(goworkAbs))
+	return out
+}
+
+// resolveLocalReplaceTargets returns a copy of replaces with every local
+// target's path rewritten to an absolute path resolved against baseDir —
+// letting goWorkLocalReplaceTargets reuse mergeReplaces/selectReplace's
+// existing version-precedence logic verbatim (both only ever compare/return
+// target.path as an opaque string, never re-resolving it) instead of
+// duplicating that precedence here under its own, separately-verified
+// filesystem-path resolution.
+func resolveLocalReplaceTargets(replaces map[string][]replaceEntry, baseDir string) map[string][]replaceEntry {
+	if len(replaces) == 0 {
+		return replaces
 	}
-	for _, d := range useDirs {
-		if data, err := os.ReadFile(filepath.Join(d, "go.mod")); err == nil {
-			collect(data, d)
+	out := make(map[string][]replaceEntry, len(replaces))
+	for path, entries := range replaces {
+		resolved := make([]replaceEntry, len(entries))
+		for i, e := range entries {
+			if e.target.isLocal {
+				e.target.path = resolveLocalPath(baseDir, e.target.path)
+			}
+			resolved[i] = e
 		}
+		out[path] = resolved
 	}
 	return out
 }

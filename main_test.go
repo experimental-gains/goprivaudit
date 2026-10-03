@@ -3578,6 +3578,61 @@ use ./a
 	}
 }
 
+// TestRunOrphanedMemberReplaceDoesNotLeak is the mirror-image case of
+// TestRunModuleOutsideUseListButReachableViaMemberReplaceStillLeaks above:
+// a's go.mod replaces example.com/b with moduleDir's own local directory,
+// but — unlike that test — nothing in the workspace actually has a
+// `require example.com/b` at all. A go.mod replace with no matching
+// require is simply never applied by the real go command (the require is
+// what names the version the replace would otherwise have substituted
+// for), so b never joins the build graph, exactly like an ordinary
+// unrelated directory: `go build .`/`go list .` run from b itself still
+// Fatal with "current directory is contained in a module that is not one
+// of the workspace modules listed in go.work" (live-verified, go1.24.4 and
+// go1.26.8). Before the fix, goWorkLocalReplaceTargets collected b as a
+// local replace target regardless of whether anything required it,
+// so moduleOutsideWorkspace wrongly treated b as reachable and the
+// ordinary audit went on to report a SUMDB LEAK for a go.mod no standard
+// build command run from this exact directory can ever actually resolve.
+// This is a realistic shape, not a contrived one: a leftover `replace`
+// line is exactly what's left behind after removing the `require` it used
+// to pair with, without also deleting the now-unused replace.
+func TestRunOrphanedMemberReplaceDoesNotLeak(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "a/go.mod", `module example.com/a
+
+go 1.24
+
+replace example.com/b => ../b
+`)
+	gomod := writeFile(t, dir, "b/go.mod", `module example.com/b
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use ./a
+`)
+	writeFile(t, dir, "b/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: nothing requires example.com/b, so a's replace never applies and b's own requires can never be resolved by any standard build command; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the only replace naming moduleDir has no matching require anywhere in the workspace: %s", stdout)
+	}
+}
+
 func TestRunPrivateOverrideCoversLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
