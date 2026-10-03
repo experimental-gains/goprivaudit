@@ -330,6 +330,87 @@ require github.com/googleapis/gax-go/v2 v2.12.0
 	}
 }
 
+// TestRunGovcsPatternPastGeneralVCSSuffixRootStillLeaks is
+// TestRunGovcsPatternPastRepoRootStillLeaks's sibling for
+// generalVCSSuffixPattern — cmd/go/internal/vcs's vcsPaths table's "General
+// syntax for any server" catch-all entry, which resolves an import path to
+// a fixed VCS repo root for ANY host (not just github.com/bitbucket.org)
+// whenever the path itself spells out a literal ".git" (or ".bzr"/
+// ".fossil"/".hg"/".svn") suffix segment. Live-verified (2026-10-03,
+// go1.24.4): go.mod requiring "example.com/foo/bar.git/sub@v1.0.0",
+// GOPROXY=direct, GOSUMDB=off, no GOPRIVATE coverage.
+// GOVCS="example.com/foo/bar.git/sub:off" (the module's own full,
+// uncollapsed import path) does NOT block it — `go mod download -x`
+// proceeds straight to an ordinary direct git-fetch attempt against
+// example.com (confirmed reaching the network). Before this fix,
+// govcsAllowsGit had no way to resolve this host's real VCS repo root at
+// all (vcsStaticRepoRoot only recognized github.com/bitbucket.org) and
+// matched the ":off" pattern against the full module path directly, wrongly
+// concluded git was disallowed, and filterGovcsDisallowed silently dropped
+// this exact module from the SUMDB LEAK audit — a false negative on a real,
+// uncovered private-auth signal.
+func TestRunGovcsPatternPastGeneralVCSSuffixRootStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require example.com/foo/bar.git/sub v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://example.com/foo"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "example.com/foo/bar.git/sub:off",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (the real repo root doesn't match this pattern, so GOVCS never blocks it); stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: example.com/foo/bar.git/sub") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGovcsPatternAtGeneralVCSSuffixRootSuppressesLeak is
+// TestRunGovcsPatternPastGeneralVCSSuffixRootStillLeaks's companion, proving
+// the fix doesn't overreach: a GOVCS entry naming exactly the module's
+// real, ".git"-suffixed VCS repo root (no extra subdirectory segment) still
+// correctly suppresses the finding — live-verified the identical ":off"
+// pattern here does make real `go mod download` Fatal with "GOVCS
+// disallows using git for public example.com/foo/bar.git" before any
+// network access.
+func TestRunGovcsPatternAtGeneralVCSSuffixRootSuppressesLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require example.com/foo/bar.git/sub v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://example.com/foo"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "example.com/foo/bar.git:off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should report no leak when GOVCS disallows git for the module's real repo root: %s", stdout)
+	}
+}
+
 // TestRunIgnoreDirectiveTooOldGoModNoLeak is the direct regression test
 // for goModHasIgnoreDirectiveTooOld (see gomod.go): a go.mod carrying an
 // `ignore` directive alongside a `go` directive below 1.25, audited by a

@@ -199,6 +199,46 @@ func TestGovcsAllowsGitPatternAtBitbucketRepoRoot(t *testing.T) {
 	}
 }
 
+// TestGovcsAllowsGitPatternPastGeneralVCSSuffixRoot is
+// generalVCSSuffixPattern's sibling of
+// TestGovcsAllowsGitPatternPastGithubRepoRoot/
+// TestGovcsAllowsGitPatternPastBitbucketRepoRoot: an explicit GOVCS pattern
+// naming a self-hosted module's full import path — including a subdirectory
+// past its real ".git"-suffixed VCS repo root — must not be treated as
+// matching, since real cmd/go's checkGOVCS always classifies against the
+// VCS repo root, and cmd/go/internal/vcs's vcsPaths table resolves this
+// shape offline for ANY host, not just github.com/bitbucket.org. See
+// generalVCSSuffixPattern's doc comment for the live verification this
+// mirrors.
+func TestGovcsAllowsGitPatternPastGeneralVCSSuffixRoot(t *testing.T) {
+	if !govcsAllowsGit("example.com/foo/bar.git/sub", "example.com/foo/bar.git/sub:off", "") {
+		t.Error("expected a GOVCS pattern naming the full module path (past the real .git-suffixed repo root) to NOT block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternAtGeneralVCSSuffixRoot is the companion proving
+// the fix doesn't overreach: a GOVCS pattern naming exactly the module's
+// real, ".git"-suffixed VCS repo root (no extra subdirectory segment) must
+// still block it.
+func TestGovcsAllowsGitPatternAtGeneralVCSSuffixRoot(t *testing.T) {
+	if govcsAllowsGit("example.com/foo/bar.git/sub", "example.com/foo/bar.git:off", "") {
+		t.Error("expected a GOVCS pattern naming the real .git-suffixed repo root to block git")
+	}
+}
+
+// TestGovcsAllowsGitNonVCSSuffixHostStillUnaffected proves
+// generalVCSSuffixPattern is scoped to paths that actually spell out a
+// literal VCS-suffix segment: a non-github.com/bitbucket.org host with no
+// such suffix anywhere in its path still has no statically-known repo root,
+// and keeps matching an explicit pattern against its own full import path
+// unchanged — same as TestGovcsAllowsGitNonGithubHostUnaffected already
+// covers for the pre-existing two-host scope.
+func TestGovcsAllowsGitNonVCSSuffixHostStillUnaffected(t *testing.T) {
+	if govcsAllowsGit("example.com/owner/repo/v2", "example.com/owner/repo/v2:off", "") {
+		t.Error("expected a non-VCS-suffix GOVCS pattern matching the full path to still block git")
+	}
+}
+
 func TestFilterGovcsDisallowed(t *testing.T) {
 	modules := []string{"github.com/myorg/internal-tool", "example.com/other/mod"}
 
