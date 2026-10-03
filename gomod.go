@@ -1986,6 +1986,130 @@ func goModHasBlockComment(data []byte) bool {
 	return false
 }
 
+// goModHasInvalidQuotedToken reports whether data contains a backtick-
+// delimited ("`...`") token anywhere outside of a double-quoted string or a
+// "//" comment — a shape the real go command's own strict go.mod/go.work
+// parser (golang.org/x/mod/modfile) rejects unconditionally, regardless of
+// which directive it appears in.
+//
+// golang.org/x/mod/modfile's lexer (read.go's readToken) does tokenize a
+// backtick-delimited span into a single _STRING token exactly like a
+// double-quoted one — so the file still lexes — but every verb's semantic
+// handler in rule.go that consumes a string-shaped argument (module,
+// require/exclude's path, replace's four path/version fields, retract's
+// version, tool's path, ignore's path, and go.work's use path) routes that
+// argument through parseString (directly, or via parseVersion), which
+// unconditionally rejects any token that does not begin with a literal
+// double quote (") but contains a `"`, `'`, or backtick anywhere: "invalid
+// quoted string: unquoted string cannot contain quote". A backtick is a
+// perfectly valid Go raw-string delimiter in ordinary Go source code —
+// exactly the kind of syntax an AI assistant or a developer used to writing
+// Go source could plausibly reach for in a go.mod, since go.mod's own
+// double-quoted form is visually so similar — but go.mod's own grammar
+// deliberately narrows that allowance to double quotes only (rule.go's
+// parseString's own comment: "Other quotes are reserved both for possible
+// future expansion and to avoid confusion").
+//
+// This repo's own low-level token reader, leadingQuotedString (used by
+// firstField/firstFieldAndRest throughout this file, and directly by
+// countDirectiveArgs/replaceDirectiveTokens), was built to treat a
+// backtick-delimited token as an equally valid, if stylistically different,
+// spelling of a quoted argument — correct for parsing Go SOURCE CODE
+// (strconv.Unquote accepts both forms), wrong for go.mod's own narrower
+// grammar. Every function built on top of that reader therefore silently
+// accepts and strips a backtick-quoted path/version instead of recognizing
+// the file as unparseable — confirmed live (go1.24.4/1.26.8/1.27.1) for
+// module, require, replace (new-side path), retract (version), and tool: a
+// go.mod otherwise carrying a real, uncovered private-auth-signaled require
+// is reported as a false "SUMDB LEAK" by this tool's own pre-fix binary
+// whenever any OTHER directive in the same file happens to use backtick
+// quoting, even though real go never gets far enough to resolve anything at
+// all.
+//
+// A backtick embedded inside an already-open DOUBLE-quoted token is, by
+// contrast, perfectly valid go.mod syntax (confirmed live: `require
+// "github.com/pkg`backtick" v1.0.0` resolves the literal path containing a
+// backtick byte) — so this function skips over double-quoted spans
+// (handling backslash escapes exactly like stripComment already does)
+// without flagging a backtick found there.
+//
+// Everywhere else, a backtick is invalid regardless of whether it sits at a
+// token-START position or in the MIDDLE of an already-started plain
+// (unquoted) identifier token: read.go's own isIdent does not exclude the
+// backtick rune, so the lexer itself does not treat a mid-token backtick as
+// starting a new quoted span — e.g. "foo`bar`" lexes as one single plain
+// identifier token, literal backticks and all, not "foo" followed by a
+// backtick-quoted "bar". But rule.go's parseString rejects that whole token
+// anyway, because its check is `strings.ContainsAny(t, "\"'`")` — ANY of the
+// three quote characters appearing ANYWHERE in a token that doesn't itself
+// begin with a double quote, not just one appearing at the very start.
+// Live-verified (go1.24.4): both `require foo`bar` v1.0.0` (backtick
+// mid-token, on the path) and `require example.com/bar v1.0.0`` (a stray
+// trailing backtick glued onto an otherwise-valid version) Fatal identically
+// to a fully backtick-wrapped token. So this function does not gate the
+// backtick check on token position at all — only on whether a legitimate
+// double-quoted span is currently open.
+//
+
+// Deliberately scans every non-blank, comment-stripped line of the file
+// rather than threading per-verb recognition through it: after "//"
+// comments are stripped, the only content a real go.mod/go.work file can
+// contain is directive keywords, block-form parentheses, and directive
+// arguments — there is no legitimate construct where a token-start backtick
+// is anything other than the exact shape this function exists to catch, so
+// no directive-recognition step is needed to scope it correctly. This also
+// means a single function call (reusing data already read for the go.mod
+// case) correctly covers go.work's own "use" and "replace" directives too,
+// the same way goWorkHasUnparseableDirective already reuses several other
+// go.mod-oriented checks (goModHasBlockComment,
+// goModHasInvalidGoDirective, etc.) against go.work's bytes directly.
+func goModHasInvalidQuotedToken(data []byte) bool {
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		if lineHasInvalidBacktickToken(stripComment(sc.Text())) {
+			return true
+		}
+	}
+	return false
+}
+
+// lineHasInvalidBacktickToken is goModHasInvalidQuotedToken's per-line
+// scanner — see that function's doc comment for the real-parser rules it
+// mirrors. s must already have any "//" comment stripped (stripComment).
+func lineHasInvalidBacktickToken(s string) bool {
+	atTokenStart := true
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; c {
+		case '"':
+			if atTokenStart {
+				// Begins a legitimate double-quoted span: skip to its
+				// matching close the same way stripComment does, handling
+				// backslash escapes. Nothing inside it is flagged — an
+				// embedded backtick there is valid go.mod syntax.
+				i++
+				for i < len(s) && s[i] != '"' {
+					if s[i] == '\\' && i+1 < len(s) {
+						i++
+					}
+					i++
+				}
+			}
+			// A '"' NOT at token start is itself a stray embedded quote in
+			// an otherwise-unquoted token (also invalid per parseString's
+			// ContainsAny check) — out of this function's backtick-specific
+			// scope, so just fall through and keep scanning.
+			atTokenStart = false
+		case '`':
+			return true
+		case ' ', '\t', '(', ')', '[', ']', '{', '}', ',':
+			atTokenStart = true
+		default:
+			atTokenStart = false
+		}
+	}
+	return false
+}
+
 func stripComment(line string) string {
 	for i := 0; i < len(line); i++ {
 		switch c := line[i]; c {
@@ -2551,6 +2675,7 @@ func goWorkHasUnparseableDirective(gowork string) bool {
 		return false
 	}
 	return goModHasBlockComment(data) ||
+		goModHasInvalidQuotedToken(data) ||
 		goModHasInvalidGoDirective(data) ||
 		goModHasInvalidToolchainDirective(data) ||
 		goWorkHasUnknownDirective(data) ||

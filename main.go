@@ -472,6 +472,19 @@ func run(args []string, stdout, stderr *os.File) int {
 		// goModHasBlockComment). Same "cannot leak" reasoning as
 		// goflagsBad/gosumdb==off/vendorActive below, just reached because
 		// the go.mod never finishes parsing at all.
+	case goModHasInvalidQuotedToken(data):
+		// A go.mod containing a backtick-delimited ("`...`") token anywhere
+		// outside a double-quoted string or "//" comment — e.g. a module,
+		// require, replace, retract, tool, or ignore argument someone wrote
+		// as `example.com/foo` instead of "example.com/foo" — makes every
+		// module-aware go subcommand Fatal parsing go.mod itself ("invalid
+		// quoted string: unquoted string cannot contain quote"), before it
+		// resolves a single module (see goModHasInvalidQuotedToken). Same
+		// "cannot leak" reasoning as goModHasBlockComment just above, for a
+		// different unparsable-token shape this tool's own
+		// leadingQuotedString helper (used throughout this file) had been
+		// silently accepting as an equally-valid alternative spelling to a
+		// double-quoted token, rather than recognizing it as a Fatal.
 	case goModHasInvalidGoDirective(data):
 		// A go.mod whose `go` directive line real go's own strict parser
 		// rejects — an argument that doesn't match modfile's GoVersionRE

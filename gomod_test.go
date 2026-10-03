@@ -355,6 +355,51 @@ func TestGoModHasBlockComment(t *testing.T) {
 	}
 }
 
+// TestGoModHasInvalidQuotedToken covers goModHasInvalidQuotedToken's
+// live-verified trigger condition: a backtick-delimited ("`...`") token
+// anywhere in a go.mod/go.work directive's arguments is an unconditional
+// parse Fatal to the real go command ("invalid quoted string: unquoted
+// string cannot contain quote") — golang.org/x/mod/modfile's parseString
+// only ever unquotes a token starting with a literal double quote; this
+// repo's own leadingQuotedString (used throughout gomod.go) had instead been
+// treating a backtick-delimited token as an equally valid alternative
+// spelling, silently accepting and stripping it instead of recognizing the
+// whole file as unparseable. Confirmed live (go1.24.4/1.26.8/1.27.1) for
+// module, require, replace (new-side path), retract (version), and tool —
+// see TestRunBacktickQuotedRequirePathNoLeak in main_test.go for the
+// end-to-end regression.
+func TestGoModHasInvalidQuotedToken(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no backtick anywhere", "module example.com/foo\n\nrequire example.com/bar v1.0.0\n", false},
+		{"backtick-quoted module path", "module `example.com/foo`\n\ngo 1.24\n", true},
+		{"backtick-quoted require path", "module example.com/foo\n\nrequire `example.com/bar` v1.0.0\n", true},
+		{"backtick-quoted require version", "module example.com/foo\n\nrequire example.com/bar `v1.0.0`\n", true},
+		{"backtick-quoted require path, block form", "module example.com/foo\n\nrequire (\n\t`example.com/bar` v1.0.0\n)\n", true},
+		{"backtick-quoted exclude path", "module example.com/foo\n\nrequire example.com/bar v1.0.0\n\nexclude `example.com/bar` v0.9.0\n", true},
+		{"backtick-quoted replace new-side path", "module example.com/foo\n\nreplace example.com/bar => `../local/fork`\n", true},
+		{"backtick-quoted replace old-side path", "module example.com/foo\n\nreplace `example.com/bar` => ../local/fork\n", true},
+		{"backtick-quoted retract version", "module example.com/foo\n\ngo 1.24\n\nretract `v1.0.0`\n", true},
+		{"backtick-quoted tool path", "module example.com/foo\n\ngo 1.24\n\ntool `example.com/foo/cmd/x`\n", true},
+		{"backtick-quoted ignore path", "module example.com/foo\n\ngo 1.26\n\nignore `testdata`\n", true},
+		{"backtick-quoted go.work use path", "go 1.24\n\nuse `./app`\n", true},
+		{"backtick-quoted go.work replace new-side path", "go 1.24\n\nuse ./app\n\nreplace example.com/bar => `../local/fork`\n", true},
+		{"double-quoted path with an embedded backtick byte", "module example.com/foo\n\nrequire \"example.com/bar`x\" v1.0.0\n", false},
+		{"backtick embedded mid-identifier, not at token start", "module example.com/foo\n\nrequire foo`bar` v1.0.0\n", true},
+		{"stray trailing backtick glued onto an otherwise-valid version", "module example.com/foo\n\nrequire example.com/bar v1.0.0`\n", true},
+		{"backtick inside a line comment", "module example.com/foo\n\n// uses `backtick` style elsewhere\nrequire example.com/bar v1.0.0\n", false},
+		{"ordinary double-quoted path, no backtick at all", "module example.com/foo\n\nrequire \"example.com/bar\" v1.0.0\n", false},
+	}
+	for _, c := range cases {
+		if got := goModHasInvalidQuotedToken([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasInvalidQuotedToken(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
 // TestGoModHasInvalidGoDirective covers goModHasInvalidGoDirective's
 // live-verified trigger condition: a `go` directive line whose argument
 // doesn't match golang.org/x/mod/modfile's own strict GoVersionRE, or that

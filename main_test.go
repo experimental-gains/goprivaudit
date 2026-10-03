@@ -1305,6 +1305,42 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunBacktickQuotedRequirePathNoLeak is the direct regression test for
+// goModHasInvalidQuotedToken (see gomod.go): a go.mod directive argument
+// written as a backtick-quoted Go raw string literal (e.g. `require
+// `github.com/myorg/internal-tool` v0.0.0-...`) is an unconditional parse
+// Fatal to the real go command — golang.org/x/mod/modfile's parseString only
+// ever unquotes a token starting with a literal double quote, never a
+// backtick, regardless of how plausible a styling choice backtick-quoting
+// looks coming from ordinary Go source code. Verified live before this fix:
+// `go list -m all` on the equivalent file Fatals immediately with "errors
+// parsing go.mod: go.mod:5: invalid quoted string: unquoted string cannot
+// contain quote", while this tool's own leadingQuotedString helper silently
+// stripped the backticks and kept auditing, reporting "SUMDB LEAK" for the
+// require line real go can never resolve.
+func TestRunBacktickQuotedRequirePathNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", "module example.com/app\n\ngo 1.24.0\n\nrequire `github.com/myorg/internal-tool` v0.0.0-20230101000000-abcdef123456\n")
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod's require directive is backtick-quoted (go itself would Fatal parsing go.mod before any query), got: %s", stdout)
+	}
+}
+
 // TestRunInvalidToolchainDirectiveGoModNoLeak is the direct regression test
 // for goModHasInvalidToolchainDirective (see gomod.go): a go.mod whose
 // `toolchain` directive argument doesn't match the real go command's strict
