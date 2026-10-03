@@ -349,6 +349,15 @@ way around. `goprivaudit` reads `go env GOWORK` (or `-gowork`) and applies
 those replaces on top of `go.mod`'s own before checking anything, so this
 is covered automatically; nothing extra to configure.
 
+## Related tools
+
+Other no-signup CLIs from the same org:
+
+- **[goproxycheck](https://github.com/experimental-gains/goproxycheck)** — diagnoses why a Go module version won't fetch via the public proxy/sumdb
+- **[modslop](https://github.com/experimental-gains/modslop)** — flags hallucinated/slopsquatted Go module paths in `go.mod`
+- **[slopcheck](https://github.com/experimental-gains/slopcheck)** — the same hallucinated-name check for PyPI/npm dependency names
+- **[hfaudit](https://github.com/experimental-gains/hfaudit)** — the same check for Hugging Face Hub model/dataset IDs
+
 ## Support
 
 If this caught something useful, a star helps others find it — that's

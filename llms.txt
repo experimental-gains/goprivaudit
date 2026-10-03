@@ -19,5 +19,11 @@ checked is local (go.mod, git config, netrc, `go env`).
 - [README](https://github.com/experimental-gains/goprivaudit/blob/main/README.md): full check list, GOSUMDB/GOPROXY=off skip conditions, and example output
 - [pkg.go.dev](https://pkg.go.dev/github.com/experimental-gains/goprivaudit): generated Go API docs
 
+## Related
+- [goproxycheck](https://github.com/experimental-gains/goproxycheck): diagnoses Go module proxy/sumdb fetch failures
+- [modslop](https://github.com/experimental-gains/modslop): flags hallucinated/slopsquatted Go module paths
+- [slopcheck](https://github.com/experimental-gains/slopcheck): same hallucinated-name check for PyPI/npm
+- [hfaudit](https://github.com/experimental-gains/hfaudit): same check for Hugging Face Hub model/dataset IDs
+
 ## Repo
 - [Source](https://github.com/experimental-gains/goprivaudit): MIT-licensed, currently at v0.1.101
