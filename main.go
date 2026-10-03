@@ -31,6 +31,17 @@
 // too. It makes no network calls: everything it checks is the local
 // go.mod, git config, netrc file, and `go env` output.
 //
+// Both checks are skipped, before anything else below is even considered,
+// when GO111MODULE=off: that setting disables Go's module system
+// outright, so a module-aware go subcommand either Fatals immediately
+// ("go: modules disabled by GO111MODULE=off") or silently falls back to
+// legacy GOPATH-mode package resolution, which has no notion of go.mod,
+// go.sum, or a checksum database at all — go.work/go.mod are never even
+// parsed, so none of the skip conditions below (all of which reason about
+// what those two files' own contents make the real go command do) ever
+// get a chance to apply in the first place. See the doc comment in run()
+// where GO111MODULE is read for the live verification.
+//
 // Both checks are skipped when GOSUMDB=off: that setting disables the
 // checksum database entirely, for every module, so neither an uncovered
 // private module nor an overly broad GOPRIVATE/GONOSUMDB pattern can leak
@@ -179,6 +190,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	proxyOverride := fs.String("proxy", "", "override GOPROXY instead of reading it from `go env`")
 	govcsOverride := fs.String("govcs", "", "override GOVCS instead of reading it from `go env`")
 	goversionOverride := fs.String("goversion", "", "override GOVERSION instead of reading it from `go env`")
+	go111moduleOverride := fs.String("go111module", "", "override GO111MODULE instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -189,7 +201,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet, goversionSet := false, false, false, false, false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet, goversionSet, go111moduleSet := false, false, false, false, false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -208,6 +220,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			govcsSet = true
 		case "goversion":
 			goversionSet = true
+		case "go111module":
+			go111moduleSet = true
 		}
 	})
 
@@ -227,6 +241,33 @@ func run(args []string, stdout, stderr *os.File) int {
 	// SUMDB LEAK — a false negative on the tool's core signal, the exact
 	// scenario the go.work support added in run #298 exists to catch.
 	moduleDir := filepath.Dir(*gomodPath)
+
+	// go111module is read before gowork/gosumdb/goflags/etc. below, and
+	// checked first in the switch below, because GO111MODULE=off preempts
+	// all of them: it disables module mode outright, so go.work/go.mod
+	// are never even parsed. Confirmed live (2026-10-03, go1.24.4 and
+	// go1.26.8): with GO111MODULE=off, `go build`/`go vet`/`go install`
+	// silently fall back to legacy GOPATH-mode package resolution — which
+	// has no concept of go.mod, go.sum, or a checksum database at all —
+	// while `go list -m`/`go mod tidy`/`go get` Fatal outright instead
+	// ("go: list -m cannot be used with GO111MODULE=off" / "go: modules
+	// disabled by GO111MODULE=off; see 'go help modules'"), before
+	// resolving a single module either way; also confirmed this preempts
+	// an otherwise-malformed go.mod (a bogus "go 1.9x" directive is never
+	// even parsed under GO111MODULE=off) the same way every other
+	// "cannot leak" skip in this file's package doc comment does, just
+	// reached earlier than any of them. Read via `go env` (like every
+	// other var in this file) rather than os.Getenv directly, so a value
+	// persisted with `go env -w` is honored too. This exact gap — zero
+	// GO111MODULE awareness, reporting a false SUMDB LEAK for a real,
+	// otherwise-uncovered private-auth signal under GO111MODULE=off — was
+	// already found and fixed in this tool's own sibling, goproxycheck
+	// (`localGo111ModuleOff`, run #651/technique #138), but never ported
+	// here until now.
+	go111module := *go111moduleOverride
+	if !go111moduleSet {
+		go111module = goEnv(moduleDir, "GO111MODULE")
+	}
 
 	gowork := *goworkOverride
 	if !goworkSet {
@@ -389,6 +430,17 @@ func run(args []string, stdout, stderr *os.File) int {
 
 	var r Report
 	switch {
+	case go111module == "off":
+		// GO111MODULE=off disables module mode outright — see the doc
+		// comment where go111module is computed above for the live-verified
+		// error text and why this is checked before every other case below,
+		// including goWorkHasUnparseableDirective: a module-aware go
+		// subcommand run with GO111MODULE=off never parses go.work or
+		// go.mod at all (it falls back to legacy GOPATH-style package
+		// resolution, or Fatals outright for a command with no GOPATH
+		// equivalent, like "go list -m"), so neither file's own content has
+		// any bearing on whether a checksum-database query can happen — it
+		// structurally cannot, regardless of what either file says.
 	case goWorkHasUnparseableDirective(gowork):
 		// An active go.work file that itself contains a stray "/*" block
 		// comment, a malformed `go`/`toolchain` directive, or a line whose

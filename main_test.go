@@ -681,6 +681,77 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunGo111ModuleOffNoLeak covers a real false-positive this tool had:
+// GO111MODULE=off disables Go's module system outright — verified live
+// (go1.24.4 and go1.26.8) that a module-aware go subcommand either Fatals
+// immediately ("go: modules disabled by GO111MODULE=off", "go: list -m
+// cannot be used with GO111MODULE=off") or silently falls back to legacy
+// GOPATH-mode package resolution, which has no notion of go.mod, go.sum,
+// or a checksum database at all — go.mod is never even parsed. Before the
+// fix, `run` never read GO111MODULE at all, so it still reported a SUMDB
+// LEAK for a module with a private-auth signal but no GOPRIVATE/GONOSUMDB
+// coverage — an alarm for a checksum-database query that structurally
+// cannot happen in this mode. This exact gap was already found and fixed
+// in this tool's own sibling, goproxycheck (`localGo111ModuleOff`), but
+// had never been ported here.
+func TestRunGo111ModuleOffNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-go111module", "off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean with GO111MODULE=off, got: %s", stdout)
+	}
+}
+
+// TestRunGo111ModuleOnStillLeaks is TestRunGo111ModuleOffNoLeak's companion,
+// proving the fix doesn't overreach: GO111MODULE=on (module mode's own
+// explicit, non-default-but-still-enabled spelling) must not be mistaken
+// for "off" — the exact same scenario still leaks.
+func TestRunGo111ModuleOnStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-go111module", "on",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should still report a leak with GO111MODULE=on, got: %s", stdout)
+	}
+}
+
 // TestRunGoSumdbOffNoLeak covers a real false-positive this tool had:
 // GOSUMDB=off disables the checksum database entirely, for every module,
 // per `go help module-auth` — verified live (`GOSUMDB=off go env GOSUMDB`)

@@ -26,6 +26,16 @@ Go modules:
 It makes no network calls. Everything it checks — `go.mod`, git config,
 the netrc file, `go env` output — is local.
 
+Both checks are skipped (reported clean), before anything else below is
+even considered, when `GO111MODULE=off`: that setting disables Go's module
+system outright. Verified live (go1.24.4 and go1.26.8): a module-aware `go`
+subcommand either Fatals immediately (`go: modules disabled by
+GO111MODULE=off`, `go: list -m cannot be used with GO111MODULE=off`) or
+silently falls back to legacy GOPATH-mode package resolution, which has no
+notion of `go.mod`, `go.sum`, or a checksum database at all — `go.mod` is
+never even parsed, so no sumdb query can ever happen regardless of what it
+contains.
+
 Both checks are skipped (reported clean) when `GOSUMDB=off`: that setting
 disables the checksum database entirely, for every module, so neither
 finding can apply — there's no sumdb query happening for anything to leak
@@ -162,6 +172,7 @@ Flags, mainly for testing/CI overrides:
 -proxy string    override GOPROXY instead of reading it from `go env`
 -govcs string    override GOVCS instead of reading it from `go env`
 -goversion string  override GOVERSION instead of reading it from `go env`
+-go111module string  override GO111MODULE instead of reading it from `go env`
 ```
 
 ## Use with pre-commit
