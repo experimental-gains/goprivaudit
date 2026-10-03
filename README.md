@@ -41,6 +41,22 @@ disables the checksum database entirely, for every module, so neither
 finding can apply — there's no sumdb query happening for anything to leak
 from or over-trust.
 
+Both checks are also skipped (reported clean) when `GOAUTH` is malformed
+(see `goAuthConfigError`): real `cmd/go`'s own `GOAUTH` parsing Fatals
+before the process's very first HTTPS request, and the sumdb query either
+finding warns about is always exactly such a request — so a malformed
+`GOAUTH` (e.g. `GOAUTH="off;netrc"`, or a stray doubled semicolon like
+`GOAUTH="netrc;;netrc"`) blocks the leak itself, regardless of what
+`GOPRIVATE`/`GONOSUMDB` say. Verified live (2026-10-03): with a well-formed
+`GOAUTH`, a real `GOFLAGS=-mod=mod go build` against a module already
+sitting in the local module cache but missing from `go.sum` sends a genuine
+`GET https://sum.golang.org/lookup/<module>@<version>` request; with
+`GOAUTH="off;netrc"` in the identical setup, the process Fatals the instant
+it would otherwise have issued that request. This is unrelated to this
+tool's own private-auth signals (`insteadOf`, credential helpers,
+`extraHeader`, netrc) — `GOAUTH` only governs `go`'s own HTTP client, never
+a `git` subprocess fetch — it's purely about the leaking request itself.
+
 `GOPROXY=off` (or any GOPROXY chain shape) is deliberately **not** treated
 as a reason to skip either check, even though it might look like the same
 "cannot leak" case as `GOSUMDB=off`/vendor mode above. Verified live: with
@@ -173,6 +189,7 @@ Flags, mainly for testing/CI overrides:
 -govcs string    override GOVCS instead of reading it from `go env`
 -goversion string  override GOVERSION instead of reading it from `go env`
 -go111module string  override GO111MODULE instead of reading it from `go env`
+-goauth string    override GOAUTH instead of reading it from `go env`
 ```
 
 ## Use with pre-commit

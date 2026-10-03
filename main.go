@@ -52,6 +52,16 @@
 // That vendor auto-default does not apply inside an active go.work
 // workspace, so it's only honored when GOWORK is unset/"off" (or an
 // explicit -mod=vendor override is present, which applies either way).
+// Both are also skipped when GOAUTH is malformed (see goAuthConfigError) —
+// cmd/go's own GOAUTH parsing Fatals before the process's first HTTPS
+// request, and the sumdb query either finding exists to warn about is
+// always an HTTPS request, so a malformed GOAUTH blocks the leak itself
+// regardless of GOPRIVATE/GONOSUMDB coverage. Unlike the private-auth
+// signals this tool collects (insteadOf, credential.helper, extraHeader,
+// netrc — none of which GOAUTH gates, since those authenticate a `git`
+// subprocess, not go's own HTTP client), GOAUTH's effect here is entirely
+// about the leaking request itself, not about whether the module's source
+// fetch is private.
 // Both are also skipped when GOFLAGS itself is rejected outright by the
 // real go command's own validation — a malformed shape (goflagsMalformed),
 // an explicit "-mod=" value that isn't one of the four real go accepts
@@ -191,6 +201,7 @@ func run(args []string, stdout, stderr *os.File) int {
 	govcsOverride := fs.String("govcs", "", "override GOVCS instead of reading it from `go env`")
 	goversionOverride := fs.String("goversion", "", "override GOVERSION instead of reading it from `go env`")
 	go111moduleOverride := fs.String("go111module", "", "override GO111MODULE instead of reading it from `go env`")
+	goauthOverride := fs.String("goauth", "", "override GOAUTH instead of reading it from `go env`")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -201,7 +212,7 @@ func run(args []string, stdout, stderr *os.File) int {
 		return 2
 	}
 
-	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet, goversionSet, go111moduleSet := false, false, false, false, false, false, false, false, false
+	privateSet, nosumdbSet, goworkSet, sumdbSet, goflagsSet, proxySet, govcsSet, goversionSet, go111moduleSet, goauthSet := false, false, false, false, false, false, false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "private":
@@ -222,6 +233,8 @@ func run(args []string, stdout, stderr *os.File) int {
 			goversionSet = true
 		case "go111module":
 			go111moduleSet = true
+		case "goauth":
+			goauthSet = true
 		}
 	})
 
@@ -390,6 +403,25 @@ func run(args []string, stdout, stderr *os.File) int {
 	gosumdb := *sumdbOverride
 	if !sumdbSet {
 		gosumdb = goEnv(moduleDir, "GOSUMDB")
+	}
+
+	// goauth is read via `go env` (like every other var in this file)
+	// rather than os.Getenv directly, so a value persisted with `go env -w`
+	// is honored too. See goAuthConfigError's doc comment for the
+	// live-verified mechanics: a malformed GOAUTH Fatals real go before its
+	// first HTTPS request of the process, which is also the request this
+	// tool's SUMDB LEAK finding warns about — so a malformed GOAUTH means
+	// that leak cannot actually happen, the same "cannot leak" reasoning as
+	// GOSUMDB=off/vendor mode just above, just gating the leaking request
+	// itself instead of the decision to make it at all. This exact gap —
+	// zero GOAUTH awareness here — was already found and fixed in this
+	// tool's own sibling, goproxycheck (`localGoAuthConfigError`, run
+	// #628/technique #117), for goproxycheck's differently-shaped "would
+	// the fetch succeed" question, but never ported to this tool's own
+	// "can a leak happen at all" question until now.
+	goauth := *goauthOverride
+	if !goauthSet {
+		goauth = goEnv(moduleDir, "GOAUTH")
 	}
 
 	goflags := *goflagsOverride
@@ -636,6 +668,15 @@ func run(args []string, stdout, stderr *os.File) int {
 		// reasoning as GOSUMDB=off above, just reached because the build
 		// reads everything off the committed vendor/ directory instead of
 		// the network, rather than because sumdb checking was turned off.
+	case goAuthConfigError(goauth) != nil:
+		// A malformed GOAUTH (see goAuthConfigError) makes every module-aware
+		// go subcommand Fatal the instant it's about to issue its first
+		// HTTPS request of the run — and the sumdb query this tool's SUMDB
+		// LEAK finding warns about is always exactly such a request. So the
+		// leak itself cannot happen, the same "cannot leak" reasoning as
+		// GOSUMDB=off/vendorActive just above, just reached one step later:
+		// GOAUTH gates the leaking request directly, regardless of whether
+		// GOPRIVATE/GONOSUMDB cover the module or not.
 	default:
 		// filterGovcsDisallowed drops any module GOVCS disallows fetching
 		// via a direct (non-proxy) git invocation: real go Fatals with

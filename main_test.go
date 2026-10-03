@@ -752,6 +752,78 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunGoAuthMalformedNoLeak covers a real false-positive this tool had:
+// a malformed GOAUTH (see goAuthConfigError) makes real cmd/go Fatal before
+// its first HTTPS request of the run, and the sumdb query this tool's SUMDB
+// LEAK finding warns about is always exactly such a request — confirmed
+// live (2026-10-03) against this exact scenario (a require with a git
+// insteadOf rewrite, no GOPRIVATE/GONOSUMDB coverage): with a well-formed
+// GOAUTH, a real `GOFLAGS=-mod=mod go build` against a module already
+// sitting in the local module cache but missing from go.sum sends a
+// genuine `GET https://sum.golang.org/lookup/<module>@<version>` request;
+// with `GOAUTH="off;netrc"` in the identical setup, the process Fatals the
+// instant it would otherwise have issued that request, so the leak cannot
+// happen. Before this check existed, `run` never read GOAUTH at all, so it
+// still reported a SUMDB LEAK for a checksum-database query that
+// structurally cannot happen under a malformed GOAUTH.
+func TestRunGoAuthMalformedNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goauth", "off;netrc",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean with a malformed GOAUTH, got: %s", stdout)
+	}
+}
+
+// TestRunGoAuthWellFormedStillLeaks is TestRunGoAuthMalformedNoLeak's
+// companion, proving the fix doesn't overreach: a well-formed GOAUTH (the
+// real default, "netrc") must not be mistaken for a malformed one — the
+// exact same scenario still leaks.
+func TestRunGoAuthWellFormedStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goauth", "netrc",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should still report a leak with a well-formed GOAUTH, got: %s", stdout)
+	}
+}
+
 // TestRunGoSumdbOffNoLeak covers a real false-positive this tool had:
 // GOSUMDB=off disables the checksum database entirely, for every module,
 // per `go help module-auth` — verified live (`GOSUMDB=off go env GOSUMDB`)
