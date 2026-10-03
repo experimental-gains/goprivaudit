@@ -11,20 +11,63 @@ import (
 // including a major-version suffix like "/v2" or a monorepo subdirectory
 // (confirmed against go1.24.4's vendored golang.org/x/mod/internal/vcs
 // source: the github.com entry's regexp is anchored to exactly two path
-// segments after the host). Scoped deliberately to github.com only, mirroring
-// goproxycheck's own githubRepoPattern/githubRepoRoot (run #476's twin fix,
-// ported here — see govcsAllowsGit's doc comment): it's the one host this
-// tool can state with certainty always resolves to a fixed two-segment root
-// without a live go-import discovery request, which this offline tool can't
-// make. Every other host's modules are matched against their own full
-// import path unchanged, the same conservative, unchanged-by-default scope
-// goproxycheck's port uses.
+// segments after the host). Scoped deliberately to github.com and
+// bitbucket.org (see bitbucketRepoPattern below) rather than every host,
+// mirroring goproxycheck's own githubRepoPattern/githubRepoRoot (run #476's
+// twin fix, ported here — see govcsAllowsGit's doc comment): these are the
+// only two hosts this tool can state with certainty always resolve to a
+// fixed two-segment root without a live go-import discovery request, which
+// this offline tool can't make — both are hardcoded, static entries in
+// cmd/go/internal/vcs's own vcsPaths table (go1.24.4 source), unlike every
+// other host, which falls back to a dynamic <meta name="go-import"> HTTP
+// fetch to discover its actual root. Every other host's modules are
+// matched against their own full import path unchanged, the same
+// conservative, unchanged-by-default scope goproxycheck's port uses.
 var githubRepoPattern = regexp.MustCompile(`^github\.com/([^/]+)/([^/]+)`)
+
+// bitbucketRepoPattern is githubRepoPattern's sibling for bitbucket.org —
+// also a static, two-segment-root entry in cmd/go/internal/vcs's vcsPaths
+// table (`^(?P<root>bitbucket\.org/[\w.\-]+/[\w.\-]+)(/[\w.\-]+)*$`,
+// go1.24.4 source), truncating any path segment past "owner/repo" the
+// identical way github.com's entry does. Live-verified (2026-10-03,
+// go1.24.4): with GOVCS="bitbucket.org/owner/repo/subpkg:off" (naming a
+// bitbucket.org import path's own subdirectory package, not its two-segment
+// repo root) and GOSUMDB left at its default, `go mod download` for
+// bitbucket.org/owner/repo/subpkg@<version> does NOT hit the "GOVCS
+// disallows" Fatal at all — it proceeds straight to an ordinary git
+// fetch attempt against bitbucket.org (reaching the network, then failing
+// on the repo's own absence/credentials, exactly like a real leak would
+// reach sum.golang.org next) — while GOVCS="bitbucket.org/owner/repo:off"
+// (naming exactly the truncated root) Fatals immediately with "GOVCS
+// disallows using git for public bitbucket.org/owner/repo". Before this
+// fix, govcsAllowsGit matched a bitbucket.org GOVCS pattern against the
+// full modulePath directly, the same false-negative bug class run #476/
+// govcsAllowsGit's github.com fix (the gax-go/v2 case) already closed for
+// github.com but never ported to bitbucket.org, the other host sharing the
+// identical static-root guarantee.
+var bitbucketRepoPattern = regexp.MustCompile(`^bitbucket\.org/([^/]+)/([^/]+)`)
 
 // githubRepoRoot returns modulePath's "github.com/owner/repo" prefix, or ""
 // if modulePath isn't github.com-hosted.
 func githubRepoRoot(modulePath string) string {
 	return githubRepoPattern.FindString(modulePath)
+}
+
+// bitbucketRepoRoot returns modulePath's "bitbucket.org/owner/repo" prefix,
+// or "" if modulePath isn't bitbucket.org-hosted. See bitbucketRepoPattern.
+func bitbucketRepoRoot(modulePath string) string {
+	return bitbucketRepoPattern.FindString(modulePath)
+}
+
+// vcsStaticRepoRoot returns the statically-known VCS repo root for
+// modulePath — see githubRepoPattern/bitbucketRepoPattern — or "" if
+// modulePath's host isn't one of the two this tool can resolve offline
+// with certainty.
+func vcsStaticRepoRoot(modulePath string) string {
+	if root := githubRepoRoot(modulePath); root != "" {
+		return root
+	}
+	return bitbucketRepoRoot(modulePath)
 }
 
 // govcsRule is a single GOVCS entry: a pattern (a GOPRIVATE-style glob
@@ -122,14 +165,15 @@ var defaultGovcsRules = []govcsRule{
 //
 // Matches patterns (both the GOPRIVATE-derived public/private classification
 // and any explicit, non-public/private GOVCS entry) against
-// githubRepoRoot(modulePath) when modulePath is github.com-hosted, not
-// modulePath itself: real cmd/go's checkGOVCS (internal/vcs/vcs.go) always
-// classifies and matches against the VCS-resolved repo root (see
-// githubRepoPattern's doc comment), so a GOPRIVATE/GOVCS pattern more
-// specific than that root — naming a "/v2"-suffixed or monorepo-nested
-// import path exactly, rather than just the bare owner/repo — can match
-// modulePath directly while never matching the truncated root real go
-// actually checks it against. Live-verified (2026-10-02, go1.24.4): with
+// vcsStaticRepoRoot(modulePath) when modulePath is github.com- or
+// bitbucket.org-hosted, not modulePath itself: real cmd/go's checkGOVCS
+// (internal/vcs/vcs.go) always classifies and matches against the
+// VCS-resolved repo root (see githubRepoPattern's/bitbucketRepoPattern's doc
+// comments), so a GOPRIVATE/GOVCS pattern more specific than that root —
+// naming a "/v2"-suffixed or monorepo-nested import path exactly, rather
+// than just the bare owner/repo — can match modulePath directly while never
+// matching the truncated root real go actually checks it against.
+// Live-verified (2026-10-02, go1.24.4) for github.com: with
 // GOVCS="github.com/googleapis/gax-go/v2:off" (naming the exact import path
 // of a real module that lives in an actual "v2" subdirectory of its repo)
 // and no GOPRIVATE coverage, `go mod download -x
@@ -137,11 +181,18 @@ var defaultGovcsRules = []govcsRule{
 // git clone (root "github.com/googleapis/gax-go" doesn't match the
 // "/v2"-suffixed pattern) and goes on to query
 // `sum.golang.org/lookup/github.com/googleapis/gax-go/v2@v2.12.0` — a real
-// leak. Before this fix, govcsAllowsGit matched the ":off" rule against the
-// full modulePath directly, reported git as disallowed, and
-// filterGovcsDisallowed silently dropped this exact module from the SUMDB
-// LEAK audit — a false negative on a real, uncovered private-auth signal.
-// Scoped to github.com only, matching githubRepoPattern's own scope: every
+// leak. Live-verified again (2026-10-03, go1.24.4) for bitbucket.org, the
+// other statically-rooted host (see bitbucketRepoPattern): with
+// GOVCS="bitbucket.org/owner/repo/subpkg:off" and no GOPRIVATE coverage,
+// `go mod download` for bitbucket.org/owner/repo/subpkg@<version> likewise
+// skips the "GOVCS disallows" Fatal and proceeds to an ordinary git fetch
+// attempt, while GOVCS="bitbucket.org/owner/repo:off" (the truncated root)
+// Fatals immediately. Before this fix, govcsAllowsGit matched a github.com
+// OR bitbucket.org ":off" rule against the full modulePath directly,
+// reported git as disallowed, and filterGovcsDisallowed silently dropped
+// the exact module from the SUMDB LEAK audit in both cases — a false
+// negative on a real, uncovered private-auth signal. Scoped to github.com
+// and bitbucket.org only, matching vcsStaticRepoRoot's own scope: every
 // other host keeps matching against modulePath unchanged, same as before
 // this fix.
 func govcsAllowsGit(modulePath, govcs, goprivate string) bool {
@@ -150,7 +201,7 @@ func govcsAllowsGit(modulePath, govcs, goprivate string) bool {
 		return true
 	}
 	matchPath := modulePath
-	if root := githubRepoRoot(modulePath); root != "" {
+	if root := vcsStaticRepoRoot(modulePath); root != "" {
 		matchPath = root
 	}
 	private := matchesAnyPattern(matchPath, splitPatterns(goprivate))

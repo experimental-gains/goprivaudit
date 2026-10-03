@@ -160,17 +160,42 @@ func TestGovcsAllowsGitPatternAtGithubRepoRoot(t *testing.T) {
 	}
 }
 
-// TestGovcsAllowsGitNonGithubHostUnaffected proves the githubRepoRoot
-// truncation is scoped to github.com only: a non-github.com module with an
-// extra path segment past its first two components still matches an
-// explicit pattern naming its own full path exactly, unchanged from before
-// this fix — this tool has no way to resolve an arbitrary host's real VCS
-// repo root offline, so it deliberately keeps matching those hosts'
-// patterns against the full import path, same as every other
-// non-public/private GOVCS pattern already does.
+// TestGovcsAllowsGitNonGithubHostUnaffected proves the githubRepoRoot/
+// bitbucketRepoRoot truncation is scoped to those two hosts only: an
+// arbitrary, non-statically-rooted host module with an extra path segment
+// past its first two components still matches an explicit pattern naming
+// its own full path exactly, unchanged from before this fix — this tool
+// has no way to resolve an arbitrary host's real VCS repo root offline, so
+// it deliberately keeps matching those hosts' patterns against the full
+// import path, same as every other non-public/private GOVCS pattern
+// already does.
 func TestGovcsAllowsGitNonGithubHostUnaffected(t *testing.T) {
 	if govcsAllowsGit("example.com/owner/repo/v2", "example.com/owner/repo/v2:off", "") {
 		t.Error("expected a non-github.com GOVCS pattern matching the full path to still block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternPastBitbucketRepoRoot is bitbucket.org's
+// sibling of TestGovcsAllowsGitPatternPastGithubRepoRoot: an explicit GOVCS
+// pattern naming a bitbucket.org module's full import path (a subdirectory
+// package past its real two-segment repo root) must not be treated as
+// matching, since real cmd/go's checkGOVCS always classifies against the
+// VCS repo root — bitbucket.org has its own static, two-segment-root entry
+// in cmd/go/internal/vcs's vcsPaths table, the same as github.com. See
+// govcsAllowsGit's doc comment for the live verification this mirrors.
+func TestGovcsAllowsGitPatternPastBitbucketRepoRoot(t *testing.T) {
+	if !govcsAllowsGit("bitbucket.org/owner/repo/subpkg", "bitbucket.org/owner/repo/subpkg:off", "") {
+		t.Error("expected a GOVCS pattern naming the full module path (past the real repo root) to NOT block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternAtBitbucketRepoRoot is the companion proving the
+// fix doesn't overreach: a GOVCS pattern naming exactly a bitbucket.org
+// module's real VCS repo root (no extra subdirectory segment) must still
+// block it.
+func TestGovcsAllowsGitPatternAtBitbucketRepoRoot(t *testing.T) {
+	if govcsAllowsGit("bitbucket.org/owner/repo/subpkg", "bitbucket.org/owner/repo:off", "") {
+		t.Error("expected a GOVCS pattern naming the real repo root to block git")
 	}
 }
 
