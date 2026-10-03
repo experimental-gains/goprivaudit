@@ -411,6 +411,163 @@ require example.com/foo/bar.git/sub v1.0.0
 	}
 }
 
+// TestRunGovcsPatternPastHubJazzNetRepoRootStillLeaks is
+// TestRunGovcsPatternPastRepoRootStillLeaks's sibling for hub.jazz.net/git —
+// cmd/go/internal/vcs's vcsPaths table's IBM DevOps Services (JazzHub)
+// entry, a THIRD hardcoded static-root host alongside github.com/
+// bitbucket.org. Live-verified (2026-10-03, go1.24.4): go.mod requiring
+// "hub.jazz.net/git/abc123/myproject/subpkg@<pseudo-version>", GOPROXY=direct,
+// GOSUMDB=off, no GOPRIVATE coverage. GOVCS=
+// "hub.jazz.net/git/abc123/myproject/subpkg:off" (the module's own full
+// import path, past its real four-segment repo root) does NOT block it —
+// `go mod download -x` proceeds straight to an ordinary git-fetch attempt
+// against hub.jazz.net (confirmed reaching the network in the -x trace).
+// Before this fix, vcsStaticRepoRoot had no entry for this host at all (its
+// path spells out no literal VCS-suffix segment, so generalVCSSuffixPattern's
+// catch-all can't resolve it either) and matched the ":off" pattern against
+// the full module path directly, wrongly concluded git was disallowed, and
+// filterGovcsDisallowed silently dropped this exact module from the SUMDB
+// LEAK audit — a false negative on a real, uncovered private-auth signal.
+func TestRunGovcsPatternPastHubJazzNetRepoRootStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require hub.jazz.net/git/abc123/myproject/subpkg v0.0.0-20200101000000-000000000000
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://hub.jazz.net/git"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "hub.jazz.net/git/abc123/myproject/subpkg:off",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (the real repo root doesn't match this pattern, so GOVCS never blocks it); stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: hub.jazz.net/git/abc123/myproject/subpkg") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGovcsPatternAtHubJazzNetRepoRootSuppressesLeak is
+// TestRunGovcsPatternPastHubJazzNetRepoRootStillLeaks's companion, proving
+// the fix doesn't overreach: a GOVCS entry naming exactly the module's real
+// VCS repo root (no extra subdirectory segment) still correctly suppresses
+// the finding — live-verified the identical ":off" pattern here does make
+// real `go mod download` Fatal with "GOVCS disallows using git for public
+// hub.jazz.net/git/abc123/myproject" before any network access.
+func TestRunGovcsPatternAtHubJazzNetRepoRootSuppressesLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require hub.jazz.net/git/abc123/myproject/subpkg v0.0.0-20200101000000-000000000000
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://hub.jazz.net/git"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "hub.jazz.net/git/abc123/myproject:off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should report no leak when GOVCS disallows git for the module's real repo root: %s", stdout)
+	}
+}
+
+// TestRunGovcsPatternPastOpenstackRepoRootStillLeaks is
+// TestRunGovcsPatternPastRepoRootStillLeaks's sibling for
+// git.openstack.org — cmd/go/internal/vcs's vcsPaths table's old OpenStack
+// Gerrit entry, a FIFTH hardcoded static-root host (git.apache.org, the
+// fourth, is always ".git"-suffixed and so already reachable through
+// generalVCSSuffixPattern's catch-all). Live-verified (2026-10-03,
+// go1.24.4): go.mod requiring
+// "git.openstack.org/openstack/nova/subpkg@<pseudo-version>", GOPROXY=direct,
+// GOSUMDB=off, no GOPRIVATE coverage. GOVCS=
+// "git.openstack.org/openstack/nova/subpkg:off" (the module's own full
+// import path, past its real two-segment repo root) does NOT block it —
+// `go mod download -x` proceeds straight to an ordinary git-fetch attempt
+// against git.openstack.org (confirmed reaching the network in the -x
+// trace). Before this fix, vcsStaticRepoRoot had no entry for this host
+// either, and matched the ":off" pattern against the full module path
+// directly, wrongly concluded git was disallowed, and
+// filterGovcsDisallowed silently dropped this exact module from the SUMDB
+// LEAK audit — a false negative on a real, uncovered private-auth signal.
+func TestRunGovcsPatternPastOpenstackRepoRootStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.openstack.org/openstack/nova/subpkg v0.0.0-20200101000000-000000000000
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://git.openstack.org/openstack"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "git.openstack.org/openstack/nova/subpkg:off",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (the real repo root doesn't match this pattern, so GOVCS never blocks it); stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: git.openstack.org/openstack/nova/subpkg") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGovcsPatternAtOpenstackRepoRootSuppressesLeak is
+// TestRunGovcsPatternPastOpenstackRepoRootStillLeaks's companion, proving
+// the fix doesn't overreach: a GOVCS entry naming exactly the module's real
+// VCS repo root (no extra subdirectory segment) still correctly suppresses
+// the finding — live-verified the identical ":off" pattern here does make
+// real `go mod download` Fatal with "GOVCS disallows using git for public
+// git.openstack.org/openstack/nova" before any network access.
+func TestRunGovcsPatternAtOpenstackRepoRootSuppressesLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require git.openstack.org/openstack/nova/subpkg v0.0.0-20200101000000-000000000000
+`)
+	writeFile(t, dir, ".git/config", `[credential "https://git.openstack.org/openstack"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "git.openstack.org/openstack/nova:off",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should report no leak when GOVCS disallows git for the module's real repo root: %s", stdout)
+	}
+}
+
 // TestRunIgnoreDirectiveTooOldGoModNoLeak is the direct regression test
 // for goModHasIgnoreDirectiveTooOld (see gomod.go): a go.mod carrying an
 // `ignore` directive alongside a `go` directive below 1.25, audited by a

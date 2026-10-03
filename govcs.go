@@ -48,12 +48,63 @@ var githubRepoPattern = regexp.MustCompile(`^github\.com/([^/]+)/([^/]+)`)
 // identical static-root guarantee.
 var bitbucketRepoPattern = regexp.MustCompile(`^bitbucket\.org/([^/]+)/([^/]+)`)
 
+// hubJazzNetRepoPattern is githubRepoPattern's sibling for IBM DevOps
+// Services' old JazzHub — a THIRD hardcoded, static-root entry in
+// cmd/go/internal/vcs's vcsPaths table (go1.24.4 source):
+// `^(?P<root>hub\.jazz\.net/git/[a-z0-9]+/[\w.\-]+)(/[\w.\-]+)*$`, truncating
+// any path segment past "git/<user>/<project>" exactly the way github.com's
+// and bitbucket.org's entries truncate past "owner/repo". Live-verified
+// (2026-10-03, go1.24.4): with
+// GOVCS="hub.jazz.net/git/abc123/myproject/subpkg:off" (naming a
+// subdirectory package past the real 4-segment repo root, not the root
+// itself) and GOSUMDB left at its default, `go mod download` for
+// hub.jazz.net/git/abc123/myproject/subpkg@<version> does NOT hit the
+// "GOVCS disallows" Fatal — it proceeds straight to a real git-fetch
+// attempt (confirmed reaching the network: `git remote add origin --
+// https://hub.jazz.net/git/abc123/myproject` in the -x trace) — while
+// GOVCS="hub.jazz.net/git/abc123/myproject:off" (naming exactly the
+// truncated root) Fatals immediately with "GOVCS disallows using git for
+// public hub.jazz.net/git/abc123/myproject". Before this fix,
+// vcsStaticRepoRoot had no entry for this host at all (unlike
+// generalVCSSuffixPattern's catch-all, a hub.jazz.net/git path spells out no
+// literal VCS-suffix segment anywhere, so that catch-all can't resolve it
+// either) and matched every GOVCS pattern against the module's full import
+// path directly — the identical false-negative bug class already closed for
+// github.com/bitbucket.org/the general-suffix catch-all, just a fourth
+// vcsPaths entry none of those three fixes had enumerated yet.
+var hubJazzNetRepoPattern = regexp.MustCompile(`^hub\.jazz\.net/git/[a-z0-9]+/([^/]+)`)
+
+// openstackRepoPattern is githubRepoPattern's sibling for the old
+// git.openstack.org — a FIFTH hardcoded, static-root entry in
+// cmd/go/internal/vcs's vcsPaths table (go1.24.4 source):
+// `^(?P<root>git\.openstack\.org/[\w.\-]+/[\w.\-]+)(\.git)?(/[\w.\-]+)*$`,
+// truncating any path segment past "<project>/<repo>" the same way
+// bitbucket.org's entry truncates past "owner/repo" — and, unlike
+// git.apache.org's sibling entry in the same table (whose repo name must
+// always literally end in ".git", so it's always also reachable via
+// generalVCSSuffixPattern's any-host catch-all below), git.openstack.org's
+// ".git" suffix is optional, so a path with no literal VCS-suffix segment
+// at all (the common case) has no other static entry to resolve it through.
+// Live-verified (2026-10-03, go1.24.4): with
+// GOVCS="git.openstack.org/openstack/nova/subpkg:off" (naming a
+// subdirectory package past the real two-segment repo root) and GOSUMDB
+// left at its default, `go mod download` for
+// git.openstack.org/openstack/nova/subpkg@<version> does NOT hit the
+// "GOVCS disallows" Fatal — it proceeds straight to a real git-fetch
+// attempt (confirmed reaching the network in the -x trace) — while
+// GOVCS="git.openstack.org/openstack/nova:off" (naming exactly the
+// truncated root) Fatals immediately with "GOVCS disallows using git for
+// public git.openstack.org/openstack/nova". Before this fix,
+// vcsStaticRepoRoot had no entry for this host either.
+var openstackRepoPattern = regexp.MustCompile(`^git\.openstack\.org/([^/]+)/([^/]+)`)
+
 // generalVCSSuffixPattern mirrors cmd/go/internal/vcs's vcsPaths table's
 // last entry — "General syntax for any server", explicitly comment-marked
 // "Must be last." in the go1.24.4 source — which resolves an import path to
 // a fixed VCS repo root for literally ANY host, not just github.com/
-// bitbucket.org, whenever the path itself spells out a literal
-// ".bzr"/".fossil"/".git"/".hg"/".svn" suffix on one of its segments:
+// bitbucket.org/hub.jazz.net/git.openstack.org, whenever the path itself
+// spells out a literal ".bzr"/".fossil"/".git"/".hg"/".svn" suffix on one of
+// its segments:
 // `(?P<root>(?P<repo>([a-z0-9.\-]+\.)+[a-z0-9.\-]+(:[0-9]+)?(/~?[\w.\-]+)+?)\.(?P<vcs>bzr|fossil|git|hg|svn))(/~?[\w.\-]+)*$`.
 // This is documented, intentional Go tooling behavior (`go help
 // importpath`'s "repository.vcs" remote-import-path form), used by
@@ -96,6 +147,20 @@ func bitbucketRepoRoot(modulePath string) string {
 	return bitbucketRepoPattern.FindString(modulePath)
 }
 
+// hubJazzNetRepoRoot returns modulePath's "hub.jazz.net/git/user/project"
+// prefix, or "" if modulePath isn't hub.jazz.net/git-hosted. See
+// hubJazzNetRepoPattern.
+func hubJazzNetRepoRoot(modulePath string) string {
+	return hubJazzNetRepoPattern.FindString(modulePath)
+}
+
+// openstackRepoRoot returns modulePath's "git.openstack.org/project/repo"
+// prefix, or "" if modulePath isn't git.openstack.org-hosted. See
+// openstackRepoPattern.
+func openstackRepoRoot(modulePath string) string {
+	return openstackRepoPattern.FindString(modulePath)
+}
+
 // generalVCSSuffixRoot returns modulePath's VCS repo root per
 // generalVCSSuffixPattern — the segment up to and including its literal
 // ".bzr"/".fossil"/".git"/".hg"/".svn" suffix — or "" if modulePath contains
@@ -110,14 +175,33 @@ func generalVCSSuffixRoot(modulePath string) string {
 
 // vcsStaticRepoRoot returns the statically-known VCS repo root for
 // modulePath — see githubRepoPattern/bitbucketRepoPattern/
-// generalVCSSuffixPattern — or "" if modulePath doesn't match any of the
-// shapes this tool can resolve offline with certainty (github.com,
-// bitbucket.org, or any host spelling out a literal VCS-suffix segment).
+// hubJazzNetRepoPattern/openstackRepoPattern/generalVCSSuffixPattern — or ""
+// if modulePath doesn't match any of the shapes this tool can resolve
+// offline with certainty (github.com, bitbucket.org, hub.jazz.net/git,
+// git.openstack.org, or any host spelling out a literal VCS-suffix segment).
+// git.apache.org and chiselapp.com — cmd/go/internal/vcs's remaining two
+// pathPrefix-gated vcsPaths entries — are deliberately NOT added here:
+// git.apache.org's repo name must always literally end in ".git"
+// (`^(?P<root>git\.apache\.org/[a-z0-9_.\-]+\.git)(/[\w.\-]+)*$`), so every
+// valid path for it is already resolved correctly by
+// generalVCSSuffixPattern's any-host catch-all below; chiselapp.com's own
+// regexp (`^(?P<root>chiselapp\.com/user/[A-Za-z0-9]+/repository/[\w.\-]+)$`)
+// is anchored with a trailing "$" and allows no subdirectory past its root
+// at all, so its "root" and "full import path" are always identical
+// strings — there is no truncation for a dedicated entry to perform, and
+// the pre-existing "" fallback (match the full path, unchanged) already
+// gives the correct answer for every valid chiselapp.com module path.
 func vcsStaticRepoRoot(modulePath string) string {
 	if root := githubRepoRoot(modulePath); root != "" {
 		return root
 	}
 	if root := bitbucketRepoRoot(modulePath); root != "" {
+		return root
+	}
+	if root := hubJazzNetRepoRoot(modulePath); root != "" {
+		return root
+	}
+	if root := openstackRepoRoot(modulePath); root != "" {
 		return root
 	}
 	return generalVCSSuffixRoot(modulePath)

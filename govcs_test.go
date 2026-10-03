@@ -226,6 +226,57 @@ func TestGovcsAllowsGitPatternAtGeneralVCSSuffixRoot(t *testing.T) {
 	}
 }
 
+// TestGovcsAllowsGitPatternPastHubJazzNetRepoRoot is hub.jazz.net/git's
+// sibling of TestGovcsAllowsGitPatternPastGithubRepoRoot: an explicit GOVCS
+// pattern naming a hub.jazz.net/git module's full import path (a
+// subdirectory package past its real four-segment repo root) must not be
+// treated as matching, since real cmd/go's checkGOVCS always classifies
+// against the VCS repo root — hub.jazz.net/git has its own static,
+// four-segment-root entry in cmd/go/internal/vcs's vcsPaths table. See
+// hubJazzNetRepoPattern's doc comment for the live verification this
+// mirrors.
+func TestGovcsAllowsGitPatternPastHubJazzNetRepoRoot(t *testing.T) {
+	if !govcsAllowsGit("hub.jazz.net/git/abc123/myproject/subpkg", "hub.jazz.net/git/abc123/myproject/subpkg:off", "") {
+		t.Error("expected a GOVCS pattern naming the full module path (past the real repo root) to NOT block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternAtHubJazzNetRepoRoot is the companion proving the
+// fix doesn't overreach: a GOVCS pattern naming exactly a hub.jazz.net/git
+// module's real VCS repo root (no extra subdirectory segment) must still
+// block it.
+func TestGovcsAllowsGitPatternAtHubJazzNetRepoRoot(t *testing.T) {
+	if govcsAllowsGit("hub.jazz.net/git/abc123/myproject/subpkg", "hub.jazz.net/git/abc123/myproject:off", "") {
+		t.Error("expected a GOVCS pattern naming the real repo root to block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternPastOpenstackRepoRoot is git.openstack.org's
+// sibling of TestGovcsAllowsGitPatternPastBitbucketRepoRoot: an explicit
+// GOVCS pattern naming a git.openstack.org module's full import path (a
+// subdirectory package past its real two-segment repo root) must not be
+// treated as matching, since real cmd/go's checkGOVCS always classifies
+// against the VCS repo root — git.openstack.org has its own static,
+// two-segment-root entry in cmd/go/internal/vcs's vcsPaths table, whose
+// ".git" suffix (unlike git.apache.org's sibling entry) is optional. See
+// openstackRepoPattern's doc comment for the live verification this
+// mirrors.
+func TestGovcsAllowsGitPatternPastOpenstackRepoRoot(t *testing.T) {
+	if !govcsAllowsGit("git.openstack.org/openstack/nova/subpkg", "git.openstack.org/openstack/nova/subpkg:off", "") {
+		t.Error("expected a GOVCS pattern naming the full module path (past the real repo root) to NOT block git")
+	}
+}
+
+// TestGovcsAllowsGitPatternAtOpenstackRepoRoot is the companion proving the
+// fix doesn't overreach: a GOVCS pattern naming exactly a git.openstack.org
+// module's real VCS repo root (no extra subdirectory segment) must still
+// block it.
+func TestGovcsAllowsGitPatternAtOpenstackRepoRoot(t *testing.T) {
+	if govcsAllowsGit("git.openstack.org/openstack/nova/subpkg", "git.openstack.org/openstack/nova:off", "") {
+		t.Error("expected a GOVCS pattern naming the real repo root to block git")
+	}
+}
+
 // TestGovcsAllowsGitNonVCSSuffixHostStillUnaffected proves
 // generalVCSSuffixPattern is scoped to paths that actually spell out a
 // literal VCS-suffix segment: a non-github.com/bitbucket.org host with no
