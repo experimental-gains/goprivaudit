@@ -624,6 +624,102 @@ func goModHasIgnoreDirectiveTooOld(data []byte, localGoVersion string) bool {
 	return !goVersionAtLeast(local, 1, 25)
 }
 
+// goModHasToolDirective reports whether data's go.mod contains a top-level
+// `tool` directive at all (single-line "tool path" form or the
+// parenthesized block form) — just presence, mirroring
+// goModHasIgnoreDirective's own scan exactly (see its doc comment), just
+// for a different verb. Used only by goModHasToolDirectiveTooOld, which
+// needs this one verb's presence in isolation, not parseTools' fuller
+// per-line path extraction (parseTools is still used elsewhere, by
+// effectiveToolModules, for the paths themselves).
+func goModHasToolDirective(data []byte) bool {
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		if verb == "tool" {
+			return true
+		}
+		if strings.TrimSpace(trimmed[i:]) == "(" {
+			inBlock = true
+		}
+	}
+	return false
+}
+
+// goModHasToolDirectiveTooOld reports whether data's go.mod contains a
+// top-level `tool` directive (see goModHasToolDirective) that the go
+// toolchain actually processing this file cannot recognize at all —
+// making every module-aware go subcommand Fatal with "errors parsing
+// go.mod: go.mod:N: unknown directive: tool" before resolving a single
+// module. The exact same "cannot leak" shape as
+// goModHasIgnoreDirectiveTooOld just above, for a different
+// toolchain-version-gated verb: `tool` is IN goModValidTopLevelVerbs
+// (correct for a modern-enough toolchain), so goModHasUnknownDirective
+// alone can't catch this.
+//
+// `tool` is a real go.mod directive, but — like `ignore` — a relatively
+// new one: this package's own README already documents it as "Go 1.24+"
+// (see `go help tool`), and that's the toolchain-gating boundary, not just
+// a feature-availability note. Live-verified directly against real
+// downloaded toolchain binaries (2026-10, fully offline except for the
+// one-time toolchain download itself, GOPROXY=off throughout the actual
+// test): a from-scratch go.mod reading only `module example.com/toolgate`,
+// `go 1.20`, and `tool golang.org/x/text/cmd/gotext` makes `go list -m
+// all` Fatal instantly with "go.mod:5: unknown directive: tool" under a
+// real go1.21.0 AND a real go1.23.0 installation (GOTOOLCHAIN=local, so
+// neither attempts to switch toolchains) — while the identical file parses
+// clean under go1.24.4 (the first version whose vendored
+// golang.org/x/mod/modfile actually recognizes the verb), reaching "module
+// lookup disabled by GOPROXY=off" instead. Before this check existed,
+// goprivaudit's goModHasUnknownDirective treated `tool` unconditionally as
+// a valid verb (correct for go1.24+, but not for anything older) and ran
+// its normal SUMDB-leak audit on a file like this regardless of which
+// toolchain would actually run it, misreporting a leak for a query real go,
+// right here, never reaches: confirmed end to end against the actual
+// goprivaudit binary with a private-auth-signaled `require` plus this
+// `tool` line and `-goversion go1.21.0`, which reported a false `SUMDB
+// LEAK` pre-fix.
+//
+// Same GOTOOLCHAIN=auto reasoning as goModHasIgnoreDirectiveTooOld's own
+// doc comment: this only fires when BOTH the file's own `go` directive
+// (an absent line counts as unsatisfied, matching goVersionAtLeast's
+// existing empty-string convention) and localGoVersion (meant to be `go
+// env GOVERSION`, the toolchain actually installed/selected — go never
+// downgrades, so GOTOOLCHAIN=auto only overrides this when the file's own
+// requirement is itself >=1.24, which already short-circuits below) are
+// each below 1.24. An unresolvable localGoVersion (empty) fails open here
+// too, the same convention every other goEnv-derived check in this package
+// already uses for an environment fact it can't pin down.
+func goModHasToolDirectiveTooOld(data []byte, localGoVersion string) bool {
+	if !goModHasToolDirective(data) {
+		return false
+	}
+	if goVersionAtLeast(parseGoVersion(data), 1, 24) {
+		return false
+	}
+	local := strings.TrimPrefix(strings.TrimSpace(localGoVersion), "go")
+	if local == "" {
+		return false
+	}
+	return !goVersionAtLeast(local, 1, 24)
+}
+
 // goWorkValidTopLevelVerbs is the complete, fixed set of go.work top-level
 // directive keywords golang.org/x/mod/modfile's real parser
 // ((*WorkFile).add's verb switch, rule.go) recognizes: go, toolchain,

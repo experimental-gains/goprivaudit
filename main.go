@@ -587,6 +587,21 @@ func run(args []string, stdout, stderr *os.File) int {
 		// single module. Same "cannot leak" reasoning as
 		// goModHasUnknownDirective just above, for a verb whose own
 		// recognition is toolchain-version-gated rather than universal.
+	case goModHasToolDirectiveTooOld(data, localGoVersion):
+		// The same toolchain-version-gating gap as goModHasIgnoreDirectiveTooOld
+		// just above, for a different verb: a top-level `tool` directive (see
+		// goModHasToolDirective) that the toolchain actually selected to run
+		// it doesn't recognize at all — `tool` is also IN
+		// goModValidTopLevelVerbs (correct for go1.24+, the version that
+		// introduced it), so goModHasUnknownDirective alone doesn't catch
+		// this either — makes every module-aware go subcommand Fatal with
+		// "unknown directive: tool" parsing go.mod itself, before it
+		// resolves a single module, and before goModHasInvalidDirectiveArgCount
+		// just below ever gets a chance to validate the directive's own
+		// argument count (a toolchain that doesn't recognize the verb at all
+		// never reaches that validation). See goModHasToolDirectiveTooOld's
+		// own doc comment for the live verification against real downloaded
+		// go1.21.0/go1.23.0/go1.24.4 binaries.
 	case goModHasInvalidDirectiveArgCount(data):
 		// A go.mod containing a require/exclude/tool directive (single-line
 		// or block-entry form) with the wrong number of arguments — see

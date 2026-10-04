@@ -596,6 +596,60 @@ func TestGoModHasIgnoreDirectiveTooOld(t *testing.T) {
 	}
 }
 
+// TestGoModHasToolDirective covers goModHasToolDirective's own,
+// presence-only scan — the same block-tracking conventions
+// TestGoModHasIgnoreDirective already exercises, just for the `tool` verb.
+func TestGoModHasToolDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no tool directive", "module example.com/foo\n\ngo 1.24\n\nrequire example.com/bar v1.0.0\n", false},
+		{"single-line tool", "module example.com/foo\n\ngo 1.24\n\ntool example.com/bar/cmd/baz\n", true},
+		{"no-space block-open form", "module example.com/foo\n\ngo 1.24\n\ntool(\n\texample.com/bar/cmd/baz\n)\n", true},
+		{"block form", "module example.com/foo\n\ngo 1.24\n\ntool (\n\texample.com/bar/cmd/baz\n\texample.com/qux/cmd/quux\n)\n", true},
+		{"tool-looking line inside an unrelated block isn't a top-level verb", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\ttool v1.0.0\n)\n", false},
+		{"tool after a valid block closes", "module example.com/foo\n\ngo 1.24\n\nrequire (\n\texample.com/bar v1.0.0\n)\n\ntool example.com/bar/cmd/baz\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasToolDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasToolDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoModHasToolDirectiveTooOld is the direct unit test for
+// goModHasToolDirectiveTooOld (see its own doc comment for the
+// live-verified go1.21.0/go1.23.0-vs-go1.24.4 divergence this models,
+// against real downloaded toolchain binaries): `tool` only Fatals as an
+// unknown directive when BOTH the file's own `go` line AND the
+// locally-selected toolchain are below the version golang.org/x/mod/modfile
+// first learned the verb (1.24) — the exact same shape as
+// TestGoModHasIgnoreDirectiveTooOld, just one version lower.
+func TestGoModHasToolDirectiveTooOld(t *testing.T) {
+	const withTool123 = "module example.com/foo\n\ngo 1.20\n\ntool example.com/bar/cmd/baz\n"
+	cases := []struct {
+		name       string
+		src        string
+		localGoVer string
+		want       bool
+	}{
+		{"no tool directive at all, old local toolchain", "module example.com/foo\n\ngo 1.20\n", "go1.23.0", false},
+		{"tool present, go directive below 1.24, local toolchain below 1.24", withTool123, "go1.23.0", true},
+		{"tool present, go directive below 1.24, local toolchain at 1.24", withTool123, "go1.24.0", false},
+		{"tool present, go directive below 1.24, local toolchain above 1.24", withTool123, "go1.26.8", false},
+		{"tool present, go directive already at 1.24, old local toolchain", "module example.com/foo\n\ngo 1.24.0\n\ntool example.com/bar/cmd/baz\n", "go1.23.0", false},
+		{"tool present, no go directive at all, old local toolchain", "module example.com/foo\n\ntool example.com/bar/cmd/baz\n", "go1.23.0", true},
+		{"tool present, old go directive, unresolvable local toolchain fails open", withTool123, "", false},
+	}
+	for _, c := range cases {
+		if got := goModHasToolDirectiveTooOld([]byte(c.src), c.localGoVer); got != c.want {
+			t.Errorf("%s: goModHasToolDirectiveTooOld(%q, %q) = %v, want %v", c.name, c.src, c.localGoVer, got, c.want)
+		}
+	}
+}
+
 // TestGoWorkHasUnknownDirective covers goWorkHasUnknownDirective's own,
 // narrower valid-verb set (go, toolchain, use, replace) — distinct from
 // goModHasUnknownDirective's go.mod set, confirmed live: a go.work

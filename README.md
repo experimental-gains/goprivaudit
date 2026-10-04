@@ -117,6 +117,15 @@ module-aware `go` subcommand Fatal with "unknown directive: ignore"
 before resolving anything. Verified live: go1.24.4 Fatals on exactly
 this shape while go1.25.14/go1.26.0 both parse it fine.
 
+The same skip applies, one version earlier, to a go.mod's `tool`
+directive (`go help tool`): it was only added to
+`golang.org/x/mod/modfile`'s grammar starting go1.24 — a go.mod carrying
+one, whose own `go` directive stays below 1.24 and whose selected
+toolchain is also below 1.24, makes every module-aware `go` subcommand
+Fatal with "unknown directive: tool" before resolving anything. Verified
+live against real downloaded toolchain binaries: go1.21.0 and go1.23.0
+both Fatal on exactly this shape while go1.24.4 parses it fine.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
