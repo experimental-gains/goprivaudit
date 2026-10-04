@@ -602,6 +602,23 @@ func run(args []string, stdout, stderr *os.File) int {
 		// never reaches that validation). See goModHasToolDirectiveTooOld's
 		// own doc comment for the live verification against real downloaded
 		// go1.21.0/go1.23.0/go1.24.4 binaries.
+	case goModHasGodebugDirectiveTooOld(data, localGoVersion):
+		// The same toolchain-version-gating gap as
+		// goModHasIgnoreDirectiveTooOld/goModHasToolDirectiveTooOld just
+		// above, for a third verb: a top-level `godebug` directive (see
+		// goModHasGodebugDirective) that the toolchain actually selected to
+		// run it doesn't recognize at all — `godebug` is also IN
+		// goModValidTopLevelVerbs (correct for go1.23+, the version that
+		// introduced it), so goModHasUnknownDirective alone doesn't catch
+		// this either — makes every module-aware go subcommand Fatal with
+		// "unknown directive: godebug" parsing go.mod itself, before it
+		// resolves a single module, and before
+		// goModHasInvalidGodebugDirective just below ever gets a chance to
+		// validate the directive's own argument shape (a toolchain that
+		// doesn't recognize the verb at all never reaches that validation).
+		// See goModHasGodebugDirectiveTooOld's own doc comment for the live
+		// verification against real downloaded go1.21.0/go1.22.0/go1.23.0
+		// binaries.
 	case goModHasInvalidDirectiveArgCount(data):
 		// A go.mod containing a require/exclude/tool directive (single-line
 		// or block-entry form) with the wrong number of arguments — see

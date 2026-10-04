@@ -720,6 +720,86 @@ func goModHasToolDirectiveTooOld(data []byte, localGoVersion string) bool {
 	return !goVersionAtLeast(local, 1, 24)
 }
 
+// goModHasGodebugDirective reports whether data's go.mod contains a
+// top-level `godebug` directive at all (single-line "godebug key=value"
+// form or the parenthesized block form) — just presence, mirroring
+// goModHasToolDirective's own scan exactly (see its doc comment), just for
+// a different verb. Used only by goModHasGodebugDirectiveTooOld.
+func goModHasGodebugDirective(data []byte) bool {
+	inBlock := false
+	sc := bufio.NewScanner(strings.NewReader(string(data)))
+	for sc.Scan() {
+		line := stripComment(sc.Text())
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if inBlock {
+			if trimmed == ")" {
+				inBlock = false
+			}
+			continue
+		}
+		i := 0
+		for i < len(trimmed) && trimmed[i] != ' ' && trimmed[i] != '\t' && trimmed[i] != '(' {
+			i++
+		}
+		verb := trimmed[:i]
+		if verb == "godebug" {
+			return true
+		}
+		if strings.TrimSpace(trimmed[i:]) == "(" {
+			inBlock = true
+		}
+	}
+	return false
+}
+
+// goModHasGodebugDirectiveTooOld reports whether data's go.mod contains a
+// top-level `godebug` directive (see goModHasGodebugDirective) that the go
+// toolchain actually processing this file cannot recognize at all — making
+// every module-aware go subcommand Fatal with "errors parsing go.mod:
+// go.mod:N: unknown directive: godebug" before resolving a single module.
+// The same "cannot leak" shape as goModHasIgnoreDirectiveTooOld/
+// goModHasToolDirectiveTooOld above, for a third toolchain-version-gated
+// verb: `godebug` IS in goModValidTopLevelVerbs (correct for a
+// modern-enough toolchain), so goModHasUnknownDirective alone can't catch
+// this.
+//
+// Live-verified directly against real downloaded toolchain binaries
+// (2026-10, GOTOOLCHAIN=local, GOPROXY=off throughout): a from-scratch
+// go.mod reading only `module example.com/godebugtest`, `go 1.17`, and
+// `godebug default=go1.20` makes `go list -m all` Fatal instantly with
+// "go.mod:5: unknown directive: godebug" under real go1.21.0 AND real
+// go1.22.0 installations, while the identical file parses clean under a
+// real go1.23.0 (the first version whose vendored golang.org/x/mod/modfile
+// actually recognizes the verb) — one version lower than `tool`'s own
+// 1.24 boundary, and two lower than `ignore`'s 1.25. Before this check
+// existed, goprivaudit's goModHasUnknownDirective treated `godebug`
+// unconditionally as a valid verb and ran its normal SUMDB-leak audit on
+// a file like this regardless of which toolchain would actually run it,
+// misreporting a leak for a query real go, right here, never reaches.
+//
+// Same GOTOOLCHAIN=auto reasoning as goModHasToolDirectiveTooOld's own doc
+// comment: this only fires when BOTH the file's own `go` directive (an
+// absent line counts as unsatisfied) and localGoVersion (the toolchain
+// actually installed/selected) are each below 1.23. An unresolvable
+// localGoVersion (empty) fails open here too, the same convention this
+// package's other goEnv-derived checks already use.
+func goModHasGodebugDirectiveTooOld(data []byte, localGoVersion string) bool {
+	if !goModHasGodebugDirective(data) {
+		return false
+	}
+	if goVersionAtLeast(parseGoVersion(data), 1, 23) {
+		return false
+	}
+	local := strings.TrimPrefix(strings.TrimSpace(localGoVersion), "go")
+	if local == "" {
+		return false
+	}
+	return !goVersionAtLeast(local, 1, 23)
+}
+
 // goWorkValidTopLevelVerbs is the complete, fixed set of go.work top-level
 // directive keywords golang.org/x/mod/modfile's real parser
 // ((*WorkFile).add's verb switch, rule.go) recognizes: go, toolchain,

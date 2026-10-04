@@ -650,6 +650,61 @@ func TestGoModHasToolDirectiveTooOld(t *testing.T) {
 	}
 }
 
+// TestGoModHasGodebugDirective covers goModHasGodebugDirective's own,
+// presence-only scan — the same block-tracking conventions
+// TestGoModHasToolDirective already exercises, just for the `godebug`
+// verb.
+func TestGoModHasGodebugDirective(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{"no godebug directive", "module example.com/foo\n\ngo 1.23\n\nrequire example.com/bar v1.0.0\n", false},
+		{"single-line godebug", "module example.com/foo\n\ngo 1.23\n\ngodebug default=go1.20\n", true},
+		{"no-space block-open form", "module example.com/foo\n\ngo 1.23\n\ngodebug(\n\tdefault=go1.20\n)\n", true},
+		{"block form", "module example.com/foo\n\ngo 1.23\n\ngodebug (\n\tdefault=go1.20\n\tasynctimerchan=0\n)\n", true},
+		{"godebug-looking line inside an unrelated block isn't a top-level verb", "module example.com/foo\n\ngo 1.23\n\nrequire (\n\tgodebug v1.0.0\n)\n", false},
+		{"godebug after a valid block closes", "module example.com/foo\n\ngo 1.23\n\nrequire (\n\texample.com/bar v1.0.0\n)\n\ngodebug default=go1.20\n", true},
+	}
+	for _, c := range cases {
+		if got := goModHasGodebugDirective([]byte(c.src)); got != c.want {
+			t.Errorf("%s: goModHasGodebugDirective(%q) = %v, want %v", c.name, c.src, got, c.want)
+		}
+	}
+}
+
+// TestGoModHasGodebugDirectiveTooOld is the direct unit test for
+// goModHasGodebugDirectiveTooOld (see its own doc comment for the
+// live-verified go1.21.0/go1.22.0-vs-go1.23.0 divergence this models,
+// against real downloaded toolchain binaries): `godebug` only Fatals as an
+// unknown directive when BOTH the file's own `go` line AND the
+// locally-selected toolchain are below the version golang.org/x/mod/modfile
+// first learned the verb (1.23) — the exact same shape as
+// TestGoModHasToolDirectiveTooOld, just one version lower.
+func TestGoModHasGodebugDirectiveTooOld(t *testing.T) {
+	const withGodebug122 = "module example.com/foo\n\ngo 1.17\n\ngodebug default=go1.20\n"
+	cases := []struct {
+		name       string
+		src        string
+		localGoVer string
+		want       bool
+	}{
+		{"no godebug directive at all, old local toolchain", "module example.com/foo\n\ngo 1.17\n", "go1.22.0", false},
+		{"godebug present, go directive below 1.23, local toolchain below 1.23", withGodebug122, "go1.22.0", true},
+		{"godebug present, go directive below 1.23, local toolchain at 1.23", withGodebug122, "go1.23.0", false},
+		{"godebug present, go directive below 1.23, local toolchain above 1.23", withGodebug122, "go1.26.8", false},
+		{"godebug present, go directive already at 1.23, old local toolchain", "module example.com/foo\n\ngo 1.23.0\n\ngodebug default=go1.20\n", "go1.22.0", false},
+		{"godebug present, no go directive at all, old local toolchain", "module example.com/foo\n\ngodebug default=go1.20\n", "go1.22.0", true},
+		{"godebug present, old go directive, unresolvable local toolchain fails open", withGodebug122, "", false},
+	}
+	for _, c := range cases {
+		if got := goModHasGodebugDirectiveTooOld([]byte(c.src), c.localGoVer); got != c.want {
+			t.Errorf("%s: goModHasGodebugDirectiveTooOld(%q, %q) = %v, want %v", c.name, c.src, c.localGoVer, got, c.want)
+		}
+	}
+}
+
 // TestGoWorkHasUnknownDirective covers goWorkHasUnknownDirective's own,
 // narrower valid-verb set (go, toolchain, use, replace) — distinct from
 // goModHasUnknownDirective's go.mod set, confirmed live: a go.work
