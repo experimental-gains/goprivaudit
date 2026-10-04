@@ -2842,7 +2842,43 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // verification (reproduced separately for go.work, not just assumed to
 // carry over) and TestRunRepeatedGoDirectiveGoWorkNoLeak for the end-to-end
 // regression.
-func goWorkHasUnparseableDirective(gowork string) bool {
+//
+// Also calls goModHasGodebugDirectiveTooOld against gowork's own bytes, with
+// localGoVersion threaded through from run()'s own already-resolved value
+// (see goModHasToolDirectiveTooOld/goModHasGodebugDirectiveTooOld's own doc
+// comments in main.go for why that's the right value: the toolchain actually
+// selected to run moduleDir, including any GOTOOLCHAIN switch). This closes
+// the exact same toolchain-version-gating gap already fixed for the go.mod
+// being audited (techniques #191/#192: go.mod's `tool`/`godebug` verbs are
+// only recognized by a modern-enough toolchain, go1.24/go1.23 respectively)
+// but never ported to go.work's OWN godebug directive, even though go.work
+// shares go.mod's exact "godebug key=value" grammar and the exact same
+// toolchain-version gate in golang.org/x/mod/modfile — confirmed by reading
+// the vendored modfile source for both ParseWork and Parse, which route
+// "godebug" through the identical version-gated recognition. Live-verified
+// (2026-10-04) against real downloaded go1.21.0/go1.22.0/go1.23.0 (via
+// golang.org/dl) plus the system go1.24.4: a go.work reading `go 1.20`,
+// `godebug default=go1.20`, and `use ./member` makes `go list -m all` (run
+// from the member directory, GOPROXY=off) Fatal instantly with "go: reading
+// go.work: <path>:3: unknown directive: godebug" under real go1.21.0 AND
+// go1.22.0, while the identical file parses and resolves cleanly under real
+// go1.23.0 — the exact same go1.23 boundary already found for go.mod's own
+// godebug directive, never previously checked for go.work's. Before this
+// fix, goWorkValidTopLevelVerbs/goWorkHasUnknownDirective treated `godebug`
+// as unconditionally recognized regardless of which toolchain would actually
+// read the file, so goprivaudit ran its normal audit and could report a
+// false SUMDB LEAK for a require in a workspace member whose go.work, under
+// an installed go1.21/1.22, real go can never even finish parsing — the
+// identical "cannot leak" miss goModHasGodebugDirectiveTooOld already closed
+// one file over. Confirmed end-to-end against the actual goprivaudit binary,
+// pre-fix: a go.work exactly like the one above, naming a member go.mod with
+// a real, otherwise-uncovered git-insteadOf-signaled require, reported
+// "SUMDB LEAK" under -goversion go1.21.0/go1.22.0 — see
+// TestRunGodebugDirectiveTooOldGoWorkNoLeak and its companion
+// TestRunGodebugDirectiveModernToolchainGoWorkStillLeaks (confirming the fix
+// doesn't overreach: the identical fixture under go1.23.0 still reports the
+// real leak).
+func goWorkHasUnparseableDirective(gowork, localGoVersion string) bool {
 	if gowork == "" || gowork == "off" {
 		return false
 	}
@@ -2858,7 +2894,8 @@ func goWorkHasUnparseableDirective(gowork string) bool {
 		goModHasInvalidReplaceDirective(data) ||
 		goModHasInvalidGodebugDirective(data) ||
 		goModHasInvalidDirectiveArgCount(data) ||
-		goModHasRepeatedSingletonDirective(data, goWorkSingletonVerbs)
+		goModHasRepeatedSingletonDirective(data, goWorkSingletonVerbs) ||
+		goModHasGodebugDirectiveTooOld(data, localGoVersion)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of

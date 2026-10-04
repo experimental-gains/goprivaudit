@@ -490,17 +490,21 @@ func run(args []string, stdout, stderr *os.File) int {
 		// equivalent, like "go list -m"), so neither file's own content has
 		// any bearing on whether a checksum-database query can happen — it
 		// structurally cannot, regardless of what either file says.
-	case goWorkHasUnparseableDirective(gowork):
+	case goWorkHasUnparseableDirective(gowork, localGoVersion):
 		// An active go.work file that itself contains a stray "/*" block
-		// comment, a malformed `go`/`toolchain` directive, or a line whose
-		// verb isn't one of go.work's own four recognized directives (go,
-		// toolchain, use, replace) makes every module-aware go subcommand
-		// Fatal parsing go.work itself, before it ever resolves a single one
-		// of moduleDir's own requires — see goWorkHasUnparseableDirective's
-		// doc comment for the live-verified error messages. Same "cannot
-		// leak" reasoning as every other malformed-go.mod skip below, just
-		// reached because the *workspace* file never finishes parsing,
-		// checked ahead of moduleOutsideWorkspace since a go.work this
+		// comment, a malformed `go`/`toolchain` directive, a line whose verb
+		// isn't one of go.work's own recognized directives (go, toolchain,
+		// godebug, use, replace), or a `godebug` directive too new for the
+		// toolchain actually selected to run it (localGoVersion, go.work's
+		// own version of the same gap goModHasGodebugDirectiveTooOld already
+		// closed for the go.mod being audited) makes every module-aware go
+		// subcommand Fatal parsing go.work itself, before it ever resolves a
+		// single one of moduleDir's own requires — see
+		// goWorkHasUnparseableDirective's doc comment for the live-verified
+		// error messages. Same "cannot leak" reasoning as every other
+		// malformed-go.mod skip below, just reached because the *workspace*
+		// file never finishes parsing, checked ahead of
+		// moduleOutsideWorkspace since a go.work this
 		// broken can't even be trusted to answer "is moduleDir a member" in
 		// the first place.
 	case moduleOutsideWorkspace(gowork, moduleDir):

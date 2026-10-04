@@ -3015,6 +3015,145 @@ replace github.com/myorg/internal-tool => github.com/privorg/baz v1.0.0
 	}
 }
 
+// TestRunGodebugDirectiveTooOldGoWorkNoLeak is the direct regression test
+// for a real-world-testing find (technique #197, run #733): go.work's own
+// `godebug` directive shares go.mod's exact toolchain-version gate (only
+// recognized by golang.org/x/mod/modfile starting go1.23 — the same boundary
+// TestRunGodebugDirectiveTooOldGoModNoLeak already covers for the go.mod
+// being audited), but goWorkHasUnparseableDirective never checked it against
+// the ACTIVE go.work file's own godebug directive, even though
+// TestRunGodebugDirectiveGoWorkStillLeaks (below) already proved go.work
+// could carry one at all. Live-verified (2026-10-04) against real downloaded
+// go1.21.0/go1.22.0 (via golang.org/dl): this exact go.work+go.mod pair made
+// `go list -m all`, run from app/ with GOPROXY=off, Fatal instantly with "go:
+// reading go.work: <path>:3: unknown directive: godebug" under both, never
+// resolving app/go.mod's own require at all — while this tool, pre-fix,
+// still reported "SUMDB LEAK" for app/go.mod's real, otherwise-uncovered
+// private-auth-signaled require under -goversion go1.21.0/go1.22.0.
+func TestRunGodebugDirectiveTooOldGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.17
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.17
+
+godebug default=go1.20
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goversion", "go1.22.0",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work has a `godebug` directive too new for the selected toolchain (go itself would Fatal parsing go.work before any query), got: %s", stdout)
+	}
+}
+
+// TestRunGodebugDirectiveModernToolchainGoWorkStillLeaks is
+// TestRunGodebugDirectiveTooOldGoWorkNoLeak's companion, proving the fix
+// doesn't overreach: the identical go.work/go.mod pair audited with a
+// toolchain that DOES recognize `godebug` (>=1.23) must still report the
+// real leak, unaffected by the directive's mere presence.
+func TestRunGodebugDirectiveModernToolchainGoWorkStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.17
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.17
+
+godebug default=go1.20
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goversion", "go1.23.0",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunGodebugDirectiveTooOldGoWorkRealGoEnv is
+// TestRunGodebugDirectiveTooOldGoWorkNoLeak without the -goversion override,
+// confirming the non-negotiable verification bar directly against whatever
+// `go` is actually installed in this sandbox, the same way
+// TestRunGodebugDirectiveTooOldRealGoEnv does for the go.mod-side check.
+// This sandbox's own real, installed go (go1.24.4) already recognizes
+// `godebug` (>=1.23), so this is expected to skip here — it exists so a
+// future, older sandbox still exercises the real end-to-end path without an
+// override standing in for it.
+func TestRunGodebugDirectiveTooOldGoWorkRealGoEnv(t *testing.T) {
+	dir := t.TempDir()
+	if v := goEnv(dir, "GOVERSION"); v == "" || goVersionAtLeast(strings.TrimPrefix(v, "go"), 1, 23) {
+		t.Skipf("this sandbox's go (GOVERSION=%q) already recognizes `godebug` (or couldn't be determined); TestRunGodebugDirectiveTooOldGoWorkNoLeak already covers the too-old-toolchain path via -goversion", v)
+	}
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.17
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.17
+
+godebug default=go1.20
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean against this sandbox's real, installed go toolchain, got: %s", stdout)
+	}
+}
+
 // TestRunGodebugDirectiveGoWorkStillLeaks is the direct regression test for
 // a real-world-testing find: a well-formed `godebug key=value` line in an
 // active go.work was, before this fix, misclassified by

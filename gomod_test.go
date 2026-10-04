@@ -743,38 +743,38 @@ func TestGoWorkHasUnknownDirective(t *testing.T) {
 // TestGoWorkHasUnknownDirective above.
 func TestGoWorkHasUnparseableDirective(t *testing.T) {
 	dir := t.TempDir()
-	if got := goWorkHasUnparseableDirective(""); got {
+	if got := goWorkHasUnparseableDirective("", "go1.24.4"); got {
 		t.Errorf("empty gowork (no workspace) = %v, want false", got)
 	}
-	if got := goWorkHasUnparseableDirective("off"); got {
+	if got := goWorkHasUnparseableDirective("off", "go1.24.4"); got {
 		t.Errorf(`gowork="off" = %v, want false`, got)
 	}
-	if got := goWorkHasUnparseableDirective(filepath.Join(dir, "does-not-exist.work")); got {
+	if got := goWorkHasUnparseableDirective(filepath.Join(dir, "does-not-exist.work"), "go1.24.4"); got {
 		t.Errorf("unreadable gowork = %v, want false (fail open, matching goWorkReplaces)", got)
 	}
 
 	valid := writeFile(t, dir, "valid.work", "go 1.24\n\nuse ./app\n")
-	if got := goWorkHasUnparseableDirective(valid); got {
+	if got := goWorkHasUnparseableDirective(valid, "go1.24.4"); got {
 		t.Errorf("valid go.work = %v, want false", got)
 	}
 
 	blockComment := writeFile(t, dir, "blockcomment.work", "go 1.24\n\nuse ./app\n\n/* stray */\n")
-	if got := goWorkHasUnparseableDirective(blockComment); !got {
+	if got := goWorkHasUnparseableDirective(blockComment, "go1.24.4"); !got {
 		t.Errorf("go.work with a stray block comment = %v, want true", got)
 	}
 
 	invalidGo := writeFile(t, dir, "invalidgo.work", "go 1.9x\n\nuse ./app\n")
-	if got := goWorkHasUnparseableDirective(invalidGo); !got {
+	if got := goWorkHasUnparseableDirective(invalidGo, "go1.24.4"); !got {
 		t.Errorf("go.work with a malformed go directive = %v, want true", got)
 	}
 
 	invalidToolchain := writeFile(t, dir, "invalidtoolchain.work", "go 1.24\n\ntoolchain 1.24.4\n\nuse ./app\n")
-	if got := goWorkHasUnparseableDirective(invalidToolchain); !got {
+	if got := goWorkHasUnparseableDirective(invalidToolchain, "go1.24.4"); !got {
 		t.Errorf("go.work with a malformed toolchain directive = %v, want true", got)
 	}
 
 	unknownVerb := writeFile(t, dir, "unknownverb.work", "go 1.24\n\nuses ./app\n")
-	if got := goWorkHasUnparseableDirective(unknownVerb); !got {
+	if got := goWorkHasUnparseableDirective(unknownVerb, "go1.24.4"); !got {
 		t.Errorf("go.work with an unrecognized verb = %v, want true", got)
 	}
 
@@ -784,7 +784,7 @@ func TestGoWorkHasUnparseableDirective(t *testing.T) {
 	// of the real space-separated "path version" form Fatals real go parsing
 	// go.work, before it resolves a single requirement in any member module.
 	invalidReplace := writeFile(t, dir, "invalidreplace.work", "go 1.24\n\nuse ./app\n\nreplace example.com/foo => example.com/bar@v1.0.0\n")
-	if got := goWorkHasUnparseableDirective(invalidReplace); !got {
+	if got := goWorkHasUnparseableDirective(invalidReplace, "go1.24.4"); !got {
 		t.Errorf("go.work with a malformed replace directive = %v, want true", got)
 	}
 
@@ -793,13 +793,33 @@ func TestGoWorkHasUnparseableDirective(t *testing.T) {
 	// directory argument Fatals real go parsing go.work, before it resolves
 	// a single requirement in any member module (run #583).
 	invalidUse := writeFile(t, dir, "invaliduse.work", "go 1.24\n\nuse\n")
-	if got := goWorkHasUnparseableDirective(invalidUse); !got {
+	if got := goWorkHasUnparseableDirective(invalidUse, "go1.24.4"); !got {
 		t.Errorf("go.work with a bare use directive (no argument) = %v, want true", got)
 	}
 
 	invalidUseExtraArg := writeFile(t, dir, "invaliduseextraarg.work", "go 1.24\n\nuse ./a ./b\n")
-	if got := goWorkHasUnparseableDirective(invalidUseExtraArg); !got {
+	if got := goWorkHasUnparseableDirective(invalidUseExtraArg, "go1.24.4"); !got {
 		t.Errorf("go.work with a use directive naming two directories on one line = %v, want true", got)
+	}
+
+	// go.work's godebug directive shares go.mod's own toolchain-version gate
+	// (godebug was only ever recognized by golang.org/x/mod/modfile starting
+	// go1.23 — see goModHasGodebugDirectiveTooOld) but goWorkHasUnparseableDirective
+	// never threaded localGoVersion through to check it against go.work's OWN
+	// godebug directive until this fix (technique #197, run #733): see this
+	// function's own doc comment for the live verification against real
+	// go1.21.0/go1.22.0/go1.23.0.
+	godebugTooOld := writeFile(t, dir, "godebugtooold.work", "go 1.17\n\ngodebug default=go1.20\n\nuse ./app\n")
+	if got := goWorkHasUnparseableDirective(godebugTooOld, "go1.22.0"); !got {
+		t.Errorf("go.work with a godebug directive and a local toolchain below go1.23 = %v, want true", got)
+	}
+	if got := goWorkHasUnparseableDirective(godebugTooOld, "go1.23.0"); got {
+		t.Errorf("go.work with a godebug directive and a local toolchain at go1.23 = %v, want false", got)
+	}
+
+	godebugModernGoDirective := writeFile(t, dir, "godebugmoderngo.work", "go 1.23\n\ngodebug default=go1.20\n\nuse ./app\n")
+	if got := goWorkHasUnparseableDirective(godebugModernGoDirective, "go1.22.0"); got {
+		t.Errorf("go.work whose own `go` directive is already >=1.23 = %v, want false (its own go directive already satisfies the gate, regardless of localGoVersion)", got)
 	}
 }
 
