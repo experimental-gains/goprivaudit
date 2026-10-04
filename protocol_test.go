@@ -251,6 +251,37 @@ func TestGitProtocolAllowedBuiltinDefaults(t *testing.T) {
 	}
 }
 
+// TestGitProtocolAllowedInvalidPolicyValueBlocks is a regression test for
+// policyAllows: a protocol.allow/protocol.<name>.allow value that isn't one
+// of git's own three recognized keywords ("always", "never", "user",
+// case-insensitive) makes real git die with "unknown value for config" the
+// instant it resolves the policy, before any network connection, for every
+// fetch using that scheme — the identical "cannot leak" effect "never" has,
+// just reached via a config-parse Fatal instead of a deliberate block (see
+// policyAllows' own doc comment for the live-verified transcripts, both for
+// a plain typo and for the very plausible "true"/"false" boolean-looking
+// mistake). Before this fix, policyAllows treated any non-"never" value —
+// including "true"/"false"/garbage — as if it were "always", so
+// gitProtocolAllowed wrongly reported the transport as permitted.
+func TestGitProtocolAllowedInvalidPolicyValueBlocks(t *testing.T) {
+	noEnv := func(string) string { return "" }
+	for _, policy := range []string{"true", "false", "bogus", "", "Always-ish"} {
+		if gitProtocolAllowed("ssh", map[string]string{"ssh": policy}, noEnv) {
+			t.Errorf("protocol.ssh.allow=%q must be treated as blocked: real git dies with \"unknown value for config\" rather than permitting the fetch", policy)
+		}
+	}
+	for _, policy := range []string{"always", "Always", "ALWAYS", "user", "User"} {
+		if !gitProtocolAllowed("ssh", map[string]string{"ssh": policy}, noEnv) {
+			t.Errorf("protocol.ssh.allow=%q must be treated as allowed", policy)
+		}
+	}
+	for _, policy := range []string{"never", "Never", "NEVER"} {
+		if gitProtocolAllowed("ssh", map[string]string{"ssh": policy}, noEnv) {
+			t.Errorf("protocol.ssh.allow=%q must be treated as blocked", policy)
+		}
+	}
+}
+
 func TestGitProtocolAllowedUnknownSchemeFailsOpen(t *testing.T) {
 	// schemeOf returning "" (couldn't confidently classify the URL) must
 	// never cause a real signal to be suppressed.
@@ -380,6 +411,45 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 	if strings.Contains(stdout, "SUMDB LEAK") {
 		t.Errorf("stdout should not report a leak for a structurally-blocked transport: %s", stdout)
+	}
+}
+
+// TestRunSuppressesLeakWhenProtocolAllowConfigHasAnInvalidValue is a
+// regression test for policyAllows' own fix: a protocol.<name>.allow value
+// that isn't "always"/"never"/"user" (here, "true" — the natural mistake of
+// treating this boolean-looking knob as an actual boolean) makes real git
+// die with "unknown value for config 'protocol.ssh.allow': true" the
+// instant it resolves the policy for any ssh fetch, never reaching the
+// network — confirmed live (see policyAllows' doc comment) — so the insteadOf
+// rewrite below can never actually authenticate anything and no sumdb query
+// can happen either. Before this fix, policyAllows treated "true" as if it
+// were "always", so this reported a live SUMDB LEAK.
+func TestRunSuppressesLeakWhenProtocolAllowConfigHasAnInvalidValue(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@github.com/"]
+	insteadOf = https://github.com/myorg/
+
+[protocol "ssh"]
+	allow = true
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (no leak possible); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak for a structurally-invalid protocol.allow value: %s", stdout)
 	}
 }
 
@@ -586,6 +656,15 @@ require git.corp.example.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123
 // nonexistent local file path) — protocol.allow is checked before any
 // connection attempt, so the two failure modes ("not allowed" vs. a
 // transport-level error) are easy to distinguish from git's own stderr.
+//
+// blockedByGit also recognizes git's "unknown value for config" fatal (not
+// just "... not allowed"): a protocol.allow/protocol.<name>.allow value
+// outside git's own three recognized keywords (always/never/user) makes
+// git die with that message the instant it resolves the policy, the
+// identical "never reaches the network" effect "not allowed" has (see
+// policyAllows' doc comment in gitconfig.go) — this oracle must treat both
+// as "blocked", or an invalid-value case would wrongly look unblocked by
+// git while gitProtocolAllowed (correctly, post-fix) reports it blocked.
 func TestGitProtocolAllowedAgainstRealGit(t *testing.T) {
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
@@ -600,13 +679,14 @@ func TestGitProtocolAllowedAgainstRealGit(t *testing.T) {
 		{"ssh blocked by protocol.ssh.allow", "ssh", "ssh://127.0.0.1:1/x", []string{"-c", "protocol.ssh.allow=never"}},
 		{"git blocked by protocol.allow default", "git", "git://127.0.0.1:1/x", []string{"-c", "protocol.allow=never"}},
 		{"ssh allowed by default", "ssh", "ssh://127.0.0.1:1/x", nil},
+		{"ssh blocked by an invalid protocol.ssh.allow value", "ssh", "ssh://127.0.0.1:1/x", []string{"-c", "protocol.ssh.allow=true"}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			args := append(append([]string{}, c.gitArgs...), "ls-remote", c.url)
 			cmd := exec.Command("git", args...)
 			out, _ := cmd.CombinedOutput()
-			blockedByGit := strings.Contains(string(out), "not allowed")
+			blockedByGit := strings.Contains(string(out), "not allowed") || strings.Contains(string(out), "unknown value for config")
 
 			allow := map[string]string{}
 			for i := 0; i+1 < len(c.gitArgs); i += 2 {

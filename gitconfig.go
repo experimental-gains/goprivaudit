@@ -983,8 +983,46 @@ func gitProtocolAllowed(scheme string, fileAllow map[string]string, getenv func(
 	return scheme != "ext"
 }
 
+// policyAllows reports whether a resolved protocol.allow/protocol.<name>.allow
+// value permits the transport, mirroring git's own protocol_policy (protocol.c,
+// read directly against git 2.47.3's source and confirmed live): the value is
+// matched case-insensitively against exactly three recognized keywords —
+// "always" and "user" both allow it, "never" blocks it — and ANYTHING ELSE
+// (a plain typo, or a plausible boolean-looking mistake like "true"/"false",
+// since this looks like a boolean knob but isn't one) is not silently
+// ignored or treated as permissive: git calls die() with "unknown value for
+// config '%s': %s" the instant it tries to resolve the policy, before any
+// network connection — for EVERY fetch using that scheme, not just the one
+// insteadOf/credential-helper/extraHeader rewrite that happened to surface
+// it. Live-verified (git 2.47.3): `git -c protocol.ssh.allow=bogus ls-remote
+// ssh://...` and `git -c protocol.allow=true ls-remote https://...` (a
+// config file value of "true"/"false", a natural slip since every other
+// git boolean accepts them) both die with that exact "unknown value" fatal
+// instead of completing the fetch — the identical "cannot leak" effect a
+// real "never" has, just reached via a config-parse error rather than a
+// deliberate policy. Before this fix, policyAllows treated every value
+// other than "never" (including "true", "false", or any other garbage) as
+// "always" would behave — allowed — so a private-auth signal gated behind
+// exactly this kind of malformed protocol.allow/protocol.<name>.allow value
+// was reported as a live SUMDB LEAK even though the real `go get`/`git`
+// subprocess fetch it depends on can never complete at all.
+//
+// TrimSpace is harmless rather than load-bearing here: a config FILE's own
+// value is already whitespace-trimmed by git's config parser before this
+// tool ever sees it (confirmed live: a file-based "  never  " already
+// resolves to blocked), so this only matters for an already-untrimmed
+// source like a raw `-c`/GIT_CONFIG_VALUE_<n> string — and even there, real
+// git does NOT trim (`protocol.allow=" never"` dies as an unknown value, not
+// a blocked transport), so this is a deliberate, narrow fail-safe widening
+// (treating a value real git would Fatal on as "blocked" either way), not a
+// claim that git itself tolerates the whitespace.
 func policyAllows(policy string) bool {
-	return !strings.EqualFold(strings.TrimSpace(policy), "never")
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "always", "user":
+		return true
+	default:
+		return false
+	}
 }
 
 // worktreeConfigValueFromGitConfig scans a gitconfig file's contents for the
