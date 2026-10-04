@@ -58,3 +58,24 @@ func audit(modules []string, privatePrefixes []string, gonosumdb []string) Repor
 
 	return r
 }
+
+// suppressInsteadOfNoopOverride drops any module from leaks whose only
+// private-auth signal was an insteadOf rule that a longer, more specific
+// no-op insteadOf rule actually overrides for that exact module path —
+// see insteadOfSignalFor, which applies git's own documented
+// longest-match-wins insteadOf precedence. A module also matching
+// otherPrefixes (every non-insteadOf signal: credential.helper,
+// http.extraHeader, netrc) keeps its finding regardless, since none of
+// those are subject to insteadOf's own longest-match rule.
+func suppressInsteadOfNoopOverride(leaks []string, rules []insteadOfRule, otherPrefixes []string) []string {
+	if len(rules) == 0 {
+		return leaks
+	}
+	out := make([]string, 0, len(leaks))
+	for _, m := range leaks {
+		if insteadOfSignalFor(m, rules) || matchesAnyPattern(m, otherPrefixes) {
+			out = append(out, m)
+		}
+	}
+	return out
+}

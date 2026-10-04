@@ -363,7 +363,17 @@ func run(args []string, stdout, stderr *os.File) int {
 	// that signal keeps going through suppressProtocolBlockedInsteadOf's
 	// own, separate mechanism unchanged.
 	protocolAllow := effectiveProtocolAllow(moduleDir)
+	// otherPrefixes tracks every signal EXCEPT insteadOf (credential.helper,
+	// http.extraHeader, and — appended below — netrc): the set
+	// suppressInsteadOfNoopOverride checks before dropping a module whose
+	// only apparent signal in the combined "prefixes" list below turns out
+	// to be an insteadOf rule a longer, more specific no-op insteadOf rule
+	// actually overrides for that exact module (see insteadOfSignalFor) —
+	// a module also covered by one of these non-insteadOf signals keeps
+	// its finding regardless, since none of them are subject to
+	// insteadOf's own longest-match precedence.
 	var prefixes []string
+	var otherPrefixes []string
 	for _, s := range slots {
 		if !s.active {
 			continue
@@ -372,6 +382,9 @@ func run(args []string, stdout, stderr *os.File) int {
 			continue
 		}
 		prefixes = append(prefixes, s.value)
+		if !s.fromInsteadOf {
+			otherPrefixes = append(otherPrefixes, s.value)
+		}
 	}
 
 	// A netrc `machine` entry is treated as a signal unconditionally, the
@@ -394,7 +407,9 @@ func run(args []string, stdout, stderr *os.File) int {
 	// or not GOAUTH happens to mention netrc.
 	if p := netrcPath(); p != "" {
 		if data, err := os.ReadFile(p); err == nil {
-			prefixes = append(prefixes, privatePrefixesFromNetrc(data)...)
+			netrcPrefixes := privatePrefixesFromNetrc(data)
+			prefixes = append(prefixes, netrcPrefixes...)
+			otherPrefixes = append(otherPrefixes, netrcPrefixes...)
 		}
 	}
 
@@ -696,6 +711,17 @@ func run(args []string, stdout, stderr *os.File) int {
 		// function's own doc comment for why it's safe to apply
 		// unconditionally here.
 		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs), requires, replaces, moduleDir), prefixes, splitPatterns(gonosumdb))
+		// suppressInsteadOfNoopOverride drops any resulting leak whose only
+		// signal was an insteadOf rule a longer, more specific no-op
+		// insteadOf rule actually overrides for that exact module — see
+		// insteadOfSignalFor and allInsteadOfRules. Applied as a final,
+		// purely-narrowing pass over audit's own result (never adds a
+		// finding), the same "it's safe to apply unconditionally" shape as
+		// filterGoSumCovered/filterGovcsDisallowed just above, just reached
+		// after audit() instead of before it since it needs each candidate
+		// module path, not merely the flat prefix list audit() matches
+		// against.
+		r.SumdbLeaks = suppressInsteadOfNoopOverride(r.SumdbLeaks, allInsteadOfRules(moduleDir, os.Getenv), otherPrefixes)
 	}
 	printReport(stdout, r, sumdbName(gosumdb))
 	if !r.Clean() {
@@ -799,6 +825,22 @@ func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) 
 		}
 	}
 	return counts
+}
+
+// allInsteadOfRules collects every url.<base>.insteadOf rule across every
+// git config tier gitConfigCandidates reads plus the GIT_CONFIG_COUNT/
+// GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var mechanism — the same
+// sources blockedInsteadOfPrefixCounts already re-scans independently for
+// scheme information, just collecting each rule's own (old, noop) pair
+// instead (see insteadOfSignalFor, the only consumer of this list).
+func allInsteadOfRules(moduleDir string, getenv func(string) string) []insteadOfRule {
+	var rules []insteadOfRule
+	visited := map[string]bool{}
+	for _, p := range gitConfigCandidates(moduleDir) {
+		rules = append(rules, insteadOfRulesFromConfigFile(p, moduleDir, visited)...)
+	}
+	rules = append(rules, insteadOfRulesFromEnv(getenv)...)
+	return rules
 }
 
 // effectiveProtocolAllow resolves the effective protocol.allow/

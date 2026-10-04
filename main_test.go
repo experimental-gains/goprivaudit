@@ -180,6 +180,131 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 	}
 }
 
+// TestRunSuppressesLeakWhenLongerInsteadOfIsNoopOverride covers a real,
+// documented git-config(1) insteadOf precedence rule this tool had no
+// notion of at all: "When more than one insteadOf strings match a given
+// URL, the longest match is used." A real config carries a broad,
+// genuinely authenticating org-wide rewrite (over SSH) alongside a
+// longer, more specific insteadOf entry that deliberately rewrites one
+// narrower subtree right back to itself — a documented way to carve an
+// unauthenticated, no-SSH-required exception out of the broader rewrite
+// (e.g. one public subdirectory of an otherwise-private org, kept
+// reachable from a machine with no SSH key at all).
+//
+// Live-verified (2026-10-04, git 2.47.3) with exactly this config: a real
+// `git ls-remote https://example.com/myorg/sub/repo` invokes NO ssh
+// subprocess at all (confirmed via a GIT_SSH_COMMAND logging stand-in)
+// and instead attempts the fetch over plain, unrewritten https — while
+// the identical config's `git ls-remote https://example.com/myorg/other-repo`
+// (outside the "sub" override) does invoke ssh, proving the longer, more
+// specific rule — not the broader one — is the one real git actually
+// applies to a module under "sub".
+//
+// Before this fix, goprivaudit treated the broader rule's old-side
+// prefix as an unconditional signal for every module beneath it,
+// including "sub" — reporting a SUMDB LEAK for a module a real `go get`
+// fetches completely unauthenticated, an active wrong claim, confirmed
+// live end-to-end against the actual pre-fix goprivaudit binary.
+func TestRunSuppressesLeakWhenLongerInsteadOfIsNoopOverride(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require example.com/myorg/sub/repo v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@example.com/myorg/"]
+	insteadOf = https://example.com/myorg/
+[url "https://example.com/myorg/sub/"]
+	insteadOf = https://example.com/myorg/sub/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (the longer, no-op insteadOf override makes this fetch unauthenticated); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should report no leak once the longer insteadOf rule overrides the broader one as a no-op: %s", stdout)
+	}
+}
+
+// TestRunLongerInsteadOfNoopOverrideDoesNotSuppressSiblingModule is
+// TestRunSuppressesLeakWhenLongerInsteadOfIsNoopOverride's companion,
+// proving the fix is scoped to exactly the narrower overridden prefix: a
+// sibling module elsewhere under the SAME broad org-wide rewrite, but NOT
+// under the "sub" override, is unaffected and still genuinely
+// SSH-authenticated per the identical live-verified config above.
+func TestRunLongerInsteadOfNoopOverrideDoesNotSuppressSiblingModule(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require example.com/myorg/other-repo v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@example.com/myorg/"]
+	insteadOf = https://example.com/myorg/
+[url "https://example.com/myorg/sub/"]
+	insteadOf = https://example.com/myorg/sub/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: example.com/myorg/other-repo") {
+		t.Errorf("stdout missing expected leak finding for a module outside the override: %s", stdout)
+	}
+}
+
+// TestRunLongerInsteadOfNoopOverrideStillLeaksViaIndependentCredentialHelper
+// proves the fix doesn't overreach the other direction: a module whose
+// insteadOf signal is overridden to a no-op per
+// TestRunSuppressesLeakWhenLongerInsteadOfIsNoopOverride above must still
+// be flagged if an INDEPENDENT, non-insteadOf signal (here, a credential
+// helper scoped to the exact same host/path) also authenticates it —
+// that signal is never subject to insteadOf's own longest-match
+// precedence at all.
+func TestRunLongerInsteadOfNoopOverrideStillLeaksViaIndependentCredentialHelper(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require example.com/myorg/sub/repo v1.0.0
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://git@example.com/myorg/"]
+	insteadOf = https://example.com/myorg/
+[url "https://example.com/myorg/sub/"]
+	insteadOf = https://example.com/myorg/sub/
+[credential "https://example.com/myorg/sub"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: example.com/myorg/sub/repo") {
+		t.Errorf("stdout missing expected leak finding from the independent credential helper: %s", stdout)
+	}
+}
+
 // TestRunGovcsBlockingGitSuppressesLeak covers a real, documented hardening
 // pattern (`go help vcs`): an org sets GOVCS to disallow direct `git`
 // access for a host (here narrowly, "github.com:off" — the same effect a
