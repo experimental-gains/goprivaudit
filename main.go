@@ -356,22 +356,26 @@ func run(args []string, stdout, stderr *os.File) int {
 	// a plain, unrewritten `https://` URL fails immediately with "fatal:
 	// transport 'https' not allowed" once GIT_ALLOW_PROTOCOL omits https,
 	// before any hash is ever computed to send to the checksum database.
-	// Same "cannot leak" reasoning suppressProtocolBlockedInsteadOf
-	// already applies to a blocked insteadOf rewrite below, just reached
-	// for a different signal type — an insteadOf slot's scheme is always
-	// "" here (see prefixSlot.scheme), so this loop never touches it;
-	// that signal keeps going through suppressProtocolBlockedInsteadOf's
-	// own, separate mechanism unchanged.
+	// Same "cannot leak" reasoning applies to a blocked insteadOf rewrite
+	// — an insteadOf slot's scheme is always "" here (see
+	// prefixSlot.scheme), so this loop never touches it; that signal is
+	// instead handled per-module, after audit() runs, by
+	// suppressInsteadOfSignals (see its own doc comment for why a blocked
+	// insteadOf rewrite suppresses the whole module, not just its own
+	// occurrence).
 	protocolAllow := effectiveProtocolAllow(moduleDir)
 	// otherPrefixes tracks every signal EXCEPT insteadOf (credential.helper,
 	// http.extraHeader, and — appended below — netrc): the set
-	// suppressInsteadOfNoopOverride checks before dropping a module whose
-	// only apparent signal in the combined "prefixes" list below turns out
-	// to be an insteadOf rule a longer, more specific no-op insteadOf rule
-	// actually overrides for that exact module (see insteadOfSignalFor) —
-	// a module also covered by one of these non-insteadOf signals keeps
-	// its finding regardless, since none of them are subject to
-	// insteadOf's own longest-match precedence.
+	// suppressInsteadOfSignals checks before dropping a module whose only
+	// apparent signal turns out to be an insteadOf rule a longer, more
+	// specific no-op insteadOf rule actually overrides for that exact
+	// module (see insteadOfApplicableRule) — a module also covered by one
+	// of these non-insteadOf signals keeps its finding in that case, since
+	// none of them are subject to insteadOf's own longest-match rule. A
+	// module whose applicable insteadOf rule is instead a BLOCKED rewrite
+	// loses its finding regardless of otherPrefixes (see
+	// suppressInsteadOfSignals): unlike a no-op, a blocked rewrite still
+	// happens, so it preempts every other signal for that same URL too.
 	var prefixes []string
 	var otherPrefixes []string
 	for _, s := range slots {
@@ -412,8 +416,6 @@ func run(args []string, stdout, stderr *os.File) int {
 			otherPrefixes = append(otherPrefixes, netrcPrefixes...)
 		}
 	}
-
-	prefixes = suppressProtocolBlockedInsteadOf(prefixes, moduleDir, os.Getenv)
 
 	gosumdb := *sumdbOverride
 	if !sumdbSet {
@@ -698,9 +700,9 @@ func run(args []string, stdout, stderr *os.File) int {
 		// "GOVCS disallows using git for ..." the instant it needs one,
 		// before ever computing a hash to send to the checksum database —
 		// see its own doc comment for why this is the same "cannot leak"
-		// shape as suppressProtocolBlockedInsteadOf's GIT_ALLOW_PROTOCOL
-		// check, just reached via GOVCS's independent, go-level gate on
-		// which VCS commands may run at all. filterGoSumCovered drops any
+		// shape as suppressInsteadOfSignals' GIT_ALLOW_PROTOCOL check, just
+		// reached via GOVCS's independent, go-level gate on which VCS
+		// commands may run at all. filterGoSumCovered drops any
 		// module whose exact required version is already fully pinned in
 		// moduleDir's own go.sum: unlike every skip case above (which is
 		// all-or-nothing for the whole audit), both of these are
@@ -711,17 +713,16 @@ func run(args []string, stdout, stderr *os.File) int {
 		// function's own doc comment for why it's safe to apply
 		// unconditionally here.
 		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs), requires, replaces, moduleDir), prefixes, splitPatterns(gonosumdb))
-		// suppressInsteadOfNoopOverride drops any resulting leak whose only
-		// signal was an insteadOf rule a longer, more specific no-op
-		// insteadOf rule actually overrides for that exact module — see
-		// insteadOfSignalFor and allInsteadOfRules. Applied as a final,
-		// purely-narrowing pass over audit's own result (never adds a
-		// finding), the same "it's safe to apply unconditionally" shape as
-		// filterGoSumCovered/filterGovcsDisallowed just above, just reached
-		// after audit() instead of before it since it needs each candidate
-		// module path, not merely the flat prefix list audit() matches
-		// against.
-		r.SumdbLeaks = suppressInsteadOfNoopOverride(r.SumdbLeaks, allInsteadOfRules(moduleDir, os.Getenv), otherPrefixes)
+		// suppressInsteadOfSignals drops or narrows any resulting leak
+		// based on the single insteadOf rule that actually applies to it
+		// (git's own longest-match-wins precedence) — see its own doc
+		// comment for the no-op/blocked/genuine distinction. Applied as a
+		// final pass over audit's own result, the same "it's safe to apply
+		// unconditionally" shape as filterGoSumCovered/filterGovcsDisallowed
+		// just above, just reached after audit() instead of before it
+		// since it needs each candidate module path, not merely the flat
+		// prefix list audit() matches against.
+		r.SumdbLeaks = suppressInsteadOfSignals(r.SumdbLeaks, allInsteadOfRules(moduleDir, os.Getenv), otherPrefixes, protocolAllow, os.Getenv)
 	}
 	printReport(stdout, r, sumdbName(gosumdb))
 	if !r.Clean() {
@@ -753,86 +754,11 @@ func sumdbName(gosumdb string) string {
 	return name
 }
 
-// suppressProtocolBlockedInsteadOf removes SUMDB-LEAK-signal prefixes whose
-// only source is an insteadOf rewrite to a transport git itself would
-// refuse to use — see gitProtocolAllowed for the exact GIT_ALLOW_PROTOCOL/
-// protocol.allow/protocol.<name>.allow precedence this checks. A fetch that
-// can never complete can never leak a module path/version to
-// sum.golang.org either: verified live that a real `go mod download`/`go
-// get` fails with e.g. "fatal: transport 'ssh' not allowed" *before* ever
-// computing a hash to send to the checksum database — the same "cannot
-// leak" reasoning run() already applies to GOSUMDB=off and vendor-mode
-// builds, just reached via a different mechanism (a blocked git transport
-// instead of sumdb verification being off or bypassed entirely). This is
-// a real, mainstream scenario, not a contrived one: `GIT_ALLOW_PROTOCOL=
-// https` (SSH disabled org-wide, a common modern hardening pattern now
-// that short-lived HTTPS tokens have widely replaced long-lived SSH keys)
-// combined with a leftover ssh:// insteadOf rewrite — go.dev's own
-// documented private-auth pattern, and the primary example in this file's
-// own doc comments — makes every `go get` for that module fail outright,
-// yet pre-fix goprivaudit still reported SUMDB LEAK unconditionally.
-//
-// Only removes as many occurrences of a prefix as have a confirmed-blocked
-// insteadOf source (blockedInsteadOfPrefixCounts counts them per prefix,
-// and each occurrence is removed at most once): a prefix that's ALSO
-// signaled by an unblocked insteadOf rule, a credential helper, an
-// extraHeader, or a netrc entry keeps enough occurrences to stay flagged.
-// This only ever narrows a false positive, never suppresses a real leak.
-func suppressProtocolBlockedInsteadOf(prefixes []string, moduleDir string, getenv func(string) string) []string {
-	blocked := blockedInsteadOfPrefixCounts(moduleDir, getenv)
-	if len(blocked) == 0 {
-		return prefixes
-	}
-	out := make([]string, 0, len(prefixes))
-	for _, p := range prefixes {
-		if blocked[p] > 0 {
-			blocked[p]--
-			continue
-		}
-		out = append(out, p)
-	}
-	return out
-}
-
-// blockedInsteadOfPrefixCounts scans the same git config sources
-// gitConfigCandidates/privatePrefixesFromEnv do for insteadOf rewrites
-// (via insteadOfSchemesFromConfigFile/insteadOfSchemesFromEnv, which
-// additionally capture each rewrite's target transport scheme), resolves
-// the effective protocol.allow policy from the same config files
-// (protocolAllowFromConfigFile) plus GIT_ALLOW_PROTOCOL, and counts, per
-// module-path prefix, how many of its insteadOf rewrites target a
-// transport git would refuse.
-func blockedInsteadOfPrefixCounts(moduleDir string, getenv func(string) string) map[string]int {
-	protocolAllow := effectiveProtocolAllow(moduleDir)
-
-	schemes := map[string][]string{}
-	visitedSchemes := map[string]bool{}
-	for _, p := range gitConfigCandidates(moduleDir) {
-		for prefix, ss := range insteadOfSchemesFromConfigFile(p, moduleDir, visitedSchemes) {
-			schemes[prefix] = append(schemes[prefix], ss...)
-		}
-	}
-	for prefix, ss := range insteadOfSchemesFromEnv(getenv) {
-		schemes[prefix] = append(schemes[prefix], ss...)
-	}
-
-	counts := map[string]int{}
-	for prefix, ss := range schemes {
-		for _, s := range ss {
-			if !gitProtocolAllowed(s, protocolAllow, getenv) {
-				counts[prefix]++
-			}
-		}
-	}
-	return counts
-}
-
 // allInsteadOfRules collects every url.<base>.insteadOf rule across every
 // git config tier gitConfigCandidates reads plus the GIT_CONFIG_COUNT/
-// GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var mechanism — the same
-// sources blockedInsteadOfPrefixCounts already re-scans independently for
-// scheme information, just collecting each rule's own (old, noop) pair
-// instead (see insteadOfSignalFor, the only consumer of this list).
+// GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var mechanism, each rule's
+// own (old, noop, scheme) triple (see insteadOfApplicableRule, the only
+// consumer of this list).
 func allInsteadOfRules(moduleDir string, getenv func(string) string) []insteadOfRule {
 	var rules []insteadOfRule
 	visited := map[string]bool{}
@@ -857,7 +783,7 @@ func allInsteadOfRules(moduleDir string, getenv func(string) string) []insteadOf
 // live-verified end-to-end divergence this closes). Independent of
 // GIT_ALLOW_PROTOCOL (which gitProtocolAllowed checks separately and treats
 // as fully authoritative when set — see its own doc comment). Shared by
-// blockedInsteadOfPrefixCounts (the insteadOf case) and run()'s
+// suppressInsteadOfSignals (the insteadOf case) and run()'s
 // credential.helper/http.extraHeader scheme filter above, since both need
 // the identical scan.
 func effectiveProtocolAllow(moduleDir string) map[string]string {

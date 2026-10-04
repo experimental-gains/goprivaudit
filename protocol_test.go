@@ -40,17 +40,17 @@ func TestSchemeOf(t *testing.T) {
 	}
 }
 
-func TestInsteadOfSchemes(t *testing.T) {
+func TestInsteadOfRulesFromGitConfigCaptureScheme(t *testing.T) {
 	src := `[url "ssh://git@github.com/"]
 	insteadOf = https://github.com/myorg/
 
 [url "http://mirror.internal/"]
 	insteadOf = https://example.com/private/
 `
-	got := insteadOfSchemes([]byte(src))
-	want := map[string][]string{
-		"github.com/myorg":    {"ssh"},
-		"example.com/private": {"http"},
+	got := insteadOfRulesFromGitConfig([]byte(src))
+	want := []insteadOfRule{
+		{old: "github.com/myorg", noop: false, scheme: "ssh"},
+		{old: "example.com/private", noop: false, scheme: "http"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %v, want %v", got, want)
@@ -290,27 +290,73 @@ func TestGitProtocolAllowedUnknownSchemeFailsOpen(t *testing.T) {
 	}
 }
 
-func TestSuppressProtocolBlockedInsteadOfOnlySuppressesTheBlockedOccurrence(t *testing.T) {
-	dir := t.TempDir()
-	writeFile(t, dir, ".git/config", `[url "ssh://127.0.0.1:1/mirror.git"]
-	insteadOf = https://github.com/myorg/leaky
-
-[credential "https://github.com/myorg/leaky"]
-	helper = store
-`)
+// TestSuppressInsteadOfSignalsBlockedRuleDropsModuleDespiteIndependentSignal
+// is a regression test for the real bug this fix closes: a blocked-scheme
+// insteadOf rewrite doesn't just lose its own "occurrence" — it preempts
+// EVERY other signal for the same URL too, since git applies the insteadOf
+// rewrite unconditionally, before ever choosing a transport, and Fatals the
+// instant that resolves to a blocked scheme (see
+// gitProtocolAllowed/insteadOfApplicableRule's own doc comments). A
+// credential helper scoped to the exact same (now-unreachable) URL is
+// never actually consulted: git never falls back to attempting the
+// original, unrewritten fetch once the rewrite itself has committed to a
+// blocked transport. Live-verified (2026-10-04, git 2.47.3): with
+// `[url "ssh://127.0.0.1:1/mirror.git"] insteadOf =
+// https://github.com/myorg/leaky` plus `[credential
+// "https://github.com/myorg/leaky"] helper = store`, GIT_ALLOW_PROTOCOL=https
+// (blocking the ssh target), `git ls-remote
+// https://github.com/myorg/leaky` still fails with "fatal: transport
+// 'ssh' not allowed" — the credential helper is never reached. Before this
+// fix, suppressProtocolBlockedInsteadOf (this function's predecessor)
+// treated "prefixes" as a flat multiset of strings with no notion of which
+// module they came from, so it only ever decremented one occurrence of a
+// shared prefix string, leaving the credential-helper-backed occurrence to
+// wrongly keep the module flagged.
+func TestSuppressInsteadOfSignalsBlockedRuleDropsModuleDespiteIndependentSignal(t *testing.T) {
+	rules := []insteadOfRule{{old: "github.com/myorg/leaky", noop: false, scheme: "ssh"}}
+	otherPrefixes := []string{"github.com/myorg/leaky"} // independent credential-helper signal, same URL
 	getenv := func(k string) string {
 		if k == "GIT_ALLOW_PROTOCOL" {
 			return "https" // blocks the ssh insteadOf target
 		}
 		return ""
 	}
-	// Simulate what run() assembles: one prefix from the (now-blocked)
-	// insteadOf rule, one from the still-valid credential helper.
-	prefixes := []string{"github.com/myorg/leaky", "github.com/myorg/leaky"}
-	got := suppressProtocolBlockedInsteadOf(prefixes, dir, getenv)
-	want := []string{"github.com/myorg/leaky"}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("got %v, want %v (the credential-helper-backed occurrence must survive)", got, want)
+	got := suppressInsteadOfSignals([]string{"github.com/myorg/leaky"}, rules, otherPrefixes, nil, getenv)
+	if len(got) != 0 {
+		t.Errorf("got %v, want empty: a blocked insteadOf rewrite preempts every other signal for the same URL", got)
+	}
+}
+
+// TestRunSuppressesLeakWhenGitAllowProtocolBlocksInsteadOfDespiteIndependentCredentialHelper
+// is TestSuppressInsteadOfSignalsBlockedRuleDropsModuleDespiteIndependentSignal's
+// end-to-end counterpart against the actual goprivaudit binary.
+func TestRunSuppressesLeakWhenGitAllowProtocolBlocksInsteadOfDespiteIndependentCredentialHelper(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/myorg/leaky v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "ssh://127.0.0.1:1/mirror.git"]
+	insteadOf = https://github.com/myorg/leaky
+
+[credential "https://github.com/myorg/leaky"]
+	helper = store
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GIT_ALLOW_PROTOCOL", "https")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0 (no leak possible); stdout=%s", code, stdout)
+	}
+	if strings.Contains(stdout, "SUMDB LEAK") {
+		t.Errorf("stdout should not report a leak: the blocked insteadOf rewrite preempts the independent credential helper too: %s", stdout)
 	}
 }
 
@@ -463,7 +509,7 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 // hardening setting like `protocol.file.allow = never` (a long-recommended
 // git security default — see CVE-2017-1000117 and git's own 2.38+ default
 // tightening of file/ext protocol.allow) then made
-// suppressProtocolBlockedInsteadOf wrongly treat this genuine,
+// suppressInsteadOfSignals wrongly treat this genuine,
 // ssh-authenticated, uncovered-by-GOPRIVATE fetch as blocked, silently
 // dropping a real SUMDB LEAK down to "no issues found" — confirmed live
 // end-to-end against the actual goprivaudit binary (see this fix's commit

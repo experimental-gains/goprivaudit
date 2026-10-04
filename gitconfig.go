@@ -293,7 +293,7 @@ type prefixSlot struct {
 	// the userinfo half of the same URL). Left "" for an insteadOf slot
 	// (created directly in scanConfigSignals, not via setSignalSlot): that
 	// signal's blocked-transport check already has its own, separate
-	// mechanism (insteadOfSchemes/blockedInsteadOfPrefixCounts), which
+	// mechanism (insteadOfRule.scheme, see insteadOfApplicableRule), which
 	// reads the rewrite's "new" side rather than this slot's "value" (the
 	// "old" side) — and "" for a credential/http slot whose section URL's
 	// scheme schemeOf couldn't determine with confidence, so
@@ -305,9 +305,9 @@ type prefixSlot struct {
 	// setSignalSlot) so run() (see main.go) can tell an insteadOf-derived
 	// prefix apart from a credential.helper/http.extraHeader one when
 	// building otherPrefixes — the non-insteadOf signal set
-	// suppressInsteadOfNoopOverride checks before dropping a module whose
-	// only signal turned out to be an insteadOf rule a longer, more
-	// specific no-op rule actually overrides (see insteadOfSignalFor).
+	// suppressInsteadOfSignals checks before dropping a module whose only
+	// signal turned out to be an insteadOf rule a longer, more specific
+	// no-op rule actually overrides (see insteadOfApplicableRule).
 	fromInsteadOf bool
 }
 
@@ -755,7 +755,7 @@ func schemeOf(url string) string {
 	// schemeOf misread that exact config as "file" — and with a real,
 	// mainstream hardening setting like `protocol.file.allow = never` (a
 	// long-recommended git security default, unrelated to ssh) in effect,
-	// suppressProtocolBlockedInsteadOf then treated the genuine,
+	// suppressInsteadOfSignals then treated the genuine,
 	// ssh-authenticated, uncovered-by-GOPRIVATE fetch as "blocked, cannot
 	// leak" and silently dropped a real SUMDB LEAK finding down to "no
 	// issues found" — confirmed live end-to-end against the actual
@@ -771,79 +771,6 @@ func schemeOf(url string) string {
 		}
 	}
 	return "file"
-}
-
-// insteadOfSchemes scans a gitconfig file's contents for `[url "<new>"]
-// insteadOf = <old>` entries the same way privatePrefixesFromGitConfig
-// does, but returns a map from the normalized module-path prefix (the
-// "old" side, same as privatePrefixesFromGitConfig's return value) to the
-// transport scheme(s) of the "new" side — the piece
-// privatePrefixesFromGitConfig itself discards, needed to check the
-// rewrite against protocol.allow/GIT_ALLOW_PROTOCOL (see
-// gitProtocolAllowed). A prefix rewritten by more than one insteadOf rule
-// (an unusual but possible config) collects every scheme seen.
-func insteadOfSchemes(data []byte) map[string][]string {
-	out := map[string][]string{}
-	inURL := false
-	sectionURL := ""
-	for _, raw := range splitLogicalLines(data) {
-		line := strings.TrimSpace(stripLineComment(raw))
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			if sub, ok := parseQuotedSection(line, "url"); ok {
-				inURL = true
-				sectionURL = sub
-			} else if sub, ok := parseDotSection(line, "url"); ok {
-				inURL = true
-				sectionURL = sub
-			} else {
-				inURL = false
-			}
-			continue
-		}
-		if !inURL {
-			continue
-		}
-		key, value, ok := splitKV(line)
-		if !ok || key != "insteadof" {
-			continue
-		}
-		if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-			out[p] = append(out[p], schemeOf(sectionURL))
-		}
-	}
-	return out
-}
-
-// insteadOfSchemesFromEnv is insteadOfSchemes' counterpart for the
-// GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var config
-// mechanism privatePrefixesFromEnv already reads the plain insteadOf
-// signal from — see its doc comment for why env-set config is a real,
-// live-verified signal source, not just a file-parsing nicety.
-func insteadOfSchemesFromEnv(getenv func(string) string) map[string][]string {
-	count, ok := gitConfigCount(getenv)
-	if !ok {
-		return nil
-	}
-	out := map[string][]string{}
-	for i := 0; i < count; i++ {
-		key := getenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", i))
-		value := getenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", i))
-		section, subsection, name, ok := splitConfigKey(key)
-		if !ok {
-			continue
-		}
-		section = strings.ToLower(section)
-		name = strings.ToLower(name)
-		if section == "url" && name == "insteadof" {
-			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-				out[p] = append(out[p], schemeOf(subsection))
-			}
-		}
-	}
-	return out
 }
 
 // protocolAllowFromGitConfig scans a gitconfig file's contents for
@@ -884,9 +811,9 @@ func protocolAllowFromGitConfig(data []byte) map[string]string {
 
 // protocolAllowFromEnv is protocolAllowFromGitConfig's counterpart for the
 // GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var config
-// mechanism insteadOfSchemesFromEnv/privatePrefixesFromEnvInto already read
+// mechanism insteadOfRulesFromEnv/privatePrefixesFromEnvInto already read
 // url.insteadof/credential.helper/http.extraheader signals from — see
-// insteadOfSchemesFromEnv's doc comment for why env-set config is a real,
+// insteadOfRulesFromEnv's doc comment for why env-set config is a real,
 // live-verified signal source, not just a file-parsing nicety, and
 // effectiveProtocolAllow (main.go) for how this result is merged with the
 // file-based scan.
@@ -897,24 +824,23 @@ func protocolAllowFromGitConfig(data []byte) map[string]string {
 // GIT_CONFIG_KEY_1=protocol.ssh.allow GIT_CONFIG_VALUE_1=never git
 // ls-remote https://example.com/private/thing` fails outright with "fatal:
 // transport 'ssh' not allowed" — identical to the same protocol.ssh.allow
-// set in a real gitconfig FILE (which suppressProtocolBlockedInsteadOf
-// already handles via protocolAllowFromConfigFile) — and the env-set
-// version wins even over a FILE that says the opposite (protocol.ssh.allow
-// = always in ~/.gitconfig, protocol.ssh.allow=never via
-// GIT_CONFIG_COUNT/KEY/VALUE: the transport is still refused, confirming
-// git-config(1)'s documented precedence — this env mechanism resolves like
-// a trailing set of `-c` overrides applied after every config file, the
-// same precedence privatePrefixesFromEnvInto's own doc comment already
-// established for the credential-helper/insteadOf/extraHeader signals).
+// set in a real gitconfig FILE (which suppressInsteadOfSignals already
+// handles via protocolAllowFromConfigFile) — and the env-set version wins
+// even over a FILE that says the opposite (protocol.ssh.allow = always in
+// ~/.gitconfig, protocol.ssh.allow=never via GIT_CONFIG_COUNT/KEY/VALUE:
+// the transport is still refused, confirming git-config(1)'s documented
+// precedence — this env mechanism resolves like a trailing set of `-c`
+// overrides applied after every config file, the same precedence
+// privatePrefixesFromEnvInto's own doc comment already established for
+// the credential-helper/insteadOf/extraHeader signals).
 // Yet pre-fix, effectiveProtocolAllow only ever scanned gitConfigCandidates'
 // FILES for protocol.allow/protocol.<name>.allow, never this env-var
 // mechanism at all, so a transport blocked purely this way still let
-// suppressProtocolBlockedInsteadOf's blockedInsteadOfPrefixCounts (and
-// run()'s own credential-helper/extraHeader scheme filter) conclude
-// "allowed", reporting a SUMDB LEAK for a fetch that can never actually
-// complete — the identical "active wrong claim" failure class
-// gitProtocolAllowed/suppressProtocolBlockedInsteadOf themselves exist to
-// close for the file-based case.
+// suppressInsteadOfSignals (and run()'s own credential-helper/extraHeader
+// scheme filter) conclude "allowed", reporting a SUMDB LEAK for a fetch
+// that can never actually complete — the identical "active wrong claim"
+// failure class gitProtocolAllowed/suppressInsteadOfSignals themselves
+// exist to close for the file-based case.
 //
 // Both the "protocol.<name>.allow" (three-part key, most specific) and bare
 // "protocol.allow" (two-part key, the default policy for any scheme with no
@@ -1705,51 +1631,19 @@ func privatePrefixesFromConfigFileInto(configPath, moduleDir string, visited map
 	})
 }
 
-// insteadOfSchemesFromConfigFile is insteadOfSchemes' counterpart to
-// privatePrefixesFromConfigFile: same file-read and [include]/[includeIf]
-// following (sharing a visited set with its own call tree, separate from
-// privatePrefixesFromConfigFile's, since this is an independent scan of
-// the same files for different information — see blockedInsteadOfPrefixCounts).
-func insteadOfSchemesFromConfigFile(configPath, moduleDir string, visited map[string]bool) map[string][]string {
-	abs, err := filepath.Abs(configPath)
-	if err != nil {
-		return nil
-	}
-	if visited[abs] {
-		return nil
-	}
-	visited[abs] = true
-
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil
-	}
-
-	out := insteadOfSchemes(data)
-	dir := filepath.Dir(configPath)
-	for _, inc := range parseIncludes(data) {
-		if inc.cond != "" && !includeIfMatches(inc.cond, moduleDir, dir) {
-			continue
-		}
-		if p := resolveIncludePath(inc.path, dir); p != "" {
-			for k, v := range insteadOfSchemesFromConfigFile(p, moduleDir, visited) {
-				out[k] = append(out[k], v...)
-			}
-		}
-	}
-	return out
-}
-
 // insteadOfRule pairs one url.<base>.insteadOf entry's normalized "old"
 // side (see normalizeToModulePrefix, used for matching against a module
 // path) with whether the entry is an explicit no-op override (see
-// isInsteadOfNoop) — written by a real config to carve a narrower,
-// unrewritten exception out of a broader rewrite covering the same
-// prefix. See insteadOfSignalFor, the only consumer of this, for why that
-// distinction matters.
+// isInsteadOfNoop) and its new side's transport scheme (see schemeOf) —
+// written by a real config to carve a narrower, unrewritten exception out
+// of a broader rewrite covering the same prefix, or to rewrite to a
+// transport protocol.allow/GIT_ALLOW_PROTOCOL blocks. See
+// insteadOfApplicableRule, the only consumer of this, for why both
+// distinctions matter.
 type insteadOfRule struct {
-	old  string
-	noop bool
+	old    string
+	noop   bool
+	scheme string
 }
 
 // isInsteadOfNoop reports whether a `[url "<new>"] insteadOf = <old>`
@@ -1775,14 +1669,14 @@ func isInsteadOfNoop(old, newSide string) bool {
 }
 
 // insteadOfRulesFromGitConfig scans a gitconfig file's contents for every
-// `[url "<new>"] insteadOf = <old>` entry the same way insteadOfSchemes
-// does, but keeps each rule's own old-side prefix paired with whether its
-// new side is a no-op (see insteadOfRule) instead of discarding the new
-// side down to just a transport scheme — needed to apply git's own
-// documented longest-match-wins insteadOf precedence across every
-// insteadOf rule found anywhere (see insteadOfSignalFor), not just the
-// ones sharing one particular old-side prefix string the way
-// insteadOfSchemes' map keying already assumes.
+// `[url "<new>"] insteadOf = <old>` entry the same way
+// privatePrefixesFromGitConfig does, but keeps each rule's own old-side
+// prefix paired with whether its new side is a no-op and its transport
+// scheme (see insteadOfRule) instead of collapsing straight down to a flat
+// prefix list — needed to apply git's own documented longest-match-wins
+// insteadOf precedence across every insteadOf rule found anywhere (see
+// insteadOfApplicableRule), not just the ones sharing one particular
+// old-side prefix string.
 func insteadOfRulesFromGitConfig(data []byte) []insteadOfRule {
 	var out []insteadOfRule
 	inURL := false
@@ -1812,7 +1706,7 @@ func insteadOfRulesFromGitConfig(data []byte) []insteadOfRule {
 			continue
 		}
 		if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-			out = append(out, insteadOfRule{old: p, noop: isInsteadOfNoop(value, sectionURL)})
+			out = append(out, insteadOfRule{old: p, noop: isInsteadOfNoop(value, sectionURL), scheme: schemeOf(sectionURL)})
 		}
 	}
 	return out
@@ -1820,7 +1714,7 @@ func insteadOfRulesFromGitConfig(data []byte) []insteadOfRule {
 
 // insteadOfRulesFromEnv is insteadOfRulesFromGitConfig's counterpart for
 // the GIT_CONFIG_COUNT/GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> env-var
-// config mechanism, mirroring insteadOfSchemesFromEnv's own structure.
+// config mechanism.
 func insteadOfRulesFromEnv(getenv func(string) string) []insteadOfRule {
 	count, ok := gitConfigCount(getenv)
 	if !ok {
@@ -1838,17 +1732,18 @@ func insteadOfRulesFromEnv(getenv func(string) string) []insteadOfRule {
 		name = strings.ToLower(name)
 		if section == "url" && name == "insteadof" {
 			if p := normalizeToModulePrefix(value); p != "" && !isKnownPublicHost(p) {
-				out = append(out, insteadOfRule{old: p, noop: isInsteadOfNoop(value, subsection)})
+				out = append(out, insteadOfRule{old: p, noop: isInsteadOfNoop(value, subsection), scheme: schemeOf(subsection)})
 			}
 		}
 	}
 	return out
 }
 
-// insteadOfRulesFromConfigFile is insteadOfSchemesFromConfigFile's
+// insteadOfRulesFromConfigFile is privatePrefixesFromConfigFile's
 // counterpart for insteadOfRulesFromGitConfig: same file-read and
-// [include]/[includeIf] following, its own independent visited set (same
-// reasoning as insteadOfSchemesFromConfigFile's own doc comment).
+// [include]/[includeIf] following, its own independent visited set since
+// this is an independent scan of the same files for different
+// information.
 func insteadOfRulesFromConfigFile(configPath, moduleDir string, visited map[string]bool) []insteadOfRule {
 	abs, err := filepath.Abs(configPath)
 	if err != nil {
@@ -1877,20 +1772,15 @@ func insteadOfRulesFromConfigFile(configPath, moduleDir string, visited map[stri
 	return out
 }
 
-// insteadOfSignalFor reports whether modulePath has a genuine insteadOf-
-// derived private-auth signal, applying git's own documented longest-
-// match-wins precedence for url.<base>.insteadOf (git-config(1): "When
-// more than one insteadOf strings match a given URL, the longest match is
-// used"): among every rule in rules whose old side matches modulePath as a
-// prefix, only the single longest-matching one is ever actually applied by
-// a real git fetch of modulePath — any shorter matching rule is simply
-// never reached for this module, file order notwithstanding. If that one
-// longest-matching rule is itself a no-op (see insteadOfRule — its own new
-// side normalizes to the identical prefix as its own old side, a
-// documented way to carve a narrower, unrewritten exception out of a
-// broader rewrite), real git performs no rewrite at all for modulePath, so
-// there is no insteadOf-derived private-auth signal here, regardless of
-// any shorter, non-noop rule that also happens to match.
+// insteadOfApplicableRule returns the single insteadOf rule a real git
+// fetch of modulePath would actually apply, implementing git's own
+// documented longest-match-wins precedence for url.<base>.insteadOf
+// (git-config(1): "When more than one insteadOf strings match a given
+// URL, the longest match is used"): among every rule in rules whose old
+// side matches modulePath as a prefix, only the single longest-matching
+// one is ever reached by the fetch — any shorter matching rule is simply
+// never applied for this module, file order notwithstanding. ok is false
+// when no rule matches modulePath at all.
 //
 // Live-verified (2026-10-04, git 2.47.3): with
 // `url."ssh://git@example.com/myorg/".insteadOf=https://example.com/myorg/`
@@ -1910,19 +1800,28 @@ func insteadOfRulesFromConfigFile(configPath, moduleDir string, visited map[stri
 // reported SUMDB LEAK — an active wrong claim for a module a real `go get`
 // fetches completely unauthenticated, confirmed live end-to-end against
 // the actual goprivaudit binary pre-fix.
-func insteadOfSignalFor(modulePath string, rules []insteadOfRule) bool {
+//
+// Callers (see suppressInsteadOfSignals) use the returned rule's noop and
+// scheme fields to decide what, if anything, this rule contributes: a
+// no-op rule means no rewrite happens at all (the ordinary, unrewritten
+// fetch proceeds, so an independent signal for the same URL still
+// applies); a rule whose scheme protocol.allow/GIT_ALLOW_PROTOCOL blocks
+// means git Fatals applying the rewrite itself, before ever attempting
+// any transport — including the original, unrewritten one — so NO signal
+// for modulePath can apply, independent or not.
+func insteadOfApplicableRule(modulePath string, rules []insteadOfRule) (rule insteadOfRule, ok bool) {
 	bestLen := -1
-	signal := false
 	for _, r := range rules {
 		if !matchesPrefixPattern(r.old, modulePath) {
 			continue
 		}
 		if len(r.old) > bestLen {
 			bestLen = len(r.old)
-			signal = !r.noop
+			rule = r
+			ok = true
 		}
 	}
-	return signal
+	return rule, ok
 }
 
 // protocolAllowFromConfigFile is protocolAllowFromGitConfig's counterpart
