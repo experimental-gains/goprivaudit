@@ -173,7 +173,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.105
+- uses: experimental-gains/goprivaudit@v0.1.106
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -197,7 +197,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.105
+    rev: v0.1.106
     hooks:
       - id: goprivaudit
 ```
@@ -265,6 +265,25 @@ Any `go.mod` dependency whose path falls under a rewritten prefix is
 treated as having a private-auth signal, then checked against
 `GOPRIVATE`/`GONOSUMDB` using the same glob-per-path-segment, prefix-match
 semantics the `go` command itself uses (see `go help goproxy`).
+
+When more than one `insteadOf` rule's old side matches a dependency,
+`goprivaudit` applies git's own documented precedence (`git help config`:
+"When more than one insteadOf strings match a given URL, the longest
+match is used") rather than treating every matching rule as an
+independent signal: only the single longest-matching rule is ever
+actually applied by a real `git` fetch, and if that rule rewrites the URL
+right back to itself — a documented way to carve an unauthenticated
+exception for one subdirectory out of a broader org-wide rewrite, e.g.
+keeping one public repo reachable from a machine with no SSH key —
+real git performs no rewrite at all, so there's no signal to report for
+that dependency even though a shorter, genuinely-authenticating rule also
+matches it. Verified live (git 2.47.3): with both
+`[url "ssh://git@example.com/myorg/"] insteadOf = https://example.com/myorg/`
+and the longer
+`[url "https://example.com/myorg/sub/"] insteadOf = https://example.com/myorg/sub/`
+configured, `git ls-remote https://example.com/myorg/sub/repo` invokes no
+ssh subprocess at all, while `git ls-remote
+https://example.com/myorg/other-repo` (outside the "sub" override) does.
 
 `[include]` and `[includeIf "gitdir:..."]`/`"gitdir/i:..."`/
 `"onbranch:..."`/`"onbranch/i:..."` directives (git-config(1)'s
