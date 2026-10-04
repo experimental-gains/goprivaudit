@@ -476,6 +476,68 @@ func TestVendorModeActiveDirWithoutModulesTxt(t *testing.T) {
 	}
 }
 
+// TestWorkspaceVendorModeActiveModulesTxtUnreadable is the direct unit-level
+// regression test for the real-world-testing bug fixed in
+// workspaceVendorModeActive: a workspace-root vendor/ directory that exists
+// (go.work's own `go` directive >= 1.14) but whose modules.txt entry cannot
+// actually be read AS A FILE — because it is itself a directory — must
+// report true (vendor mode treated as active, i.e. "cannot leak"), not
+// false. See TestRunWorkspaceVendorModulesTxtUnreadableNoLeak (main_test.go)
+// for the live-verified, end-to-end confirmation that real go Fatals
+// outright in this exact shape, before resolving a single module.
+func TestWorkspaceVendorModeActiveModulesTxtUnreadable(t *testing.T) {
+	dir := t.TempDir()
+	gowork := filepath.Join(dir, "go.work")
+	if err := os.WriteFile(gowork, []byte("go 1.24.4\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	modulesTxt := filepath.Join(dir, "vendor", "modules.txt")
+	if err := os.MkdirAll(modulesTxt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if !workspaceVendorModeActive(gowork) {
+		t.Error("workspaceVendorModeActive should be true: vendor/modules.txt exists but is a directory, not a file — real go Fatals reading it, so vendor mode is treated as active")
+	}
+
+	// Below go 1.14, real go never even attempts to read modules.txt at
+	// all (see modload.setDefaultBuildMod's own version gate, checked
+	// before modulesTextIsForWorkspace is ever called) — so the auto-default
+	// must still be suppressed here, matching every other go-version-gated
+	// case in this file.
+	if err := os.WriteFile(gowork, []byte("go 1.13\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if workspaceVendorModeActive(gowork) {
+		t.Error("workspaceVendorModeActive should be false: go.work's own go directive is below 1.14, so real go never attempts to read modules.txt at all")
+	}
+}
+
+// TestWorkspaceVendorModeActiveVendorIsPlainFile confirms the fix's own
+// vendor-DIRECTORY-existence gate (mirroring modload.setDefaultBuildMod's
+// own `fsys.Stat(vendorDir).IsDir()` check) is still applied BEFORE the
+// modules.txt read — a workspace-root "vendor" that is itself a plain file
+// (not a directory at all) makes real go skip the vendor auto-default
+// entirely, no Fatal, same as "no vendor directory present" — so this must
+// report false, not true, even though a naive "any modules.txt read error
+// other than ENOENT means Fatal" rule (without the separate directory
+// check this fix also adds) would have wrongly returned true here instead.
+func TestWorkspaceVendorModeActiveVendorIsPlainFile(t *testing.T) {
+	dir := t.TempDir()
+	gowork := filepath.Join(dir, "go.work")
+	if err := os.WriteFile(gowork, []byte("go 1.24.4\n\nuse ./member\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// "vendor" itself is a plain file, not a directory.
+	if err := os.WriteFile(filepath.Join(dir, "vendor"), []byte("not a directory\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if workspaceVendorModeActive(gowork) {
+		t.Error("workspaceVendorModeActive should be false: the workspace-root \"vendor\" entry is a plain file, not a directory — real go never attempts the vendor auto-default at all in this shape")
+	}
+}
+
 func TestQuotedFields(t *testing.T) {
 	cases := []struct {
 		in   string

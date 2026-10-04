@@ -158,6 +158,20 @@ func vendorModeActive(goflags, goVersion, vendorModulesTxtPath, gowork string) b
 // whose only coverage gap was a git insteadOf rewrite GOPRIVATE didn't
 // mention (see TestVendorModeActiveWorkspaceAutoVendor, spliced against the
 // pre-fix behavior).
+//
+// The vendor DIRECTORY's own existence is checked separately from its
+// modules.txt file, mirroring modload.setDefaultBuildMod's own two-stage
+// structure exactly (init.go, read directly against go1.24.4): it first
+// gates on `fsys.Stat(vendorDir).IsDir()` — a vendor/ that doesn't exist at
+// all, or exists but isn't a directory (e.g. a stray file of that name),
+// never even attempts to read modules.txt, no Fatal, just the ordinary
+// network-resolving path — and only once THAT'S true does it call
+// modulesTextIsForWorkspace(vendorDir) at all. Collapsing both stages into
+// a single os.Stat(vendor/modules.txt) (this function's pre-fix shape)
+// cannot tell "vendor/ itself is a plain file" (no Fatal, real go falls
+// through to the network) apart from "vendor/ is a real directory whose
+// modules.txt happens to be unreadable" (real go Fatals — see below) — both
+// make a naive Stat of the nested modules.txt path fail the same way.
 func workspaceVendorModeActive(gowork string) bool {
 	goworkAbs, err := filepath.Abs(gowork)
 	if err != nil {
@@ -174,11 +188,52 @@ func workspaceVendorModeActive(gowork string) bool {
 	if !goVersionAtLeast(parseGoVersion(data), 1, 14) {
 		return false
 	}
-	modulesTxt := filepath.Join(filepath.Dir(goworkAbs), "vendor", "modules.txt")
-	if _, err := os.Stat(modulesTxt); err != nil {
+	vendorDir := filepath.Join(filepath.Dir(goworkAbs), "vendor")
+	if info, err := os.Stat(vendorDir); err != nil || !info.IsDir() {
 		return false
 	}
-	return vendorModulesTxtIsForWorkspace(modulesTxt)
+	modulesTxt := filepath.Join(vendorDir, "modules.txt")
+	mdata, err := os.ReadFile(modulesTxt)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Matches modulesTextIsForWorkspace's own documented carve-out
+			// for a vendor/ directory that simply has no modules.txt at all
+			// (ok=false, err=nil) — see vendorModulesTxtDataIsForWorkspace's
+			// doc comment.
+			return false
+		}
+		// vendor/ is confirmed to exist as a real directory (just checked
+		// above) and go.work's own `go` directive is already >= 1.14 (just
+		// checked above too) — the exact two preconditions real go's
+		// setDefaultBuildMod verifies before it ever calls
+		// modulesTextIsForWorkspace at all. Any OTHER read error here (most
+		// plausibly modules.txt itself being a directory rather than a
+		// file — e.g. a stale/corrupt `go work vendor` run left a directory
+		// stub behind — or a permission-restricted file, e.g. a vendor/
+		// tree copied into a build stage by tooling that preserved a
+		// different, more restrictive owner/mode) is exactly the error
+		// modulesTextIsForWorkspace itself surfaces non-nil in that case,
+		// which setDefaultBuildMod Fatals on unconditionally ("go: reading
+		// modules.txt for vendor directory: ...") before resolving a single
+		// module — live-verified (2026-10, go1.24.4/go1.26.8): a go.work
+		// workspace member with vendor/modules.txt replaced by an empty
+		// DIRECTORY of that name made `go list -m all` Fatal immediately
+		// with exactly that message, regardless of GOPROXY/GOPRIVATE.
+		// Before this fix, goprivaudit's own os.Stat(modulesTxt)-then-
+		// vendorModulesTxtIsForWorkspace(modulesTxt) sequence treated this
+		// identical case as "not annotated for a workspace" (a plain
+		// os.ReadFile failure, same as the ENOENT case above), so
+		// workspaceVendorModeActive returned false and the ordinary
+		// SUMDB-leak audit ran anyway — reporting a false SUMDB LEAK for a
+		// require whose only coverage gap was an uncovered git insteadOf
+		// signal, for a checksum-database query real go can never actually
+		// reach (confirmed end-to-end against the built binary). So, like
+		// every other Fatal-causing shape elsewhere in this package, this
+		// "cannot leak" outcome is modeled as vendor mode being active (skip
+		// the whole audit), not as "no workspace vendor".
+		return true
+	}
+	return vendorModulesTxtDataIsForWorkspace(mdata)
 }
 
 // vendorModulesTxtIsForWorkspace mirrors cmd/go/internal/modload's own
@@ -188,17 +243,38 @@ func workspaceVendorModeActive(gowork string) bool {
 // marker `go work vendor` writes and a plain per-module `go mod vendor`
 // never does. Real go compares this against whether it's actually running
 // in workspace mode and refuses its vendor auto-default on any mismatch in
-// either direction (see vendorModeActive and workspaceVendorModeActive, both
-// of which call this for their respective directory). A missing or
-// unreadable file reads as "not annotated", matching real go's own
-// modulesTextIsForWorkspace, which treats a missing modules.txt as
-// ok=false, err=nil (its caller-side os.Stat/os.ReadFile already gates
-// against the file not existing at all before this is ever called here).
+// either direction (see vendorModeActive, the only remaining caller of this
+// path-taking form). A missing or unreadable file reads as "not annotated",
+// matching real go's own modulesTextIsForWorkspace's ok=false, err=nil
+// carve-out for a missing file — and, for vendorModeActive's own per-module
+// (non-workspace) caller specifically, an unreadable-but-present file is
+// safe to collapse into that same "not annotated" answer too: unlike
+// workspaceVendorModeActive (see its own doc comment for why that path
+// needs the ENOENT/other-error distinction kept separate), vendorModeActive
+// falls through to goVersionAtLeast(goVersion, 1, 14) whenever this
+// reports false, and real go's identical read-error Fatal is only ever
+// reached in the first place once that same go-version gate already holds
+// — so both paths agree "cannot leak" (vendor mode treated as active, or
+// real go Fatals outright) whenever goVersion >= 1.14, and agree "no
+// Fatal, ordinary network path" whenever it's below 1.14 (real go never
+// even attempts to read modules.txt in that case). Kept as its own
+// path-taking function (rather than folded into
+// vendorModulesTxtDataIsForWorkspace) purely so this caller doesn't need to
+// duplicate the os.ReadFile call.
 func vendorModulesTxtIsForWorkspace(modulesTxtPath string) bool {
 	data, err := os.ReadFile(modulesTxtPath)
 	if err != nil {
 		return false
 	}
+	return vendorModulesTxtDataIsForWorkspace(data)
+}
+
+// vendorModulesTxtDataIsForWorkspace is vendorModulesTxtIsForWorkspace's
+// own byte-slice-taking core, split out so workspaceVendorModeActive can
+// apply it to a modules.txt it has already read itself (needed there to
+// distinguish a genuine ENOENT from every other read error — see that
+// function's own doc comment).
+func vendorModulesTxtDataIsForWorkspace(data []byte) bool {
 	if len(data) > 512 {
 		data = data[:512]
 	}

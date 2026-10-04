@@ -3472,6 +3472,67 @@ github.com/myorg/internal-tool
 	}
 }
 
+// TestRunWorkspaceVendorModulesTxtUnreadableNoLeak is the direct end-to-end
+// regression test for the real-world-testing bug fixed in
+// workspaceVendorModeActive (vendor.go): a go.work workspace whose
+// workspace-root vendor/ directory exists (go >= 1.14) but whose own
+// modules.txt can't actually be read as a file — here, modules.txt is
+// itself a DIRECTORY, a plausible leftover from an interrupted/corrupted
+// `go work vendor` run, or a build-tooling mistake — makes real go's own
+// modulesTextIsForWorkspace return a non-nil error, which
+// modload.setDefaultBuildMod Fatals on unconditionally ("go: reading
+// modules.txt for vendor directory: ... is a directory") before resolving a
+// single module, the same "cannot leak" shape as every other
+// malformed/unreadable-input skip in this package. Live-verified (go1.24.4
+// and go1.26.8): `GOPROXY=off go list -m all` run from inside the workspace
+// member Fatals with exactly that message, regardless of GOPRIVATE/GONOSUMDB
+// coverage. Before this fix, workspaceVendorModeActive collapsed this case
+// into the same "not annotated for a workspace" bucket as a genuinely
+// missing modules.txt (both were plain os.ReadFile/os.Stat failures it
+// couldn't tell apart), so it returned false, the ordinary SUMDB-leak audit
+// ran anyway, and the actual goprivaudit binary reported a false "SUMDB
+// LEAK" for this exact fixture.
+func TestRunWorkspaceVendorModulesTxtUnreadableNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.24.4
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.24
+
+use (
+	./app
+)
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+	// modules.txt is a DIRECTORY, not a file: os.Stat(vendor/modules.txt)
+	// would succeed either way, but os.ReadFile cannot actually read it.
+	if err := os.MkdirAll(filepath.Join(dir, "vendor", "modules.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goflags", "", // no explicit -mod= override: rely on the workspace vendor auto-default
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0: an unreadable workspace-root vendor/modules.txt makes real go Fatal before resolving anything, so no leak can happen; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the workspace-root vendor/modules.txt can't be read as a file, got: %s", stdout)
+	}
+}
+
 // TestRunGoflagsModInWorkspaceNoLeak is the direct end-to-end regression
 // test for goflagsModRejectedInWorkspace (see vendor.go): GOFLAGS=-mod=mod
 // is completely ordinary outside a workspace (see
