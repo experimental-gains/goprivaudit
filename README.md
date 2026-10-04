@@ -126,6 +126,15 @@ Fatal with "unknown directive: tool" before resolving anything. Verified
 live against real downloaded toolchain binaries: go1.21.0 and go1.23.0
 both Fatal on exactly this shape while go1.24.4 parses it fine.
 
+The same skip applies again, one more version earlier, to a go.mod's
+`godebug` directive (`go help godebug`): it was only added to
+`golang.org/x/mod/modfile`'s grammar starting go1.23 — a go.mod carrying
+one, whose own `go` directive stays below 1.23 and whose selected
+toolchain is also below 1.23, makes every module-aware `go` subcommand
+Fatal with "unknown directive: godebug" before resolving anything.
+Verified live against real downloaded toolchain binaries: go1.21.0 and
+go1.22.0 both Fatal on exactly this shape while go1.23.0 parses it fine.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
@@ -182,7 +191,7 @@ goprivaudit || exit 1
 ## Use as a GitHub Action
 
 ```yaml
-- uses: experimental-gains/goprivaudit@v0.1.108
+- uses: experimental-gains/goprivaudit@v0.1.109
 ```
 
 Flags, mainly for testing/CI overrides:
@@ -206,7 +215,7 @@ Flags, mainly for testing/CI overrides:
 ```yaml
 repos:
   - repo: https://github.com/experimental-gains/goprivaudit
-    rev: v0.1.108
+    rev: v0.1.109
     hooks:
       - id: goprivaudit
 ```

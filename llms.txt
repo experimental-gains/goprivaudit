@@ -26,4 +26,4 @@ checked is local (go.mod, git config, netrc, `go env`).
 - [hfaudit](https://github.com/experimental-gains/hfaudit): same check for Hugging Face Hub model/dataset IDs
 
 ## Repo
-- [Source](https://github.com/experimental-gains/goprivaudit): MIT-licensed, currently at v0.1.108
+- [Source](https://github.com/experimental-gains/goprivaudit): MIT-licensed, currently at v0.1.109
