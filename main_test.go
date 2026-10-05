@@ -693,6 +693,159 @@ require git.openstack.org/openstack/nova/subpkg v0.0.0-20200101000000-0000000000
 	}
 }
 
+// TestRunUnsatisfiableGoDirectiveGoModNoLeak is the direct regression test
+// for goModRequiresUnsatisfiableGoVersion (see gomod.go): a go.mod
+// declaring `go 1.99.0` — no ignore/tool/godebug directive anywhere —
+// audited with a toolchain (via -goversion, standing in for `go env
+// GOVERSION`) that can't satisfy it makes every module-aware go subcommand
+// Fatal immediately and entirely offline with `go: go.mod requires go >=
+// 1.99.0 (running go 1.24.4; GOTOOLCHAIN=local)`, before it resolves the
+// otherwise-uncovered private-auth-signaled require below — so it can
+// never actually leak.
+func TestRunUnsatisfiableGoDirectiveGoModNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.99.0
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goversion", "go1.24.4",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when go.mod declares a `go` version the selected toolchain can't satisfy at all (go itself would Fatal before any query), got: %s", stdout)
+	}
+}
+
+// TestRunUnsatisfiableGoDirectiveSatisfiedStillLeaks is
+// TestRunUnsatisfiableGoDirectiveGoModNoLeak's companion, proving the fix
+// doesn't overreach: the identical go.mod/git-config pair, but with a `go`
+// directive the selected toolchain DOES satisfy, must still report the
+// real leak.
+func TestRunUnsatisfiableGoDirectiveSatisfiedStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.21
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-goversion", "go1.24.4",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
+	}
+}
+
+// TestRunUnsatisfiableGoDirectiveGoToolchainLocalRealGoEnv is
+// TestRunUnsatisfiableGoDirectiveGoModNoLeak without the -goversion
+// override, pinning GOTOOLCHAIN=local instead so `go env GOVERSION` itself
+// succeeds (returning this sandbox's real, installed toolchain) exactly
+// the way live verification confirmed: a realistic pinned-CI toolchain
+// setup where no download is ever attempted, so the Fatal comes from
+// go.mod's own declared minimum being newer than what's actually running,
+// not from a failed download. This is the exact scenario that sailed past
+// every check in this package pre-fix — goAuthConfigError and friends all
+// read their own real, successfully-resolved `go env` values in this mode
+// — and into a false SUMDB LEAK report.
+func TestRunUnsatisfiableGoDirectiveGoToolchainLocalRealGoEnv(t *testing.T) {
+	dir := t.TempDir()
+	if v := goEnv(dir, "GOVERSION"); v == "" || goVersionAtLeast(strings.TrimPrefix(v, "go"), 1, 99) {
+		t.Skipf("this sandbox's go (GOVERSION=%q) already satisfies `go 1.99.0` (or couldn't be determined)", v)
+	}
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.99.0
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GOTOOLCHAIN", "local")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean against this sandbox's real, installed go toolchain under GOTOOLCHAIN=local, got: %s", stdout)
+	}
+}
+
+// TestRunUnsatisfiableGoDirectiveGoProxyOffRealGoEnv is the companion real-
+// go-env regression for the OTHER Fatal shape: GOTOOLCHAIN left at its
+// default "auto", with GOPROXY=off so the attempted toolchain download
+// fails fast and offline (live-verified: identical "toolchain not
+// available" Fatal under GOPROXY=off and under a real, reachable default
+// GOPROXY, since go1.99.0 isn't a real release at all) instead of
+// depending on network access/timing inside a test. `go env GOVERSION`
+// itself Fatals in this mode, so goEnv's own subprocess-error convention
+// resolves localGoVersion to "".
+func TestRunUnsatisfiableGoDirectiveGoProxyOffRealGoEnv(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+go 1.99.0
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GOPROXY", "off")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when `go env GOVERSION` itself Fatals trying to satisfy an unresolvable go.mod `go` directive, got: %s", stdout)
+	}
+}
+
 // TestRunIgnoreDirectiveTooOldGoModNoLeak is the direct regression test
 // for goModHasIgnoreDirectiveTooOld (see gomod.go): a go.mod carrying an
 // `ignore` directive alongside a `go` directive below 1.25, audited by a
@@ -3012,6 +3165,89 @@ replace github.com/myorg/internal-tool => github.com/privorg/baz v1.0.0
 	}
 	if !strings.Contains(stdout, "no issues found") {
 		t.Errorf("stdout should report clean when the active go.work has two conflicting replace directives for the same old path/version (go itself would Fatal with \"conflicting replacements\" before any query), got: %s", stdout)
+	}
+}
+
+// TestRunUnsatisfiableGoDirectiveGoWorkNoLeak is the go.work-side
+// regression test for goModRequiresUnsatisfiableGoVersion, ported into
+// goWorkHasUnparseableDirective alongside the go.mod-side fix rather than
+// left to drift the way godebug's own go.work porting (see
+// TestRunGodebugDirectiveTooOldGoWorkNoLeak below) had to be revisited
+// separately: an active go.work declaring `go 1.99.0` makes every
+// module-aware go subcommand Fatal on the WORKSPACE's own toolchain
+// selection before app/go.mod (the member being audited) is ever even
+// reached, so its otherwise-uncovered private-auth-signaled require can
+// never actually leak either.
+func TestRunUnsatisfiableGoDirectiveGoWorkNoLeak(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.21
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.99.0
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goversion", "go1.24.4",
+	})
+	if code != 0 {
+		t.Errorf("exit code = %d, want 0; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "no issues found") {
+		t.Errorf("stdout should report clean when the active go.work declares a `go` version the selected toolchain can't satisfy at all (go itself would Fatal on the workspace before any query), got: %s", stdout)
+	}
+}
+
+// TestRunUnsatisfiableGoDirectiveGoWorkSatisfiedStillLeaks is
+// TestRunUnsatisfiableGoDirectiveGoWorkNoLeak's companion, proving the fix
+// doesn't overreach: the identical go.work/go.mod pair, but with a `go`
+// directive the selected toolchain DOES satisfy, must still report the
+// real leak.
+func TestRunUnsatisfiableGoDirectiveGoWorkSatisfiedStillLeaks(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "app/go.mod", `module example.com/app
+
+go 1.21
+
+require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
+`)
+	gowork := writeFile(t, dir, "go.work", `go 1.21
+
+use ./app
+`)
+	writeFile(t, dir, "app/.git/config", `[url "git@github.com:myorg/"]
+	insteadOf = https://github.com/myorg/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-gowork", gowork,
+		"-private", "",
+		"-nosumdb", "",
+		"-goversion", "go1.24.4",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1; stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/myorg/internal-tool") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
 	}
 }
 

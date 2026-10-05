@@ -567,6 +567,36 @@ func TestGoModHasIgnoreDirective(t *testing.T) {
 	}
 }
 
+// TestGoModRequiresUnsatisfiableGoVersion is the direct unit test for
+// goModRequiresUnsatisfiableGoVersion (see its own doc comment for the two
+// live-verified real-go Fatal shapes this models): a declared `go`
+// directive the local toolchain can't satisfy, either because localGoVersion
+// itself came back empty (the GOTOOLCHAIN=auto download-failed shape) or
+// because it resolved to a real, too-old version (the GOTOOLCHAIN=local
+// pinned-toolchain shape).
+func TestGoModRequiresUnsatisfiableGoVersion(t *testing.T) {
+	cases := []struct {
+		name       string
+		src        string
+		localGoVer string
+		want       bool
+	}{
+		{"no go directive at all", "module example.com/foo\n", "go1.24.4", false},
+		{"unparsable go directive argument", "module example.com/foo\n\ngo bogus\n", "go1.24.4", false},
+		{"declared version satisfied by local toolchain", "module example.com/foo\n\ngo 1.21\n", "go1.24.4", false},
+		{"declared version exactly equal to local toolchain", "module example.com/foo\n\ngo 1.24\n", "go1.24.4", false},
+		{"declared version newer than local toolchain (GOTOOLCHAIN=local shape)", "module example.com/foo\n\ngo 1.99.0\n", "go1.24.4", true},
+		{"declared version newer, three-component form", "module example.com/foo\n\ngo 1.30.0\n", "go1.24.4", true},
+		{"unresolvable local toolchain (GOTOOLCHAIN=auto download-failed shape) fails CLOSED", "module example.com/foo\n\ngo 1.99.0\n", "", true},
+		{"unresolvable local toolchain, but declared version itself unparsable", "module example.com/foo\n\ngo bogus\n", "", false},
+	}
+	for _, c := range cases {
+		if got := goModRequiresUnsatisfiableGoVersion([]byte(c.src), c.localGoVer); got != c.want {
+			t.Errorf("%s: goModRequiresUnsatisfiableGoVersion(%q, %q) = %v, want %v", c.name, c.src, c.localGoVer, got, c.want)
+		}
+	}
+}
+
 // TestGoModHasIgnoreDirectiveTooOld is the direct unit test for
 // goModHasIgnoreDirectiveTooOld (see its own doc comment for the
 // live-verified go1.24.4-vs-go1.25.14/go1.26.0 divergence this models):
@@ -818,8 +848,27 @@ func TestGoWorkHasUnparseableDirective(t *testing.T) {
 	}
 
 	godebugModernGoDirective := writeFile(t, dir, "godebugmoderngo.work", "go 1.23\n\ngodebug default=go1.20\n\nuse ./app\n")
-	if got := goWorkHasUnparseableDirective(godebugModernGoDirective, "go1.22.0"); got {
-		t.Errorf("go.work whose own `go` directive is already >=1.23 = %v, want false (its own go directive already satisfies the gate, regardless of localGoVersion)", got)
+	if got := goWorkHasUnparseableDirective(godebugModernGoDirective, "go1.23.0"); got {
+		t.Errorf("go.work whose own `go` directive is already >=1.23, local toolchain satisfies it too = %v, want false (godebug's own recognition gate doesn't fire once the declared version already clears it)", got)
+	}
+	// Live-verified (2026-10-05, real go1.22.0 via golang.org/dl): pairing
+	// this SAME go.work (declaring `go 1.23`) with a local toolchain that
+	// does NOT satisfy that declared minimum (go1.22.0, under
+	// GOTOOLCHAIN=local so no switch is attempted) makes `go list -m all`
+	// Fatal with `go: ../go.work requires go >= 1.23 (running go 1.22.0;
+	// GOTOOLCHAIN=local)` — a DIFFERENT, more fundamental Fatal than
+	// godebug's own recognition gate (goModRequiresUnsatisfiableGoVersion,
+	// not goModHasGodebugDirectiveTooOld), even though the declared version
+	// is already new enough that godebug itself would be recognized if a
+	// sufficient toolchain actually ran it. This exact combination — an
+	// older pinned localGoVersion than go.work's own declared `go` directive
+	// — is unreachable under GOTOOLCHAIN=auto (go never downgrades, so `go
+	// env GOVERSION` would have already switched up or Fataled trying to)
+	// but entirely realistic under GOTOOLCHAIN=local, the same pinned-CI
+	// scenario goModRequiresUnsatisfiableGoVersion's own doc comment
+	// describes for the go.mod-side check.
+	if got := goWorkHasUnparseableDirective(godebugModernGoDirective, "go1.22.0"); !got {
+		t.Errorf("go.work whose own `go` directive is already >=1.23, but local toolchain is pinned below it (GOTOOLCHAIN=local shape) = %v, want true", got)
 	}
 }
 

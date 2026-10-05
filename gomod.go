@@ -554,6 +554,88 @@ func goModHasIgnoreDirective(data []byte) bool {
 	return false
 }
 
+// goModRequiresUnsatisfiableGoVersion reports whether data's go.mod
+// declares a `go` directive version that the toolchain actually selected
+// to run it (localGoVersion, the same `go env GOVERSION` value threaded
+// into goModHasIgnoreDirectiveTooOld/goModHasToolDirectiveTooOld/
+// goModHasGodebugDirectiveTooOld below) cannot satisfy at all. This is a
+// strictly more fundamental gate than those three siblings: each of them
+// asks "is the toolchain that ends up running this file new enough to
+// recognize THIS ONE directive verb" (ignore/tool/godebug); this asks the
+// prior question, "was a toolchain even resolved that satisfies the
+// go.mod's own declared minimum at all, independent of which verbs it
+// uses." Real cmd/go resolves which toolchain will run a module-aware
+// command (GOTOOLCHAIN, default "auto") as its very first step, before
+// parsing a single go.mod directive — so an unsatisfiable `go` directive
+// makes every module-aware go subcommand Fatal immediately and entirely
+// offline, before resolving a single module, the same "cannot leak"
+// reasoning as every check in this file.
+//
+// Two distinct real-go failure shapes collapse into this one check,
+// distinguished by whether localGoVersion came back empty or not:
+//
+//   - GOTOOLCHAIN=auto (the default) tries to download a toolchain new
+//     enough to satisfy the file's own declared version and can't — no
+//     network, GOPROXY can't serve golang.org/toolchain, or the declared
+//     version isn't a real release at all. `go env GOVERSION` itself
+//     Fatals in this case — live-verified (2026-10): a go.mod reading
+//     only `module example.com/toolchk` / `go 1.99.0` makes `go env
+//     GOVERSION`/`go list -m`/`go build` all Fatal identically and
+//     entirely offline with `go: download go1.99.0 for linux/amd64:
+//     toolchain not available`, confirmed under both GOPROXY=off and a
+//     real, reachable default GOPROXY (the version simply isn't a real
+//     release, so no proxy can ever serve it) — which is exactly when
+//     goEnv's own subprocess-error convention makes localGoVersion
+//     resolve to "". Unlike goModHasIgnoreDirectiveTooOld and its two
+//     siblings (which fail OPEN on an unresolvable localGoVersion, since
+//     an unparseable *environment fact* is genuinely ambiguous for a
+//     narrow "is verb X recognized" question), this check fails CLOSED
+//     here (treats "" as unsatisfiable): this specific "" is never
+//     actually ambiguous — it is itself the live symptom of the exact
+//     Fatal being detected, not a generic goEnv hiccup.
+//   - GOTOOLCHAIN is restricted (e.g. "local"/"path" — a realistic
+//     pinned-CI toolchain setup, the same scenario
+//     goModHasIgnoreDirectiveTooOld's own doc comment already calls out)
+//     so no download is attempted at all: `go env GOVERSION` succeeds
+//     and reports the real running toolchain, but it's older than the
+//     go.mod's own declared minimum. Live-verified (GOTOOLCHAIN=local,
+//     2026-10): `go env GOVERSION` cleanly returns "go1.24.4" against
+//     that identical go.mod, while `go list -m`/`go build` in the same
+//     directory Fatal immediately with `go: go.mod requires go >=
+//     1.99.0 (running go 1.24.4; GOTOOLCHAIN=local)`. Before this check,
+//     that exact scenario sailed straight past every check in this
+//     package — goAuthConfigError and friends all read their own real,
+//     successfully-resolved `go env` values in this mode, since `go env`
+//     itself never needs to satisfy the file's declared minimum the way
+//     a module-resolving subcommand does — and into this tool's normal
+//     SUMDB-leak audit, which, confirmed end-to-end against the actual
+//     goprivaudit binary, wrongly reported a SUMDB LEAK finding for a
+//     query real go, right here, under this exact GOTOOLCHAIN=local
+//     environment, never reaches.
+//
+// An absent or unparsable `go` directive (parseGoVersion returns "", or a
+// shape goModHasInvalidGoDirective's own job already catches) is a
+// different check's job entirely and always returns false here, the same
+// "not my job" convention goModHasIgnoreDirectiveTooOld's own first line
+// uses for a go.mod lacking the directive it gates on.
+func goModRequiresUnsatisfiableGoVersion(data []byte, localGoVersion string) bool {
+	declared := strings.TrimSpace(parseGoVersion(data))
+	parts := strings.SplitN(declared, ".", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	declaredMajor, err1 := strconv.Atoi(parts[0])
+	declaredMinor, err2 := strconv.Atoi(parts[1])
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	local := strings.TrimPrefix(strings.TrimSpace(localGoVersion), "go")
+	if local == "" {
+		return true
+	}
+	return !goVersionAtLeast(local, declaredMajor, declaredMinor)
+}
+
 // goModHasIgnoreDirectiveTooOld reports whether data's go.mod contains a
 // top-level `ignore` directive (see goModHasIgnoreDirective) that the go
 // toolchain actually processing this file cannot recognize at all —
@@ -2878,6 +2960,18 @@ func goWorkReplaces(gowork string) map[string][]replaceEntry {
 // TestRunGodebugDirectiveModernToolchainGoWorkStillLeaks (confirming the fix
 // doesn't overreach: the identical fixture under go1.23.0 still reports the
 // real leak).
+//
+// Also calls goModRequiresUnsatisfiableGoVersion against gowork's own
+// bytes, with the same localGoVersion already threaded through: go.work
+// carries its own `go` directive, and real cmd/go's toolchain-selection
+// step (GOTOOLCHAIN) considers go.work's declared minimum exactly the same
+// way it considers a go.mod's — so a go.work declaring a `go` version the
+// locally resolvable toolchain can't satisfy Fatals immediately and
+// entirely offline, before go.mod (the member being audited) is ever even
+// reached, the same gap goModRequiresUnsatisfiableGoVersion's own doc
+// comment describes for the go.mod-side check, one file up. Ported
+// alongside that fix rather than left to drift the way godebug's own
+// go.work porting had to be revisited separately above.
 func goWorkHasUnparseableDirective(gowork, localGoVersion string) bool {
 	if gowork == "" || gowork == "off" {
 		return false
@@ -2895,7 +2989,8 @@ func goWorkHasUnparseableDirective(gowork, localGoVersion string) bool {
 		goModHasInvalidGodebugDirective(data) ||
 		goModHasInvalidDirectiveArgCount(data) ||
 		goModHasRepeatedSingletonDirective(data, goWorkSingletonVerbs) ||
-		goModHasGodebugDirectiveTooOld(data, localGoVersion)
+		goModHasGodebugDirectiveTooOld(data, localGoVersion) ||
+		goModRequiresUnsatisfiableGoVersion(data, localGoVersion)
 }
 
 // mergeReplaces overlays a workspace's go.work replace directives on top of

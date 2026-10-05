@@ -580,6 +580,25 @@ func run(args []string, stdout, stderr *os.File) int {
 		// just above, one level more general: that check only ever catches a
 		// malformed *argument* to a recognized "go" line, not an entirely
 		// unrecognized verb anywhere else in the file.
+	case goModRequiresUnsatisfiableGoVersion(data, localGoVersion):
+		// A go.mod whose own `go` directive declares a version the
+		// toolchain actually selected to run it (localGoVersion) cannot
+		// satisfy at all — see goModRequiresUnsatisfiableGoVersion for the
+		// two distinct live-verified Fatal shapes this collapses (GOTOOLCHAIN=
+		// auto failing to download a sufficient/real toolchain at all, vs.
+		// GOTOOLCHAIN=local/path running an older pinned toolchain that
+		// never attempts to switch) — makes every module-aware go
+		// subcommand Fatal immediately and entirely offline, before it
+		// resolves a single module, the strictly more fundamental version
+		// of the "cannot leak" reasoning goModHasIgnoreDirectiveTooOld/
+		// goModHasToolDirectiveTooOld/goModHasGodebugDirectiveTooOld just
+		// below apply to one directive verb at a time: this fires
+		// regardless of whether the file uses ignore/tool/godebug at all,
+		// since real go never even gets far enough to recognize a single
+		// directive when its own toolchain-selection step already Fatals.
+		// Checked ahead of those three siblings for that reason — a go.mod
+		// this fundamentally unsatisfiable makes their own narrower
+		// "is this one verb recognized" question moot.
 	case goModHasIgnoreDirectiveTooOld(data, localGoVersion):
 		// A go.mod containing a top-level `ignore` directive that the
 		// toolchain actually selected to run it (see

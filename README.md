@@ -135,6 +135,36 @@ Fatal with "unknown directive: godebug" before resolving anything.
 Verified live against real downloaded toolchain binaries: go1.21.0 and
 go1.22.0 both Fatal on exactly this shape while go1.23.0 parses it fine.
 
+The whole audit is also skipped — for a more fundamental reason than any
+single directive verb — when the toolchain actually selected to run a
+go.mod can't satisfy its own `go` directive version at all. Real `go`
+resolves which toolchain will run (`GOTOOLCHAIN`, default "auto") as its
+very first step, before parsing a single go.mod directive, so this Fatals
+even for a go.mod that uses none of `ignore`/`tool`/`godebug`. Two
+distinct shapes, both verified live: with `GOTOOLCHAIN` left at its
+default "auto", a go.mod declaring `go 1.99.0` makes `go env
+GOVERSION`/`go list -m`/`go build` all Fatal identically and entirely
+offline (confirmed under both `GOPROXY=off` and a real, reachable default
+`GOPROXY` — the version simply isn't a real release, so no proxy can ever
+serve it) with:
+
+```
+go: downloading go1.99.0 (linux/amd64)
+go: download go1.99.0 for linux/amd64: toolchain not available
+```
+
+And with `GOTOOLCHAIN=local` (a realistic pinned-CI toolchain setup, where
+no download is ever attempted), the identical go.mod against a real,
+older installed toolchain Fatals instead with:
+
+```
+go: go.mod requires go >= 1.99.0 (running go 1.24.4; GOTOOLCHAIN=local)
+```
+
+An active go.work carrying its own unsatisfiable `go` directive Fatals the
+same way, one level up, before a member go.mod is ever reached — e.g.
+`go: ../go.work requires go >= 1.23 (running go 1.22.0; GOTOOLCHAIN=local)`.
+
 ## If you hit "could not read Username" or "terminal prompts disabled"
 
 That's the real `go get` error that sends most people looking for a
