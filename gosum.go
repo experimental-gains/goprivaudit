@@ -57,21 +57,18 @@ func goSumCoversModule(goSumKeys map[string]bool, module, version string) bool {
 	return goSumKeys[module+" "+version] && goSumKeys[module+" "+version+"/go.mod"]
 }
 
-// filterGoSumCovered drops any module from modules whose go.sum entry (read
-// from moduleDir's own go.sum — live-verified to be consulted and
-// sufficient on its own even inside an active go.work workspace, with no
-// go.work.sum present at all: a two-module workspace built from a member
-// directory whose own go.sum already had both lines for its one dependency
-// succeeded fully offline, GOSUMDB pointed at an unreachable host) already
-// covers (see goSumCoversModule) the exact version `go` would actually
-// request for it. Per `go help module-auth`, go.sum is this tool's second
-// real, checked-in "cannot leak" source, distinct from (and unlike) the
-// local module cache this package's own doc comment already explains
-// GOPROXY=off can't reliably stand in for: go.sum is a file sitting right
-// next to go.mod in the repository, not transient machine-local state this
-// tool has no visibility into, so — unlike GOPROXY=off — treating an
-// existing go.sum entry as a real guarantee doesn't require guessing about
-// anything this tool can't see.
+// filterGoSumCovered drops any module from modules whose checksum entry —
+// read from moduleDir's own go.sum, MERGED with the active workspace's
+// go.work.sum (see below) — already covers (see goSumCoversModule) the
+// exact version `go` would actually request for it. Per `go help
+// module-auth`, go.sum is this tool's second real, checked-in "cannot
+// leak" source, distinct from (and unlike) the local module cache this
+// package's own doc comment already explains GOPROXY=off can't reliably
+// stand in for: go.sum is a file sitting right next to go.mod in the
+// repository, not transient machine-local state this tool has no
+// visibility into, so — unlike GOPROXY=off — treating an existing go.sum
+// entry as a real guarantee doesn't require guessing about anything this
+// tool can't see.
 //
 // Before this existed, goprivaudit reported SUMDB LEAK for every uncovered
 // private-auth-signaled require regardless of go.sum's own contents — an
@@ -83,6 +80,28 @@ func goSumCoversModule(goSumKeys map[string]bool, module, version string) bool {
 // both lines for, so the query this tool's whole purpose is to flag cannot
 // actually happen for that module on any ordinary subsequent build.
 //
+// gowork (the path from `go env GOWORK`, or "" / "off" when inactive — see
+// goWorkReplaces' doc comment for the exact same convention) additionally
+// merges in <dir of gowork>/go.work.sum's own entries. This matters because
+// an active go.work workspace does NOT write new checksums into a member
+// module's own go.sum at all — live-verified (go1.24.4): a fresh two-file
+// workspace (go.work `use`-ing one member module, whose go.mod requires
+// rsc.io/quote with no pre-existing go.sum) built from inside the member
+// module's own directory downloads and records every checksum into
+// go.work.sum at the WORKSPACE ROOT, leaving the member's own go.sum empty/
+// absent throughout. A subsequent build with GOPROXY=off and GOSUMDB
+// pointed at an unreachable host still succeeds fully offline from that
+// go.work.sum alone — the identical "sumdb query cannot happen" guarantee
+// goSumCoversModule's own doc comment already established for an ordinary
+// go.sum, just recorded in workspace mode's own separate file instead.
+// Before this fix, filterGoSumCovered only ever read moduleDir's own
+// go.sum, so every module in this extremely common workspace shape (go.sum
+// empty, go.work.sum fully populated) was wrongly treated as uncovered —
+// an active false SUMDB LEAK for a query that can never actually happen,
+// the opposite of the false negative this function exists to prevent but
+// a real wrong claim either way, undermining the precision this tool's
+// entire value depends on.
+//
 // Deliberately scoped to a require whose own path is NOT touched by any
 // replace directive at all: a locally-replaced require is already dropped
 // from modules upstream (resolveEffectiveModules), and a module-path-
@@ -93,12 +112,18 @@ func goSumCoversModule(goSumKeys map[string]bool, module, version string) bool {
 // path rather than guessed at. This can only miss a real suppression
 // opportunity (replaced modules keep being audited exactly as before), not
 // introduce a false "no issues found".
-func filterGoSumCovered(modules []string, requires []requireEntry, replaces map[string][]replaceEntry, moduleDir string) []string {
-	data, err := os.ReadFile(filepath.Join(moduleDir, "go.sum"))
-	if err != nil {
-		return modules
+func filterGoSumCovered(modules []string, requires []requireEntry, replaces map[string][]replaceEntry, moduleDir, gowork string) []string {
+	goSumKeys := map[string]bool{}
+	if data, err := os.ReadFile(filepath.Join(moduleDir, "go.sum")); err == nil {
+		goSumKeys = parseGoSumKeys(data)
 	}
-	goSumKeys := parseGoSumKeys(data)
+	if gowork != "" && gowork != "off" {
+		if data, err := os.ReadFile(filepath.Join(filepath.Dir(gowork), "go.work.sum")); err == nil {
+			for k, v := range parseGoSumKeys(data) {
+				goSumKeys[k] = v
+			}
+		}
+	}
 	if len(goSumKeys) == 0 {
 		return modules
 	}

@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestParseGoSumKeys(t *testing.T) {
 	data := []byte(`github.com/myorg/internal-tool v1.2.3 h1:aaaa=
@@ -89,7 +93,7 @@ example.com/samepath v4.0.0 h1:eeee=
 example.com/samepath v4.0.0/go.mod h1:ffff=
 `)
 
-	got := filterGoSumCovered(modules, requires, replaces, dir)
+	got := filterGoSumCovered(modules, requires, replaces, dir, "")
 	want := []string{"example.com/notcovered", "example.com/replaced-fork", "example.com/samepath"}
 	if len(got) != len(want) {
 		t.Fatalf("filterGoSumCovered = %v, want %v", got, want)
@@ -105,8 +109,58 @@ example.com/samepath v4.0.0/go.mod h1:ffff=
 func TestFilterGoSumCoveredNoGoSumFile(t *testing.T) {
 	dir := t.TempDir()
 	modules := []string{"example.com/foo"}
-	got := filterGoSumCovered(modules, nil, nil, dir)
+	got := filterGoSumCovered(modules, nil, nil, dir, "")
 	if len(got) != 1 || got[0] != "example.com/foo" {
 		t.Errorf("filterGoSumCovered with no go.sum = %v, want unchanged %v", got, modules)
+	}
+}
+
+// TestFilterGoSumCoveredGoWorkSum covers the gap fixed in this change: a
+// real go.work workspace writes a newly-needed dependency's checksums into
+// go.work.sum at the WORKSPACE ROOT, not into the member module's own
+// go.sum (live-verified, go1.24.4 — see filterGoSumCovered's doc comment).
+// A member module whose own go.sum is entirely empty, audited while an
+// active go.work names it, must still have its covered require dropped
+// once go.work.sum (sitting next to go.work, a sibling directory of
+// moduleDir) carries both checksum lines for it.
+func TestFilterGoSumCoveredGoWorkSum(t *testing.T) {
+	wsRoot := t.TempDir()
+	moduleDir := filepath.Join(wsRoot, "member")
+	if err := os.MkdirAll(moduleDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gowork := filepath.Join(wsRoot, "go.work")
+	writeFile(t, wsRoot, "go.work", "go 1.24\n\nuse ./member\n")
+	writeFile(t, wsRoot, "go.work.sum", `example.com/covered v1.0.0 h1:aaaa=
+example.com/covered v1.0.0/go.mod h1:bbbb=
+`)
+	// moduleDir's own go.sum deliberately does not exist at all, matching
+	// the real go.work shape this test reproduces.
+
+	requires := []requireEntry{
+		{path: "example.com/covered", version: "v1.0.0"},
+		{path: "example.com/notcovered", version: "v2.0.0"},
+	}
+	modules := []string{"example.com/covered", "example.com/notcovered"}
+
+	got := filterGoSumCovered(modules, requires, nil, moduleDir, gowork)
+	want := []string{"example.com/notcovered"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("filterGoSumCovered with go.work.sum coverage = %v, want %v", got, want)
+	}
+
+	// gowork == "" (no active workspace) must NOT pick up the sibling
+	// go.work.sum at all: the exact same module, audited the same way,
+	// stays uncovered when there's no workspace to have written it.
+	gotNoWorkspace := filterGoSumCovered(modules, requires, nil, moduleDir, "")
+	if len(gotNoWorkspace) != len(modules) {
+		t.Errorf("filterGoSumCovered with gowork=\"\" = %v, want unchanged %v (go.work.sum must only apply inside an active workspace)", gotNoWorkspace, modules)
+	}
+
+	// gowork == "off" (workspace mode explicitly disabled) must behave
+	// identically to "" — same convention goWorkReplaces already uses.
+	gotOff := filterGoSumCovered(modules, requires, nil, moduleDir, "off")
+	if len(gotOff) != len(modules) {
+		t.Errorf("filterGoSumCovered with gowork=\"off\" = %v, want unchanged %v", gotOff, modules)
 	}
 }

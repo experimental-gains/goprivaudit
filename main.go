@@ -136,14 +136,15 @@
 // Unlike every skip above (each all-or-nothing for the whole audit), one
 // check narrows the SUMDB LEAK finding per module rather than skipping the
 // audit outright: a require whose exact required version is already fully
-// pinned in moduleDir's own go.sum — both the module's content hash line
-// and its go.mod hash line (see goSumCoversModule) — cannot trigger a new
-// GOSUMDB query for that module on an ordinary subsequent build, under
+// pinned in moduleDir's own go.sum, OR in an active workspace's
+// go.work.sum (see filterGoSumCovered) — both the module's content hash
+// line and its go.mod hash line (see goSumCoversModule) — cannot trigger a
+// new GOSUMDB query for that module on an ordinary subsequent build, under
 // either the default -mod=readonly or an explicit -mod=mod, regardless of
 // GOPRIVATE/GONOSUMDB coverage. See filterGoSumCovered's own doc comment
-// for why go.sum (a file checked into the repo alongside go.mod, unlike the
-// local module cache) is a reliable source for this, not a guess the way
-// GOPROXY=off below is.
+// for why go.sum/go.work.sum (files checked into the repo alongside go.mod/
+// go.work, unlike the local module cache) are a reliable source for this,
+// not a guess the way GOPROXY=off below is.
 //
 // GOPROXY=off (or an "off"-first proxy chain) does NOT get the same
 // skip, even though an earlier version of this tool treated it exactly
@@ -759,15 +760,15 @@ func run(args []string, stdout, stderr *os.File) int {
 		// reached via GOVCS's independent, go-level gate on which VCS
 		// commands may run at all. filterGoSumCovered drops any
 		// module whose exact required version is already fully pinned in
-		// moduleDir's own go.sum: unlike every skip case above (which is
-		// all-or-nothing for the whole audit), both of these are
-		// per-module refinements — go.sum coverage and a GOVCS block are
-		// each a real, locally-checkable "cannot leak" source, distinct
-		// from the unreliable, machine-local-state guesses this package's
-		// own doc comment already rules out for GOPROXY=off. See each
-		// function's own doc comment for why it's safe to apply
-		// unconditionally here.
-		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs), requires, replaces, moduleDir), prefixes, splitPatterns(gonosumdb))
+		// moduleDir's own go.sum or an active workspace's go.work.sum:
+		// unlike every skip case above (which is all-or-nothing for the
+		// whole audit), both of these are per-module refinements — go.sum/
+		// go.work.sum coverage and a GOVCS block are each a real,
+		// locally-checkable "cannot leak" source, distinct from the
+		// unreliable, machine-local-state guesses this package's own doc
+		// comment already rules out for GOPROXY=off. See each function's
+		// own doc comment for why it's safe to apply unconditionally here.
+		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs), requires, replaces, moduleDir, gowork), prefixes, splitPatterns(gonosumdb))
 		// suppressInsteadOfSignals drops or narrows any resulting leak
 		// based on the single insteadOf rule that actually applies to it
 		// (git's own longest-match-wins precedence) — see its own doc
