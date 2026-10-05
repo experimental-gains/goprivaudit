@@ -450,16 +450,18 @@ func run(args []string, stdout, stderr *os.File) int {
 	vendorActive := vendorModeActive(goflags, parseGoVersion(data), vendorModulesTxt, gowork)
 	goflagsBad := goflagsMalformed(goflags) || goflagsInvalidModValue(goflags) || goflagsRejectedByGo(moduleDir, goflags) || goflagsModRejectedInWorkspace(goflags, gowork)
 
-	// GOPROXY is still read here purely so the long-documented -proxy flag
-	// keeps parsing for any existing caller that passes it explicitly; its
-	// value no longer changes the audit result — see this package's own
-	// doc comment for why GOPROXY=off is not a reliable "cannot leak"
-	// guarantee the way GOSUMDB=off and vendor mode (below) are.
+	// GOPROXY no longer changes the audit result on its own — see this
+	// package's own doc comment for why GOPROXY=off is not a reliable
+	// "cannot leak" guarantee the way GOSUMDB=off and vendor mode (below)
+	// are. It still feeds into one narrow, different place: see
+	// filterGovcsDisallowed/goproxyForcesDirect (govcs.go) for why a GOVCS
+	// block on direct git only suppresses a SUMDB LEAK finding when
+	// goproxy itself guarantees no earlier, real proxy entry could still
+	// resolve the module regardless of GOVCS.
 	goproxy := *proxyOverride
 	if !proxySet {
 		goproxy = goEnv(moduleDir, "GOPROXY")
 	}
-	_ = goproxy
 
 	govcs := *govcsOverride
 	if !govcsSet {
@@ -752,23 +754,29 @@ func run(args []string, stdout, stderr *os.File) int {
 		// GOPRIVATE/GONOSUMDB cover the module or not.
 	default:
 		// filterGovcsDisallowed drops any module GOVCS disallows fetching
-		// via a direct (non-proxy) git invocation: real go Fatals with
-		// "GOVCS disallows using git for ..." the instant it needs one,
-		// before ever computing a hash to send to the checksum database —
-		// see its own doc comment for why this is the same "cannot leak"
-		// shape as suppressInsteadOfSignals' GIT_ALLOW_PROTOCOL check, just
-		// reached via GOVCS's independent, go-level gate on which VCS
-		// commands may run at all. filterGoSumCovered drops any
-		// module whose exact required version is already fully pinned in
-		// moduleDir's own go.sum or an active workspace's go.work.sum:
-		// unlike every skip case above (which is all-or-nothing for the
-		// whole audit), both of these are per-module refinements — go.sum/
-		// go.work.sum coverage and a GOVCS block are each a real,
-		// locally-checkable "cannot leak" source, distinct from the
-		// unreliable, machine-local-state guesses this package's own doc
-		// comment already rules out for GOPROXY=off. See each function's
-		// own doc comment for why it's safe to apply unconditionally here.
-		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs), requires, replaces, moduleDir, gowork), prefixes, splitPatterns(gonosumdb))
+		// via a direct (non-proxy) git invocation, but ONLY when goproxy
+		// itself guarantees no earlier, real proxy entry could resolve the
+		// module regardless of GOVCS (see goproxyForcesDirect) — only then
+		// does real go actually Fatal with "GOVCS disallows using git for
+		// ..." before ever computing a hash to send to the checksum
+		// database, the same "cannot leak" shape as
+		// suppressInsteadOfSignals' GIT_ALLOW_PROTOCOL check, just reached
+		// via GOVCS's independent, go-level gate on which VCS commands may
+		// run at all. Whenever goproxy's chain still has a real proxy entry
+		// in it (the default, overwhelmingly common case), that fetch path
+		// is wholly unaffected by GOVCS and can still leak on its own — see
+		// filterGovcsDisallowed's own doc comment for a live-verified
+		// example. filterGoSumCovered drops any module whose exact required
+		// version is already fully pinned in moduleDir's own go.sum or an
+		// active workspace's go.work.sum: unlike every skip case above
+		// (which is all-or-nothing for the whole audit), both of these are
+		// per-module refinements — go.sum/go.work.sum coverage and a
+		// goproxy-confirmed GOVCS block are each a real, locally-checkable
+		// "cannot leak" source, distinct from the unreliable, machine-local-
+		// state guesses this package's own doc comment already rules out
+		// for GOPROXY=off. See each function's own doc comment for why it's
+		// safe to apply unconditionally here.
+		r = audit(filterGoSumCovered(filterGovcsDisallowed(modules, goprivate, govcs, goproxy), requires, replaces, moduleDir, gowork), prefixes, splitPatterns(gonosumdb))
 		// suppressInsteadOfSignals drops or narrows any resulting leak
 		// based on the single insteadOf rule that actually applies to it
 		// (git's own longest-match-wins precedence) — see its own doc

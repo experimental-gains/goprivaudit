@@ -310,14 +310,18 @@ require example.com/myorg/sub/repo v1.0.0
 // access for a host (here narrowly, "github.com:off" — the same effect a
 // blanket "*:off" has, scoped to prove pattern matching, not just the
 // wildcard case) specifically so every fetch is forced through a trusted
-// proxy instead. Verified live (go1.24.4): `GOVCS='*:off' go mod download`
-// against a module authenticated exactly like TestRunFindsLeakViaCredentialHelper
-// Fatals immediately with "GOVCS disallows using git for public ..." —
-// before `go` ever attempts the credential-helper-authenticated fetch this
-// tool's SUMDB LEAK finding assumes happens, so no hash is ever computed to
-// send to the checksum database. Before this fix, goprivaudit ignored
-// GOVCS entirely and still reported a leak for a fetch real go refuses to
-// even attempt.
+// proxy instead — paired here with "-proxy direct", confirming goproxy
+// itself has no real proxy entry left to try either (see
+// goproxyForcesDirect), the condition this suppression actually requires
+// (see TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy for why
+// GOVCS alone is not enough). Verified live (go1.24.4): `GOVCS='*:off'
+// GOPROXY=direct go mod download` against a module authenticated exactly
+// like TestRunFindsLeakViaCredentialHelper Fatals immediately with "GOVCS
+// disallows using git for public ..." — before `go` ever attempts the
+// credential-helper-authenticated fetch this tool's SUMDB LEAK finding
+// assumes happens, so no hash is ever computed to send to the checksum
+// database. Before this fix, goprivaudit ignored GOVCS entirely and still
+// reported a leak for a fetch real go refuses to even attempt.
 func TestRunGovcsBlockingGitSuppressesLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -336,12 +340,61 @@ require github.com/myorg/internal-tool v0.0.0-20230101000000-abcdef123456
 		"-private", "",
 		"-nosumdb", "",
 		"-govcs", "github.com:off",
+		"-proxy", "direct",
 	})
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
 	}
 	if strings.Contains(stdout, "SUMDB LEAK") {
 		t.Errorf("stdout should report no leak when GOVCS disallows git for this host: %s", stdout)
+	}
+}
+
+// TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy is
+// TestRunGovcsBlockingGitSuppressesLeak's companion, proving the fix for
+// the bug that suppression's earlier shape had: a GOVCS block on direct
+// git fetch does NOT, on its own, mean the module can never leak — it
+// only does when GOPROXY also has no real proxy entry left to try (see
+// goproxyForcesDirect). With GOPROXY left at its real default
+// ("https://proxy.golang.org,direct", spelled out explicitly here rather
+// than relied on ambient, to keep the test hermetic), the module is
+// resolved through that real proxy entry long before "direct" (and thus
+// GOVCS) would ever be reached — live-verified (2026-10-05, go1.24.4)
+// against the real, public github.com/sirupsen/logrus module: `go mod
+// download -x` with this exact GOVCS entry and an org-scoped insteadOf
+// rewrite for https://github.com/sirupsen/ never attempts a direct git
+// fetch at all (proxy.golang.org already serves it) and still sends a
+// genuine `GET https://sum.golang.org/lookup/github.com/sirupsen/logrus@v1.9.3`
+// (200 OK) — a real leak GOVCS did nothing to prevent. Before this fix,
+// filterGovcsDisallowed ignored GOPROXY entirely and silently dropped
+// this exact module from the SUMDB LEAK audit regardless — a false
+// negative on a real, uncovered private-auth signal, for the default,
+// overwhelmingly common GOPROXY shape.
+func TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy(t *testing.T) {
+	dir := t.TempDir()
+	gomod := writeFile(t, dir, "go.mod", `module example.com/app
+
+require github.com/sirupsen/logrus v1.9.3
+`)
+	writeFile(t, dir, ".git/config", `[url "git@github.com:sirupsen/"]
+	insteadOf = https://github.com/sirupsen/
+`)
+
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("XDG_CONFIG_HOME", "")
+
+	stdout, _, code := captureRun(t, []string{
+		"-gomod", gomod,
+		"-private", "",
+		"-nosumdb", "",
+		"-govcs", "github.com/sirupsen/logrus:off",
+		"-proxy", "https://proxy.golang.org,direct",
+	})
+	if code != 1 {
+		t.Errorf("exit code = %d, want 1 (a real proxy entry precedes direct, so GOVCS never gets a chance to block the fetch); stdout=%s", code, stdout)
+	}
+	if !strings.Contains(stdout, "SUMDB LEAK: github.com/sirupsen/logrus") {
+		t.Errorf("stdout missing expected leak finding: %s", stdout)
 	}
 }
 
@@ -427,7 +480,10 @@ require github.com/googleapis/gax-go/v2 v2.12.0
 // finding — this is the shape real go's checkGOVCS actually matches
 // against, live-verified the identical ":off" pattern here does make real
 // `go mod download` Fatal with "GOVCS disallows using git" before any
-// network access.
+// network access. Paired with "-proxy direct" so goproxyForcesDirect
+// confirms there's no real proxy entry for GOVCS's block to be bypassed
+// by — see TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy for why
+// that condition, not GOVCS alone, is what actually matters.
 func TestRunGovcsPatternAtRepoRootSuppressesLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -446,6 +502,7 @@ require github.com/googleapis/gax-go/v2 v2.12.0
 		"-private", "",
 		"-nosumdb", "",
 		"-govcs", "github.com/googleapis/gax-go:off",
+		"-proxy", "direct",
 	})
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
@@ -508,7 +565,9 @@ require example.com/foo/bar.git/sub v1.0.0
 // correctly suppresses the finding — live-verified the identical ":off"
 // pattern here does make real `go mod download` Fatal with "GOVCS
 // disallows using git for public example.com/foo/bar.git" before any
-// network access.
+// network access. Paired with "-proxy direct" so goproxyForcesDirect
+// confirms there's no real proxy entry for GOVCS's block to be bypassed
+// by — see TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy.
 func TestRunGovcsPatternAtGeneralVCSSuffixRootSuppressesLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -527,6 +586,7 @@ require example.com/foo/bar.git/sub v1.0.0
 		"-private", "",
 		"-nosumdb", "",
 		"-govcs", "example.com/foo/bar.git:off",
+		"-proxy", "direct",
 	})
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
@@ -586,7 +646,10 @@ require hub.jazz.net/git/abc123/myproject/subpkg v0.0.0-20200101000000-000000000
 // VCS repo root (no extra subdirectory segment) still correctly suppresses
 // the finding — live-verified the identical ":off" pattern here does make
 // real `go mod download` Fatal with "GOVCS disallows using git for public
-// hub.jazz.net/git/abc123/myproject" before any network access.
+// hub.jazz.net/git/abc123/myproject" before any network access. Paired
+// with "-proxy direct" so goproxyForcesDirect confirms there's no real
+// proxy entry for GOVCS's block to be bypassed by — see
+// TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy.
 func TestRunGovcsPatternAtHubJazzNetRepoRootSuppressesLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -605,6 +668,7 @@ require hub.jazz.net/git/abc123/myproject/subpkg v0.0.0-20200101000000-000000000
 		"-private", "",
 		"-nosumdb", "",
 		"-govcs", "hub.jazz.net/git/abc123/myproject:off",
+		"-proxy", "direct",
 	})
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)
@@ -665,7 +729,10 @@ require git.openstack.org/openstack/nova/subpkg v0.0.0-20200101000000-0000000000
 // VCS repo root (no extra subdirectory segment) still correctly suppresses
 // the finding — live-verified the identical ":off" pattern here does make
 // real `go mod download` Fatal with "GOVCS disallows using git for public
-// git.openstack.org/openstack/nova" before any network access.
+// git.openstack.org/openstack/nova" before any network access. Paired
+// with "-proxy direct" so goproxyForcesDirect confirms there's no real
+// proxy entry for GOVCS's block to be bypassed by — see
+// TestRunGovcsBlockingGitDoesNotSuppressLeakWithRealProxy.
 func TestRunGovcsPatternAtOpenstackRepoRootSuppressesLeak(t *testing.T) {
 	dir := t.TempDir()
 	gomod := writeFile(t, dir, "go.mod", `module example.com/app
@@ -684,6 +751,7 @@ require git.openstack.org/openstack/nova/subpkg v0.0.0-20200101000000-0000000000
 		"-private", "",
 		"-nosumdb", "",
 		"-govcs", "git.openstack.org/openstack/nova:off",
+		"-proxy", "direct",
 	})
 	if code != 0 {
 		t.Errorf("exit code = %d, want 0 (GOVCS-blocked fetch can never leak); stdout=%s", code, stdout)

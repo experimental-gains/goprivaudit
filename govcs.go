@@ -370,31 +370,114 @@ func govcsAllowsGit(modulePath, govcs, goprivate string) bool {
 	return true // unreachable: defaultGovcsRules always matches something
 }
 
+// goproxyForcesDirect reports whether goproxy's GOPROXY-chain value is
+// certain to reach a literal "direct" entry — i.e. a direct VCS fetch
+// (the one fetch path GOVCS gates, see govcsAllowsGit) is genuinely the
+// fetch real go would attempt for this module. Mirrors cmd/go/internal/
+// modfetch.proxyList's own walk (go1.24.4 source, proxy.go): entries are
+// comma/pipe-separated, and the walk stops the instant it reaches "off"
+// or "direct" — any entry encountered BEFORE that point which isn't one
+// of those two keywords is a real proxy URL `go` tries first, so this
+// function returns false (can't assume a direct fetch is ever attempted)
+// the moment it sees one, exactly like proxyList's own break conditions.
+// "off" alone (with no "direct" anywhere before it) also returns false,
+// deliberately NOT treated the same as "direct": "off" means NO fetch of
+// any kind is attempted at all, so a direct VCS fetch — and thus GOVCS
+// itself — is never even consulted; this tool still can't rule out the
+// module already sitting in the local module cache (which reaches the
+// sumdb query without consulting GOPROXY or GOVCS at all), the exact same
+// reason this package's own main.go doc comment already gives for not
+// treating GOPROXY=off as a reliable "cannot leak" guarantee elsewhere.
+//
+// This exists because govcsAllowsGit's "GOVCS blocks git, so this module
+// can never leak" reasoning is only true when a direct VCS fetch is the
+// ONLY possible fetch path for the module — NOT whenever GOVCS merely
+// disallows git for it. Live-verified (2026-10-05, go1.24.4): a fresh
+// GOPATH/module cache, go.mod requiring the real public module
+// github.com/sirupsen/logrus@v1.9.3 (not yet in go.sum or the cache), an
+// org-scoped git insteadOf rewrite for https://github.com/sirupsen/ (the
+// same shape TestRunFindsLeak already uses as an ordinary private-auth
+// signal), GOVCS="github.com/sirupsen/logrus:off" (blocking a *direct* git
+// fetch of exactly this module), GOPROXY left at its real default
+// ("https://proxy.golang.org,direct"), GOSUMDB at its default, GOPRIVATE/
+// GONOSUMDB not covering the module: `go mod download -x` never attempts
+// a direct git fetch at all — proxy.golang.org already serves the module,
+// so GOVCS's block is never even reached — and still sends a genuine `GET
+// https://sum.golang.org/lookup/github.com/sirupsen/logrus@v1.9.3` (200
+// OK), a real sumdb leak. The "GOVCS disallows using git" Fatal this
+// tool's existing suppression is modeled on only actually happens when
+// the proxy chain has no real entry left to try, i.e. GOPROXY itself
+// resolves to nothing but "off"/"direct" — confirmed by rerunning the
+// identical setup with GOPROXY="direct": that one Fatals immediately with
+// "GOVCS disallows using git for public github.com/sirupsen/logrus",
+// zero network access, exactly as filterGovcsDisallowed already assumed
+// for every GOPROXY value. Before this fix, filterGovcsDisallowed ignored
+// GOPROXY entirely and suppressed the finding in both cases alike — a
+// false negative on a real, uncovered private-auth signal for the
+// (default, overwhelmingly common) case where GOPROXY still has a real
+// proxy entry in its chain.
+func goproxyForcesDirect(goproxy string) bool {
+	for _, tok := range strings.FieldsFunc(goproxy, func(r rune) bool { return r == ',' || r == '|' }) {
+		tok = strings.TrimSpace(tok)
+		switch tok {
+		case "":
+			continue
+		case "direct":
+			return true
+		case "off":
+			// Per proxyList's own walk, "off" terminates the chain just
+			// like "direct" does -- but unlike "direct", it means NO
+			// fetch of any kind (proxy OR direct) is even attempted, so a
+			// direct VCS fetch is never reached either: GOVCS is never
+			// consulted at all. Reported as false (not direct-forced) for
+			// the same reason this package's own main.go doc comment
+			// already gives for not treating GOPROXY=off as a reliable
+			// "cannot leak" guarantee elsewhere: this tool can't verify
+			// the module isn't already sitting in the local module cache
+			// (which would make `go` reach checkMod/the sumdb query
+			// without ever consulting GOPROXY or GOVCS at all). Treating
+			// "off" as license to suppress a finding here would repeat
+			// the exact mistake already corrected for the top-level skip.
+			return false
+		default:
+			return false // a real proxy URL precedes "direct": GOVCS's block may never be reached
+		}
+	}
+	return false // no "direct" reached at all: never direct-only (and GOVCS is never even consulted)
+}
+
 // filterGovcsDisallowed drops any module GOVCS disallows fetching via a
-// direct git invocation — see govcsAllowsGit. Every private-auth signal
-// this tool recognizes (a git insteadOf rewrite, a URL-scoped credential
+// direct git invocation — see govcsAllowsGit — but ONLY when goproxy
+// guarantees a direct VCS fetch is the sole way `go` could ever reach the
+// module at all (see goproxyForcesDirect). Every private-auth signal this
+// tool recognizes (a git insteadOf rewrite, a URL-scoped credential
 // helper, an extraHeader, or a netrc entry) only ever authenticates a
-// direct `git` fetch; none of them do anything for a module served through
-// a GOPROXY module proxy instead, which `go help vcs` confirms is "always
-// permitted" regardless of GOVCS ("When downloading modules from a proxy,
-// 'go get' uses the proxy protocol instead"). So a module GOVCS blocks
-// git for can never reach the one fetch path any of this tool's signals
-// apply to — real go Fatals with "GOVCS disallows using git for ..." the
-// moment it would otherwise attempt that fetch, before ever computing a
-// hash to send to the checksum database. This is a real, documented
-// hardening pattern (`go help vcs` itself recommends GOVCS=*:off-style
-// restrictions "to balance the functionality and security concerns" of
-// running arbitrary VCS commands against untrusted servers), not a
-// contrived one — e.g. GOVCS=*:off forcing every fetch through a trusted
-// proxy, left in place alongside a leftover insteadOf rewrite from before
-// that hardening was adopted.
+// direct `git` fetch; none of them do anything for a module served
+// through a GOPROXY module proxy instead, which `go help vcs` confirms is
+// "always permitted" regardless of GOVCS ("When downloading modules from
+// a proxy, 'go get' uses the proxy protocol instead"). But that proxy
+// fetch path is exactly what the DEFAULT (and overwhelmingly common)
+// GOPROXY chain ("https://proxy.golang.org,direct") tries FIRST, before
+// "direct" is ever reached — so a module GOVCS blocks git for can still
+// very much leak via that unaffected proxy fetch, independent of GOVCS
+// entirely, whenever the chain's earlier, real proxy entry can resolve it
+// (see goproxyForcesDirect's own doc comment for a live-verified example:
+// a real, public module, a routine insteadOf rewrite, and a GOVCS block
+// naming it exactly — the module downloads via proxy.golang.org without
+// GOVCS ever being consulted, and still leaks to sum.golang.org). Only
+// when goproxy itself guarantees no such earlier proxy entry exists (every
+// entry is the reserved keyword "off" or "direct") is a direct VCS fetch
+// truly the only path left, making real go Fatal with "GOVCS disallows
+// using git for ..." before ever computing a hash to send to the checksum
+// database — the scenario this suppression was originally, correctly
+// modeled on (see TestRunGovcsBlockingGitSuppressesLeak).
 //
 // Like filterGoSumCovered, this narrows the modules considered for a
 // SUMDB LEAK finding rather than skipping the whole audit: a GOVCS
 // restriction this narrow (one host/org, not every module) leaves every
 // other require's own sumdb-leak exposure untouched.
-func filterGovcsDisallowed(modules []string, goprivate, govcs string) []string {
-	if govcs == "" {
+func filterGovcsDisallowed(modules []string, goprivate, govcs, goproxy string) []string {
+	if govcs == "" || !goproxyForcesDirect(goproxy) {
 		return modules
 	}
 	out := make([]string, 0, len(modules))

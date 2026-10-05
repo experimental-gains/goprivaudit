@@ -294,17 +294,61 @@ func TestFilterGovcsDisallowed(t *testing.T) {
 	modules := []string{"github.com/myorg/internal-tool", "example.com/other/mod"}
 
 	t.Run("empty GOVCS keeps everything", func(t *testing.T) {
-		got := filterGovcsDisallowed(modules, "", "")
+		got := filterGovcsDisallowed(modules, "", "", "direct")
 		if len(got) != 2 {
 			t.Errorf("got %v, want both modules kept", got)
 		}
 	})
 
-	t.Run("blocks only the matching module", func(t *testing.T) {
-		got := filterGovcsDisallowed(modules, "", "github.com:off")
+	t.Run("blocks only the matching module when goproxy forces direct", func(t *testing.T) {
+		got := filterGovcsDisallowed(modules, "", "github.com:off", "direct")
 		want := []string{"example.com/other/mod"}
 		if len(got) != 1 || got[0] != want[0] {
 			t.Errorf("got %v, want %v", got, want)
 		}
 	})
+
+	t.Run("keeps everything when goproxy has a real proxy entry, even if GOVCS blocks git", func(t *testing.T) {
+		// See goproxyForcesDirect's own doc comment for the live
+		// verification this mirrors: with a real proxy entry ahead of
+		// "direct" in the chain, GOVCS blocking a direct git fetch never
+		// gets a chance to matter — the proxy fetch (unaffected by GOVCS)
+		// still happens, and the module can still leak to GOSUMDB.
+		got := filterGovcsDisallowed(modules, "", "github.com:off", "https://proxy.golang.org,direct")
+		if len(got) != 2 {
+			t.Errorf("got %v, want both modules kept (a real proxy entry precedes direct)", got)
+		}
+	})
+
+	t.Run("keeps everything when goproxy is off", func(t *testing.T) {
+		// GOPROXY=off alone (no "direct" anywhere in the chain) means
+		// there is no fallback to a direct VCS fetch at all, so GOVCS is
+		// never even consulted for this module in real go either.
+		got := filterGovcsDisallowed(modules, "", "github.com:off", "off")
+		if len(got) != 2 {
+			t.Errorf("got %v, want both modules kept (GOPROXY=off has no direct fallback)", got)
+		}
+	})
+}
+
+func TestGoproxyForcesDirect(t *testing.T) {
+	cases := []struct {
+		goproxy string
+		want    bool
+	}{
+		{"direct", true},
+		{"off", false}, // no fallback to direct at all: GOVCS is never even consulted
+		{" direct ", true},
+		{"https://proxy.golang.org,direct", false},
+		{"https://proxy.golang.org", false},
+		{"https://proxy.golang.org|direct", false},
+		{"off,direct", false},                     // real go breaks at "off"; "direct" is dead code, never reached
+		{"direct,https://proxy.golang.org", true}, // real go stops at "direct", never reaches what follows
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := goproxyForcesDirect(c.goproxy); got != c.want {
+			t.Errorf("goproxyForcesDirect(%q) = %v, want %v", c.goproxy, got, c.want)
+		}
+	}
 }

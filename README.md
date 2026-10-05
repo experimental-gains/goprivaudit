@@ -94,17 +94,38 @@ the workspace root, always paired with an explicit `-mod=vendor`), which
 `goprivaudit` still honors as an explicit override either way.
 
 A module is also excluded from the SUMDB LEAK check specifically (not the
-whole audit) when `GOVCS` disallows a direct `git` fetch for it. Per `go
-help vcs`, a module proxy fetch is "always permitted" regardless of GOVCS —
-only a *direct* VCS fetch is restricted — so a module GOVCS blocks `git`
-for can never reach the one fetch path an insteadOf rewrite/credential
-helper/extraHeader/netrc entry authenticates in the first place. This is a
-real, documented hardening pattern (`go help vcs` itself recommends
-`GOVCS=*:off`-style restrictions to force every fetch through a trusted
-proxy instead of running arbitrary VCS commands against untrusted
-servers), not a contrived one: a leftover insteadOf rewrite from before
-that hardening was adopted no longer indicates a live leak once GOVCS
-blocks the fetch it was written for.
+whole audit) when `GOVCS` disallows a direct `git` fetch for it **and**
+`GOPROXY` guarantees no earlier, real proxy entry could resolve the module
+regardless of GOVCS (every entry in it is the reserved keyword `off` or
+`direct` — see `goproxyForcesDirect`). Per `go help vcs`, a module proxy
+fetch is "always permitted" regardless of GOVCS — only a *direct* VCS
+fetch is restricted — so a module GOVCS blocks `git` for can never reach
+the one fetch path an insteadOf rewrite/credential helper/extraHeader/
+netrc entry authenticates in the first place, *if* a direct fetch is the
+only way `go` would ever attempt to reach it. This is a real, documented
+hardening pattern (`go help vcs` itself recommends `GOVCS=*:off`-style
+restrictions to force every fetch through a trusted proxy instead of
+running arbitrary VCS commands against untrusted servers), not a
+contrived one: a leftover insteadOf rewrite from before that hardening was
+adopted no longer indicates a live leak once GOVCS blocks the fetch it was
+written for — *when* `GOPROXY` also has no real proxy entry left to try.
+
+The `GOPROXY` condition matters because the default (and overwhelmingly
+common) `GOPROXY` chain — `https://proxy.golang.org,direct` — tries a real
+proxy server *first*, before "direct" is ever reached, and GOVCS has no
+say over that proxy fetch at all. Live-verified (2026-10-05, go1.24.4): a
+go.mod requiring the real public module `github.com/sirupsen/logrus` (not
+yet cached or in `go.sum`), an ordinary git `insteadOf` rewrite for
+`https://github.com/`, `GOVCS="github.com/sirupsen/logrus:off"`, and
+`GOPROXY` left at its real default — `go mod download -x` never attempts
+a direct git fetch at all (proxy.golang.org already serves the module, so
+GOVCS's block is never even reached) and still sends a genuine `GET
+https://sum.golang.org/lookup/github.com/sirupsen/logrus@v1.9.3` (200 OK):
+a real leak GOVCS did nothing to prevent. Rerunning the identical setup
+with `GOPROXY=direct` instead does Fatal immediately with "GOVCS
+disallows using git for public github.com/sirupsen/logrus", zero network
+access — the scenario this exclusion was originally, correctly modeled
+on, and still correctly handles.
 
 The whole audit is also skipped when a go.mod's `ignore` directive is
 newer than the toolchain that would actually process it. `ignore` (`go
